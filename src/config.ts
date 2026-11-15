@@ -1,4 +1,4 @@
-import { SubmittalStatusCode, SubmittalStatusMeta, IssueType, IssuePriority } from './types';
+import { SubmittalStatusCode, SubmittalStatusMeta, IssueType, IssuePriority, WorkDiscipline } from './types';
 
 /**
  * ============================================================================
@@ -128,5 +128,37 @@ export const ISSUE_PRIORITY_CONFIG: Record<IssuePriority, { labelAr: string; bad
   urgent: {
     labelAr: 'عاجل (Urgent)',
     badgeClass: 'bg-red-100 text-red-700 border-red-300 dark:bg-red-950/90 dark:text-red-300 dark:border-red-800 animate-pulse font-bold'
+  }
+};
+
+// 6. EXECUTED WORKS DISCIPLINES (تصنيفات الأعمال المنفذة بالموقع)
+export const WORK_DISCIPLINE_CONFIG: Record<WorkDiscipline, { labelAr: string; badgeClass: string }> = {
+  civil_structural: {
+    labelAr: 'أعمال مدنية وإنشائية',
+    badgeClass: 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-800'
+  },
+  architectural: {
+    labelAr: 'أعمال معمارية ومباني',
+    badgeClass: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/70 dark:text-blue-300 dark:border-blue-800'
+  },
+  electrical: {
+    labelAr: 'أعمال كهرباء وتيار خفيف',
+    badgeClass: 'bg-yellow-100 text-yellow-800 border-yellow-300 dark:bg-yellow-950/70 dark:text-yellow-300 dark:border-yellow-800'
+  },
+  mechanical: {
+    labelAr: 'ميكانيكا وسباكة وتكييف (MEP)',
+    badgeClass: 'bg-cyan-100 text-cyan-800 border-cyan-300 dark:bg-cyan-950/70 dark:text-cyan-300 dark:border-cyan-800'
+  },
+  finishing: {
+    labelAr: 'تشطيبات ودهانات وأرضيات',
+    badgeClass: 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/70 dark:text-purple-300 dark:border-purple-800'
+  },
+  infrastructure: {
+    labelAr: 'بنية تحتية وموقع عام',
+    badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800'
+  },
+  other: {
+    labelAr: 'أعمال أخرى',
+    badgeClass: 'bg-slate-100 text-slate-800 border-slate-300 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700'
   }
 };

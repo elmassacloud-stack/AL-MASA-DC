@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
-import { DailyReport, IssueReport } from '../types';
-import { SUBMITTAL_STATUS_CONFIG } from '../config';
+import { DailyReport, IssueReport, ExecutedWork } from '../types';
+import { SUBMITTAL_STATUS_CONFIG, WORK_DISCIPLINE_CONFIG } from '../config';
 
 /**
  * Export a single Daily Report to an Excel (.xlsx) workbook matching the original Excel form
@@ -165,4 +165,71 @@ function downloadCSV(rows: string[][], filename: string) {
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+/**
+ * Export Executed Works on Site log to an Excel (.xlsx) workbook
+ */
+export function exportExecutedWorksToExcel(works: ExecutedWork[]) {
+  const wb = XLSX.utils.book_new();
+
+  const rows: (string | number)[][] = [
+    ['سجل الأعمال المنفذة بالموقع - إدارة مراقبة الوثائق (Document Control)'],
+    [''],
+    [
+      'م',
+      'المشروع / الموقع',
+      'التاريخ',
+      'التخصص',
+      'وصف العمل المنفذ',
+      'النطاق / المنطقة',
+      'الكمية',
+      'الوحدة',
+      'نسبة الإنجاز %',
+      'رقم التقديم المرتبط',
+      'المهندس المسجل',
+      'حالة الاعتماد',
+      'ملاحظات'
+    ]
+  ];
+
+  works.forEach((w, idx) => {
+    const discLabel = WORK_DISCIPLINE_CONFIG[w.discipline]?.labelAr || w.discipline;
+    rows.push([
+      idx + 1,
+      w.projectName,
+      w.workDate,
+      discLabel,
+      w.workDescription,
+      w.locationArea || '-',
+      w.quantity !== undefined ? w.quantity : '-',
+      w.unit || '-',
+      w.completionPercent,
+      w.relatedSubmittalNumber || '-',
+      w.authorName,
+      w.reviewStatus === 'approved' ? 'معتمد من DC' : 'قيد المراجعة',
+      [w.notes, w.adminNote ? `DC: ${w.adminNote}` : ''].filter(Boolean).join(' | ') || '-'
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = [
+    { wch: 5 },
+    { wch: 24 },
+    { wch: 12 },
+    { wch: 22 },
+    { wch: 42 },
+    { wch: 22 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 22 },
+    { wch: 18 },
+    { wch: 14 },
+    { wch: 30 }
+  ];
+
+  XLSX.utils.book_append_sheet(wb, ws, 'الأعمال المنفذة بالموقع');
+  const filename = `الأعمال_المنفذة_بالموقع_${new Date().toISOString().split('T')[0]}.xlsx`;
+  XLSX.writeFile(wb, filename);
 }

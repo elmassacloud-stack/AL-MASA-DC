@@ -6,6 +6,7 @@ import { LoginScreen } from './components/common/LoginScreen';
 import { NotificationsDrawer } from './components/common/NotificationsDrawer';
 import { SettingsModal } from './components/common/SettingsModal';
 import { ShareAppModal } from './components/common/ShareAppModal';
+import { ExecutedWorksView } from './components/common/ExecutedWorksView';
 
 // Site User Views
 import { DailyReportForm } from './components/site/DailyReportForm';
@@ -26,7 +27,7 @@ import { ExportCenterView } from './components/admin/ExportCenterView';
 
 import { dataService } from './services/dataService';
 import { subscribeToAuthState, signOutUser } from './services/firebase';
-import { canAccessProject } from './utils/accessControl';
+import { canAccessProject, canAccessExecutedWorksTab } from './utils/accessControl';
 import {
   UserProfile,
   Project,
@@ -34,7 +35,8 @@ import {
   IssueReport,
   ProjectTask,
   Announcement,
-  AppNotification
+  AppNotification,
+  ExecutedWork
 } from './types';
 
 export default function App() {
@@ -60,6 +62,9 @@ export default function App() {
   const [tasks, setTasks] = useState<ProjectTask[]>(() => dataService.getTasks());
   const [announcements, setAnnouncements] = useState<Announcement[]>(() =>
     dataService.getAnnouncements()
+  );
+  const [executedWorks, setExecutedWorks] = useState<ExecutedWork[]>(() =>
+    dataService.getExecutedWorks()
   );
   const [users, setUsers] = useState<UserProfile[]>(() => dataService.getUsers());
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
@@ -142,6 +147,7 @@ export default function App() {
       setIssues(dataService.getIssues());
       setTasks(dataService.getTasks());
       setAnnouncements(dataService.getAnnouncements());
+      setExecutedWorks(dataService.getExecutedWorks());
       setUsers(dataService.getUsers());
       setNotifications(dataService.getNotifications(activeUser));
       setStalledDays(dataService.getStalledDaysThreshold());
@@ -157,6 +163,13 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  // Redirect away from Executed Works tab immediately if permission is revoked
+  useEffect(() => {
+    if (currentUser && !canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
+      setActiveTab('daily-report');
+    }
+  }, [currentUser, activeTab]);
 
   const handleLogout = async () => {
     setIsNotificationsOpen(false);
@@ -222,6 +235,8 @@ export default function App() {
     (t) => t.status !== 'done' && canAccessProject(currentUser, t.projectId)
   ).length;
 
+  const canAccessExecutedWorks = canAccessExecutedWorksTab(currentUser);
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
       {/* Top Application Header */}
@@ -245,6 +260,7 @@ export default function App() {
         onTabChange={(tabId) => setActiveTab(tabId)}
         urgentIssuesCount={urgentIssuesCount}
         openTasksCount={userOpenTasksCount}
+        canAccessExecutedWorks={canAccessExecutedWorks}
       />
 
       {/* Main Content Area */}
@@ -257,6 +273,14 @@ export default function App() {
                 currentUser={currentUser}
                 projects={projects}
                 onReportSubmitted={() => setActiveTab('my-submissions')}
+              />
+            )}
+
+            {activeTab === 'executed-works' && canAccessExecutedWorks && (
+              <ExecutedWorksView
+                currentUser={currentUser}
+                projects={projects}
+                executedWorks={executedWorks}
               />
             )}
 
@@ -300,6 +324,15 @@ export default function App() {
               <AdminReportsView
                 reports={reports}
                 projects={projects}
+                users={users}
+              />
+            )}
+
+            {activeTab === 'executed-works' && (
+              <ExecutedWorksView
+                currentUser={currentUser}
+                projects={projects}
+                executedWorks={executedWorks}
                 users={users}
               />
             )}

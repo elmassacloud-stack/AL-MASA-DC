@@ -20,7 +20,8 @@ import {
   Announcement,
   UserProfile,
   UserRole,
-  AppNotification
+  AppNotification,
+  ExecutedWork
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -29,6 +30,7 @@ import {
   SEED_TASKS,
   SEED_ANNOUNCEMENTS,
   SEED_USERS,
+  SEED_EXECUTED_WORKS,
   getTodayDateStr
 } from '../seedData';
 import { DEFAULT_DAILY_REPORT_CUTOFF_HOUR, isSuperAdminEmail, SUPER_ADMIN_EMAIL } from '../config';
@@ -39,7 +41,7 @@ import {
   stripUndefined,
   createFirebaseUserByAdmin
 } from './firebase';
-import { hasAllProjectsAccess } from '../utils/accessControl';
+import { hasAllProjectsAccess, canAccessExecutedWorksTab } from '../utils/accessControl';
 
 const STORAGE_KEYS = {
   PROJECTS: 'dc_projects_v2',
@@ -47,6 +49,7 @@ const STORAGE_KEYS = {
   ISSUES: 'dc_issues_v2',
   TASKS: 'dc_tasks_v2',
   ANNOUNCEMENTS: 'dc_announcements_v2',
+  EXECUTED_WORKS: 'dc_executed_works_v2',
   USERS: 'dc_users_v2',
   NOTIFICATIONS: 'dc_notifications_v2',
   CURRENT_USER: 'dc_active_user_v2',
@@ -62,6 +65,7 @@ export interface CreateUserPayload {
   password: string;
   role: UserRole;
   allProjects: boolean;
+  canAccessExecutedWorks: boolean;
   assignedProjects: string[];
   phone?: string;
 }
@@ -90,6 +94,9 @@ class DataService {
     }
     if (!localStorage.getItem(STORAGE_KEYS.ANNOUNCEMENTS)) {
       localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(SEED_ANNOUNCEMENTS));
+    }
+    if (!localStorage.getItem(STORAGE_KEYS.EXECUTED_WORKS)) {
+      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(SEED_EXECUTED_WORKS));
     }
     if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
       localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(SEED_USERS));
@@ -226,6 +233,9 @@ class DataService {
         for (const a of SEED_ANNOUNCEMENTS) {
           await setDoc(doc(db, 'announcements', a.id), stripUndefined(a));
         }
+        for (const w of SEED_EXECUTED_WORKS) {
+          await setDoc(doc(db, 'executedWorks', w.id), stripUndefined(w));
+        }
       }
     } catch (error) {
       console.warn('Firestore initial seed check skipped/failed:', error);
@@ -233,7 +243,8 @@ class DataService {
   }
 
   public startRealtimeSync(user: UserProfile) {
-    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : (user.assignedProjects || []).join(',')}`;
+    const canExecWorks = canAccessExecutedWorksTab(user);
+    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : (user.assignedProjects || []).join(',')}:${canExecWorks ? '1' : '0'}`;
     if (this.currentSyncSignature === signature && this.firestoreUnsubs.length > 0) {
       return;
     }
@@ -279,7 +290,8 @@ class DataService {
           }
           this.upsertLocalUser(updatedProfile);
           localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedProfile));
-          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : (updatedProfile.assignedProjects || []).join(',')}`;
+          const nextCanExec = canAccessExecutedWorksTab(updatedProfile);
+          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : (updatedProfile.assignedProjects || []).join(',')}:${nextCanExec ? '1' : '0'}`;
           if (nextSig !== this.currentSyncSignature) {
             this.startRealtimeSync(updatedProfile);
           } else {
@@ -437,6 +449,43 @@ class DataService {
         (error) => handleFirestoreError(error, OperationType.LIST, 'announcements')
       )
     );
+
+    // 7. Executed Works sync (only if user has permission to access Executed Works tab)
+    if (!canExecWorks) {
+      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
+      this.notify();
+    } else if (allProjAccess) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, 'executedWorks'),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as ExecutedWork)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+            this.notify();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'executedWorks')
+        )
+      );
+    } else if (assigned.length > 0) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'executedWorks'), where('projectId', 'in', assigned)),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => d.data() as ExecutedWork)
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+            this.notify();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'executedWorks')
+        )
+      );
+    } else {
+      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
+      this.notify();
+    }
   }
 
   public stopRealtimeSync() {
@@ -567,6 +616,162 @@ class DataService {
       return u;
     });
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
+
+    this.notify();
+    return true;
+  }
+
+  // --- Executed Works (الأعمال المنفذة بالموقع) ---
+  public getExecutedWorks(): ExecutedWork[] {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.EXECUTED_WORKS);
+      return data ? JSON.parse(data) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  public async addExecutedWork(
+    work: Omit<ExecutedWork, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<ExecutedWork> {
+    const list = this.getExecutedWorks();
+    const now = new Date().toISOString();
+    const newWork: ExecutedWork = stripUndefined({
+      id: 'exec-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5),
+      projectId: work.projectId,
+      projectName: work.projectName.trim().slice(0, 200),
+      workDate: work.workDate.trim().slice(0, 20),
+      workDescription: work.workDescription.trim().slice(0, 1000),
+      discipline: work.discipline,
+      locationArea: work.locationArea?.trim().slice(0, 200) || undefined,
+      quantity:
+        typeof work.quantity === 'number' && Number.isFinite(work.quantity) && work.quantity >= 0
+          ? work.quantity
+          : undefined,
+      unit: work.unit?.trim().slice(0, 40) || undefined,
+      completionPercent: Math.max(0, Math.min(100, Math.round(work.completionPercent))),
+      relatedSubmittalNumber: work.relatedSubmittalNumber?.trim().slice(0, 120) || undefined,
+      notes: work.notes?.trim().slice(0, 2000) || undefined,
+      authorId: work.authorId,
+      authorName: work.authorName.trim().slice(0, 150),
+      reviewStatus: work.reviewStatus,
+      adminNote: work.adminNote?.trim().slice(0, 1000) || undefined,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    list.unshift(newWork);
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+
+    try {
+      await setDoc(doc(db, 'executedWorks', newWork.id), stripUndefined(newWork));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `executedWorks/${newWork.id}`);
+    }
+
+    this.addNotification({
+      title: `عمل منفذ جديد: ${newWork.projectName}`,
+      message: `سجّل ${newWork.authorName}: ${newWork.workDescription.slice(0, 80)} (${newWork.completionPercent}%)`,
+      type: 'work_logged',
+      linkTab: 'executed-works'
+    });
+
+    this.notify();
+    return newWork;
+  }
+
+  public async updateExecutedWork(
+    workId: string,
+    updates: Partial<
+      Pick<
+        ExecutedWork,
+        | 'workDate'
+        | 'workDescription'
+        | 'discipline'
+        | 'locationArea'
+        | 'quantity'
+        | 'unit'
+        | 'completionPercent'
+        | 'relatedSubmittalNumber'
+        | 'notes'
+        | 'reviewStatus'
+        | 'adminNote'
+      >
+    >
+  ): Promise<boolean> {
+    const list = this.getExecutedWorks();
+    const idx = list.findIndex((w) => w.id === workId);
+    if (idx === -1) return false;
+
+    const updatedAt = new Date().toISOString();
+    const merged: ExecutedWork = stripUndefined({
+      ...list[idx],
+      ...(updates.workDate !== undefined ? { workDate: updates.workDate.trim().slice(0, 20) } : {}),
+      ...(updates.workDescription !== undefined
+        ? { workDescription: updates.workDescription.trim().slice(0, 1000) }
+        : {}),
+      ...(updates.discipline !== undefined ? { discipline: updates.discipline } : {}),
+      ...(updates.locationArea !== undefined
+        ? { locationArea: updates.locationArea.trim().slice(0, 200) }
+        : {}),
+      ...(updates.quantity !== undefined ? { quantity: updates.quantity } : {}),
+      ...(updates.unit !== undefined ? { unit: updates.unit.trim().slice(0, 40) } : {}),
+      ...(updates.completionPercent !== undefined
+        ? { completionPercent: Math.max(0, Math.min(100, Math.round(updates.completionPercent))) }
+        : {}),
+      ...(updates.relatedSubmittalNumber !== undefined
+        ? { relatedSubmittalNumber: updates.relatedSubmittalNumber.trim().slice(0, 120) }
+        : {}),
+      ...(updates.notes !== undefined ? { notes: updates.notes.trim().slice(0, 2000) } : {}),
+      ...(updates.reviewStatus !== undefined ? { reviewStatus: updates.reviewStatus } : {}),
+      ...(updates.adminNote !== undefined
+        ? { adminNote: updates.adminNote.trim().slice(0, 1000) }
+        : {}),
+      updatedAt
+    });
+
+    list[idx] = merged;
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+
+    const patch = stripUndefined({
+      ...(updates.workDate !== undefined ? { workDate: merged.workDate } : {}),
+      ...(updates.workDescription !== undefined ? { workDescription: merged.workDescription } : {}),
+      ...(updates.discipline !== undefined ? { discipline: merged.discipline } : {}),
+      ...(updates.locationArea !== undefined ? { locationArea: merged.locationArea } : {}),
+      ...(updates.quantity !== undefined ? { quantity: merged.quantity } : {}),
+      ...(updates.unit !== undefined ? { unit: merged.unit } : {}),
+      ...(updates.completionPercent !== undefined ? { completionPercent: merged.completionPercent } : {}),
+      ...(updates.relatedSubmittalNumber !== undefined
+        ? { relatedSubmittalNumber: merged.relatedSubmittalNumber }
+        : {}),
+      ...(updates.notes !== undefined ? { notes: merged.notes } : {}),
+      ...(updates.reviewStatus !== undefined ? { reviewStatus: merged.reviewStatus } : {}),
+      ...(updates.adminNote !== undefined ? { adminNote: merged.adminNote } : {}),
+      updatedAt
+    });
+
+    try {
+      await updateDoc(doc(db, 'executedWorks', workId), patch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `executedWorks/${workId}`);
+    }
+
+    this.notify();
+    return true;
+  }
+
+  public async deleteExecutedWork(workId: string): Promise<boolean> {
+    const list = this.getExecutedWorks();
+    if (!list.some((w) => w.id === workId)) return false;
+
+    const remaining = list.filter((w) => w.id !== workId);
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(remaining));
+
+    try {
+      await deleteDoc(doc(db, 'executedWorks', workId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `executedWorks/${workId}`);
+    }
 
     this.notify();
     return true;
@@ -908,6 +1113,7 @@ class DataService {
       jobTitle: payload.jobTitle.trim(),
       role: isAdminUser ? 'admin' : 'site',
       allProjects: isAdminUser ? true : Boolean(payload.allProjects),
+      canAccessExecutedWorks: isAdminUser ? true : Boolean(payload.canAccessExecutedWorks),
       assignedProjects:
         isAdminUser || payload.allProjects
           ? this.getProjects().map((p) => p.id)
@@ -941,6 +1147,7 @@ class DataService {
       sanitizedUpdates.role = 'admin';
       sanitizedUpdates.status = 'active';
       sanitizedUpdates.allProjects = true;
+      sanitizedUpdates.canAccessExecutedWorks = true;
     }
 
     const updatedUser: UserProfile = stripUndefined({
@@ -1034,7 +1241,12 @@ class DataService {
 
       // Filter notifications for site users so admin-only missing/submitted alerts don't leak
       return list.filter((n) => {
-        if (n.type === 'missing_report' || n.type === 'report_submitted' || n.type === 'urgent_issue') {
+        if (
+          n.type === 'missing_report' ||
+          n.type === 'report_submitted' ||
+          n.type === 'urgent_issue' ||
+          n.type === 'work_logged'
+        ) {
           return false;
         }
         if (n.targetUserId && n.targetUserId !== activeUser.id) return false;
@@ -1113,6 +1325,7 @@ class DataService {
     localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(SEED_ISSUES));
     localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(SEED_TASKS));
     localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(SEED_ANNOUNCEMENTS));
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(SEED_EXECUTED_WORKS));
     localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
 
     for (const p of SEED_PROJECTS) {
@@ -1130,6 +1343,9 @@ class DataService {
     for (const a of SEED_ANNOUNCEMENTS) {
       await setDoc(doc(db, 'announcements', a.id), stripUndefined(a)).catch(() => undefined);
     }
+    for (const w of SEED_EXECUTED_WORKS) {
+      await setDoc(doc(db, 'executedWorks', w.id), stripUndefined(w)).catch(() => undefined);
+    }
 
     this.notify();
   }
@@ -1145,6 +1361,7 @@ class DataService {
       issues: this.getIssues(),
       tasks: this.getTasks(),
       announcements: this.getAnnouncements(),
+      executedWorks: this.getExecutedWorks(),
       users: this.getUsers(),
       notifications: this.getNotifications(),
       stalledDays: this.getStalledDaysThreshold(),
@@ -1162,6 +1379,7 @@ class DataService {
       if (Array.isArray(data.issues)) localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(data.issues));
       if (Array.isArray(data.tasks)) localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(data.tasks));
       if (Array.isArray(data.announcements)) localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(data.announcements));
+      if (Array.isArray(data.executedWorks)) localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(data.executedWorks));
       if (Array.isArray(data.users)) localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(data.users));
       if (Array.isArray(data.notifications)) localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(data.notifications));
       if (typeof data.stalledDays === 'number') localStorage.setItem(STORAGE_KEYS.STALLED_DAYS_LIMIT, String(data.stalledDays));

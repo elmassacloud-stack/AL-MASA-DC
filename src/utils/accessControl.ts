@@ -34,3 +34,12 @@ export function canAccessProject(user: UserProfile | null | undefined, projectId
   const assigned = Array.isArray(user.assignedProjects) ? user.assignedProjects : [];
   return assigned.includes(projectId);
 }
+
+/**
+ * Checks whether a user is allowed to access the "الأعمال المنفذة بالموقع" tab.
+ */
+export function canAccessExecutedWorksTab(user: UserProfile | null | undefined): boolean {
+  if (!user) return false;
+  if (user.role === 'admin' || isSuperAdminEmail(user.email)) return true;
+  return user.canAccessExecutedWorks !== false;
+}

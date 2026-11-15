@@ -118,9 +118,42 @@ export interface UserProfile {
   jobTitle?: string;
   role: UserRole;
   allProjects?: boolean;
+  canAccessExecutedWorks?: boolean;
   assignedProjects: string[]; // array of project IDs
   status: 'active' | 'disabled';
   phone?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WorkDiscipline =
+  | 'civil_structural'
+  | 'architectural'
+  | 'electrical'
+  | 'mechanical'
+  | 'finishing'
+  | 'infrastructure'
+  | 'other';
+
+export type ExecutedWorkReviewStatus = 'pending' | 'approved';
+
+export interface ExecutedWork {
+  id: string;
+  projectId: string;
+  projectName: string;
+  workDate: string; // YYYY-MM-DD
+  workDescription: string;
+  discipline: WorkDiscipline;
+  locationArea?: string;
+  quantity?: number;
+  unit?: string;
+  completionPercent: number; // 0..100
+  relatedSubmittalNumber?: string;
+  notes?: string;
+  authorId: string;
+  authorName: string;
+  reviewStatus: ExecutedWorkReviewStatus;
+  adminNote?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -138,7 +171,8 @@ export interface AppNotification {
     | 'report_submitted'
     | 'report_reviewed'
     | 'issue_status'
-    | 'task_done';
+    | 'task_done'
+    | 'work_logged';
   linkTab?: string;
   targetUserId?: string; // empty means admin or all
   isRead: boolean;

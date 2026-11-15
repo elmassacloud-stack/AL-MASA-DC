@@ -1,4 +1,4 @@
-import { Project, DailyReport, IssueReport, ProjectTask, Announcement, UserProfile } from './types';
+import { Project, DailyReport, IssueReport, ProjectTask, Announcement, UserProfile, ExecutedWork } from './types';
 
 export const SEED_PROJECTS: Project[] = [
   {
@@ -244,5 +244,63 @@ export const SEED_ANNOUNCEMENTS: Announcement[] = [
     authorName: 'أ/ أحمد المنصور (مدير DC)',
     readBy: ['user-site-ravel'],
     createdAt: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString()
+  }
+];
+
+export const SEED_EXECUTED_WORKS: ExecutedWork[] = [
+  {
+    id: 'exec-sample-01',
+    projectId: 'proj-ravel-3',
+    projectName: 'مستشفى رافيل 3',
+    workDate: getTodayDateStr(),
+    workDescription: 'صب خرسانة مسلحة لأعمدة الدور الثالث - قطاع ب حسب اللوحات المعتمدة',
+    discipline: 'civil_structural',
+    locationArea: 'المبنى الرئيسي - الدور الثالث (قطاع ب)',
+    quantity: 48,
+    unit: 'م³',
+    completionPercent: 100,
+    relatedSubmittalNumber: 'MAS_RAV_IR_STR_0056',
+    notes: 'تم أخذ عينات المكعبات الخرسانية بحضور مهندس الاستشاري.',
+    authorId: 'user-site-ravel',
+    authorName: 'م/ محمود حسن',
+    reviewStatus: 'approved',
+    adminNote: 'تمت المطابقة مع محضر الاستلام.',
+    createdAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
+  },
+  {
+    id: 'exec-sample-02',
+    projectId: 'proj-ravel-3',
+    projectName: 'مستشفى رافيل 3',
+    workDate: getTodayDateStr(),
+    workDescription: 'تمديد مسارات مواسير الصرف المعلقة وتثبيت الحوامل المعدنية بغرف الأشعة',
+    discipline: 'mechanical',
+    locationArea: 'الدور الأرضي - جناح الأشعة',
+    quantity: 120,
+    unit: 'م.ط',
+    completionPercent: 75,
+    relatedSubmittalNumber: 'MAS_RAV_IR_MEP_0031',
+    authorId: 'user-site-ravel',
+    authorName: 'م/ محمود حسن',
+    reviewStatus: 'pending',
+    createdAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString()
+  },
+  {
+    id: 'exec-sample-03',
+    projectId: 'proj-admin-cap',
+    projectName: 'مجمع المباني الإدارية - العاصمة',
+    workDate: getTodayDateStr(),
+    workDescription: 'سحب كابلات القوى الرئيسية وتجميع لوحات التوزيع الفرعية بالدور الأول',
+    discipline: 'electrical',
+    locationArea: 'المبنى الإداري A - الدور الأول',
+    quantity: 14,
+    unit: 'لوحة / مسار',
+    completionPercent: 90,
+    authorId: 'user-site-cap',
+    authorName: 'م/ سارة إبراهيم',
+    reviewStatus: 'pending',
+    createdAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    updatedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
   }
 ];

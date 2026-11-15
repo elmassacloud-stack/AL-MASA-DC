@@ -9,7 +9,8 @@ import {
   Users,
   Download,
   FolderGit2,
-  Building2
+  Building2,
+  Hammer
 } from 'lucide-react';
 import { UserRole } from '../../types';
 
@@ -26,6 +27,7 @@ interface Props {
   onTabChange: (tabId: string) => void;
   urgentIssuesCount?: number;
   openTasksCount?: number;
+  canAccessExecutedWorks?: boolean;
 }
 
 export const Navigation: React.FC<Props> = ({
@@ -33,11 +35,15 @@ export const Navigation: React.FC<Props> = ({
   activeTab,
   onTabChange,
   urgentIssuesCount = 0,
-  openTasksCount = 0
+  openTasksCount = 0,
+  canAccessExecutedWorks = true
 }) => {
   // Navigation tabs for Site user
   const siteNavItems: NavItem[] = [
     { id: 'daily-report', label: 'تقرير اليوم', icon: FileText },
+    ...(canAccessExecutedWorks
+      ? [{ id: 'executed-works', label: 'الأعمال المنفذة', icon: Hammer }]
+      : []),
     { id: 'report-issue', label: 'إبلاغ عن عائق', icon: AlertTriangle },
     { id: 'my-submissions', label: 'تقديماتي', icon: ClipboardList },
     { id: 'my-tasks', label: 'مهامي', icon: CheckSquare, badge: openTasksCount }
@@ -47,6 +53,7 @@ export const Navigation: React.FC<Props> = ({
   const adminNavItems: NavItem[] = [
     { id: 'dashboard', label: 'المؤشرات', icon: LayoutDashboard },
     { id: 'reports', label: 'التقارير', icon: FileText },
+    { id: 'executed-works', label: 'الأعمال المنفذة', icon: Hammer },
     { id: 'submittal-tracker', label: 'تتبع التقديمات', icon: Search },
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
     { id: 'tasks', label: 'المهام', icon: CheckSquare },
@@ -57,6 +64,9 @@ export const Navigation: React.FC<Props> = ({
   ];
 
   const items = role === 'admin' ? adminNavItems : siteNavItems;
+  const mobilePrimaryCount = role === 'admin' ? 5 : 5;
+  const mobileMoreItems = items.slice(mobilePrimaryCount);
+  const isMoreTabActive = mobileMoreItems.some((m) => m.id === activeTab);
 
   return (
     <>
@@ -96,7 +106,7 @@ export const Navigation: React.FC<Props> = ({
       {/* Mobile Bottom Navigation Bar (Sticky, touch-friendly, high ergonomics) */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 pb-safe transition-colors shadow-lg">
         <div className="flex items-center justify-around h-16 px-1">
-          {items.slice(0, role === 'admin' ? 5 : 4).map((item) => {
+          {items.slice(0, mobilePrimaryCount).map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (
@@ -128,24 +138,20 @@ export const Navigation: React.FC<Props> = ({
           })}
 
           {/* If admin, show "More" button for remaining tabs */}
-          {role === 'admin' && items.length > 5 && (
+          {mobileMoreItems.length > 0 && (
             <button
               onClick={() =>
-                onTabChange(
-                  ['announcements', 'projects', 'users', 'export'].includes(activeTab)
-                    ? activeTab
-                    : 'projects'
-                )
+                onTabChange(isMoreTabActive ? activeTab : mobileMoreItems[0].id)
               }
               className={`flex-1 flex flex-col items-center justify-center py-1 px-1 h-full relative transition-colors ${
-                ['announcements', 'projects', 'users', 'export'].includes(activeTab)
+                isMoreTabActive
                   ? 'text-blue-600 dark:text-blue-400 font-bold'
                   : 'text-slate-700 dark:text-slate-300 font-medium'
               }`}
             >
               <FolderGit2 className="w-5 h-5" />
               <span className="text-[11px] mt-1 leading-tight truncate">المزيد</span>
-              {['announcements', 'projects', 'users', 'export'].includes(activeTab) && (
+              {isMoreTabActive && (
                 <span className="absolute top-0 w-8 h-0.5 bg-blue-600 dark:bg-blue-400 rounded-full" />
               )}
             </button>
@@ -153,48 +159,21 @@ export const Navigation: React.FC<Props> = ({
         </div>
 
         {/* Secondary drawer pills if "More" tabs are active on mobile */}
-        {role === 'admin' && ['announcements', 'projects', 'users', 'export'].includes(activeTab) && (
+        {mobileMoreItems.length > 0 && isMoreTabActive && (
           <div className="flex items-center justify-center flex-wrap gap-1.5 py-1.5 bg-slate-100 dark:bg-slate-800/90 border-t border-slate-200 dark:border-slate-700 px-2 text-xs">
-            <button
-              onClick={() => onTabChange('projects')}
-              className={`px-2.5 py-1 rounded-md font-semibold ${
-                activeTab === 'projects'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              إدارة المشاريع
-            </button>
-            <button
-              onClick={() => onTabChange('users')}
-              className={`px-2.5 py-1 rounded-md font-semibold ${
-                activeTab === 'users'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              إدارة المستخدمين
-            </button>
-            <button
-              onClick={() => onTabChange('announcements')}
-              className={`px-2.5 py-1 rounded-md font-semibold ${
-                activeTab === 'announcements'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              التعاميم
-            </button>
-            <button
-              onClick={() => onTabChange('export')}
-              className={`px-2.5 py-1 rounded-md font-semibold ${
-                activeTab === 'export'
-                  ? 'bg-blue-600 text-white'
-                  : 'text-slate-600 dark:text-slate-300'
-              }`}
-            >
-              التصدير
-            </button>
+            {mobileMoreItems.map((moreItem) => (
+              <button
+                key={moreItem.id}
+                onClick={() => onTabChange(moreItem.id)}
+                className={`px-2.5 py-1 rounded-md font-semibold ${
+                  activeTab === moreItem.id
+                    ? 'bg-blue-600 text-white'
+                    : 'text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                {moreItem.label}
+              </button>
+            ))}
           </div>
         )}
       </nav>

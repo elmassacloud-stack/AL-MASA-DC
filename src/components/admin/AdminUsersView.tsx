@@ -18,7 +18,8 @@ import {
   AlertCircle,
   Loader2,
   ShieldCheck,
-  Search
+  Search,
+  Hammer
 } from 'lucide-react';
 import { UserProfile, Project, UserRole } from '../../types';
 import { dataService } from '../../services/dataService';
@@ -50,6 +51,7 @@ export const AdminUsersView: React.FC<Props> = ({
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [role, setRole] = useState<UserRole>('site');
   const [allProjects, setAllProjects] = useState<boolean>(false);
+  const [canAccessExecutedWorks, setCanAccessExecutedWorks] = useState<boolean>(true);
   const [assignedProjects, setAssignedProjects] = useState<string[]>(
     projects[0]?.id ? [projects[0].id] : []
   );
@@ -74,6 +76,7 @@ export const AdminUsersView: React.FC<Props> = ({
     setShowPassword(false);
     setRole('site');
     setAllProjects(false);
+    setCanAccessExecutedWorks(true);
     setAssignedProjects(projects[0]?.id ? [projects[0].id] : []);
     setPhone('');
     setCreateError(null);
@@ -112,6 +115,7 @@ export const AdminUsersView: React.FC<Props> = ({
         password,
         role,
         allProjects: role === 'admin' ? true : allProjects,
+        canAccessExecutedWorks: role === 'admin' ? true : canAccessExecutedWorks,
         assignedProjects: role === 'admin' || allProjects ? projects.map((p) => p.id) : assignedProjects,
         phone: phone.trim()
       });
@@ -149,6 +153,8 @@ export const AdminUsersView: React.FC<Props> = ({
         jobTitle: (editingUser.jobTitle || '').trim(),
         role: editingUser.role,
         allProjects: isAll,
+        canAccessExecutedWorks:
+          editingUser.role === 'admin' ? true : editingUser.canAccessExecutedWorks !== false,
         assignedProjects: isAll ? projects.map((p) => p.id) : editingUser.assignedProjects,
         phone: (editingUser.phone || '').trim() || undefined
       });
@@ -375,6 +381,23 @@ export const AdminUsersView: React.FC<Props> = ({
                     )}
                   </div>
                 </div>
+
+                {/* Tab Permissions Indicator */}
+                <div className="flex items-center justify-between text-xs pt-1">
+                  <span className="text-slate-600 dark:text-slate-400 font-medium flex items-center gap-1">
+                    <Hammer className="w-3.5 h-3.5 text-amber-600" />
+                    <span>تبويب الأعمال المنفذة:</span>
+                  </span>
+                  {user.role === 'admin' || isSuper || user.canAccessExecutedWorks !== false ? (
+                    <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      مصرح بالوصول
+                    </span>
+                  ) : (
+                    <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                      محجوب
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Action Buttons */}
@@ -552,9 +575,32 @@ export const AdminUsersView: React.FC<Props> = ({
                 </div>
               )}
 
-              {/* All Projects Toggle */}
+              {/* Tab & Projects Access Permissions */}
               {editingUser.role === 'site' && (
                 <div className="space-y-2.5">
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingUser.canAccessExecutedWorks !== false}
+                      onChange={(e) =>
+                        setEditingUser({
+                          ...editingUser,
+                          canAccessExecutedWorks: e.target.checked
+                        })
+                      }
+                      className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
+                    />
+                    <div>
+                      <span className="font-bold text-amber-900 dark:text-amber-200 text-xs flex items-center gap-1.5">
+                        <Hammer className="w-3.5 h-3.5" />
+                        <span>صلاحية الوصول إلى تبويب «الأعمال المنفذة بالموقع»</span>
+                      </span>
+                      <span className="text-[11px] text-amber-700 dark:text-amber-400">
+                        يتيح للمستخدم عرض وتسجيل بنود الأعمال المنفذة للمشاريع المسندة إليه
+                      </span>
+                    </div>
+                  </label>
+
                   <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">
                     <input
                       type="checkbox"
@@ -764,11 +810,24 @@ export const AdminUsersView: React.FC<Props> = ({
                 </div>
               </div>
 
-              {/* Projects Assignment (if site role) */}
+              {/* Projects & Tab Access Assignment (if site role) */}
               {role === 'site' && (
                 <div className="space-y-2.5">
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                    صلاحية الوصول للمشاريع والمواقع:
+                    صلاحيات الوصول للأقسام والمشاريع:
+                  </label>
+
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={canAccessExecutedWorks}
+                      onChange={(e) => setCanAccessExecutedWorks(e.target.checked)}
+                      className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
+                    />
+                    <span className="font-bold text-amber-900 dark:text-amber-200 text-xs flex items-center gap-1.5">
+                      <Hammer className="w-3.5 h-3.5" />
+                      <span>السماح بالوصول إلى تبويب «الأعمال المنفذة بالموقع»</span>
+                    </span>
                   </label>
 
                   <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">

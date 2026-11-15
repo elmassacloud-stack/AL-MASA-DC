@@ -11,6 +11,7 @@
         "jobTitle": { "type": "string", "maxLength": 150 },
         "role": { "type": "string", "enum": ["admin", "site"] },
         "allProjects": { "type": "boolean" },
+        "canAccessExecutedWorks": { "type": "boolean" },
         "assignedProjects": { "type": "array" },
         "status": { "type": "string", "enum": ["active", "disabled"] },
         "phone": { "type": "string", "maxLength": 40 },
@@ -119,6 +120,32 @@
         "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "title", "content", "targetProjects", "isUrgent", "createdBy", "authorName", "readBy", "createdAt"]
+    },
+    "ExecutedWork": {
+      "title": "ExecutedWork",
+      "description": "Physical construction work executed on site logged by site engineers and reviewed by DC.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "maxLength": 200 },
+        "workDate": { "type": "string", "maxLength": 20 },
+        "workDescription": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "discipline": { "type": "string", "enum": ["civil_structural", "architectural", "electrical", "mechanical", "finishing", "infrastructure", "other"] },
+        "locationArea": { "type": "string", "maxLength": 200 },
+        "quantity": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 40 },
+        "completionPercent": { "type": "number" },
+        "relatedSubmittalNumber": { "type": "string", "maxLength": 120 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "authorId": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 150 },
+        "reviewStatus": { "type": "string", "enum": ["pending", "approved"] },
+        "adminNote": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "projectId", "projectName", "workDate", "workDescription", "discipline", "completionPercent", "authorId", "authorName", "reviewStatus", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -145,6 +172,10 @@
     "/announcements/{announcementId}": {
       "schema": { "$ref": "#/entities/Announcement" },
       "description": "Official DC announcements."
+    },
+    "/executedWorks/{workId}": {
+      "schema": { "$ref": "#/entities/ExecutedWork" },
+      "description": "Site executed construction works logs."
     }
   }
 }
