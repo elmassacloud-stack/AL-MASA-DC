@@ -224,13 +224,23 @@ export const AdminDashboard: React.FC<Props> = ({
             </p>
           </div>
 
-          <button
-            onClick={() => onNavigateTab('reports')}
-            className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 self-start sm:self-auto cursor-pointer"
-          >
-            <span>استعراض كافة التقارير</span>
-            <ArrowUpRight className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => onNavigateTab('projects')}
+              className="px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900/60 text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>إدارة المشاريع</span>
+            </button>
+            <button
+              onClick={() => onNavigateTab('reports')}
+              className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <span>استعراض كافة التقارير</span>
+              <ArrowUpRight className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Responsive Table / Cards */}

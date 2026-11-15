@@ -205,8 +205,12 @@ class DataService {
 
   private async seedFirestoreIfEmpty() {
     try {
-      const projSnap = await getDocs(collection(db, 'projects'));
-      if (projSnap.empty) {
+      const [projSnap, reportsSnap, usersSnap] = await Promise.all([
+        getDocs(collection(db, 'projects')),
+        getDocs(collection(db, 'reports')),
+        getDocs(collection(db, 'users'))
+      ]);
+      if (projSnap.empty && reportsSnap.empty && usersSnap.size <= 1) {
         for (const p of SEED_PROJECTS) {
           await setDoc(doc(db, 'projects', p.id), stripUndefined(p));
         }
@@ -468,22 +472,104 @@ class DataService {
     }
   }
 
-  public addProject(project: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>): Project {
+  public async addProject(
+    project: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>
+  ): Promise<Project> {
     const projects = this.getProjects();
     const now = new Date().toISOString();
-    const newProj: Project = {
-      ...project,
-      id: 'proj-' + Date.now().toString(36),
+    const cleanedDescription = project.description?.trim().slice(0, 1000);
+    const newProj: Project = stripUndefined({
+      id: 'proj-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5),
+      name: project.name.trim().slice(0, 200),
+      code: project.code.trim().toUpperCase().slice(0, 80),
+      description: cleanedDescription ? cleanedDescription : undefined,
+      status: project.status === 'completed' ? 'completed' : 'active',
       createdAt: now,
       updatedAt: now
-    };
+    });
     projects.push(newProj);
     localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects));
-    setDoc(doc(db, 'projects', newProj.id), stripUndefined(newProj)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `projects/${newProj.id}`)
-    );
+    try {
+      await setDoc(doc(db, 'projects', newProj.id), stripUndefined(newProj));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `projects/${newProj.id}`);
+    }
     this.notify();
     return newProj;
+  }
+
+  public async updateProject(
+    projectId: string,
+    updates: Partial<Pick<Project, 'name' | 'code' | 'description' | 'status'>>
+  ): Promise<boolean> {
+    const projects = this.getProjects();
+    const idx = projects.findIndex((p) => p.id === projectId);
+    if (idx === -1) return false;
+
+    const updatedAt = new Date().toISOString();
+    const nextProject: Project = stripUndefined({
+      ...projects[idx],
+      ...(updates.name !== undefined ? { name: updates.name.trim().slice(0, 200) } : {}),
+      ...(updates.code !== undefined ? { code: updates.code.trim().toUpperCase().slice(0, 80) } : {}),
+      ...(updates.description !== undefined
+        ? { description: updates.description.trim().slice(0, 1000) }
+        : {}),
+      ...(updates.status !== undefined ? { status: updates.status } : {}),
+      updatedAt
+    });
+
+    projects[idx] = nextProject;
+    localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(projects));
+
+    const patch = stripUndefined({
+      ...(updates.name !== undefined ? { name: nextProject.name } : {}),
+      ...(updates.code !== undefined ? { code: nextProject.code } : {}),
+      ...(updates.description !== undefined ? { description: nextProject.description } : {}),
+      ...(updates.status !== undefined ? { status: nextProject.status } : {}),
+      updatedAt
+    });
+
+    try {
+      await updateDoc(doc(db, 'projects', projectId), patch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `projects/${projectId}`);
+    }
+
+    this.notify();
+    return true;
+  }
+
+  public async deleteProject(projectId: string): Promise<boolean> {
+    const projects = this.getProjects();
+    if (!projects.some((p) => p.id === projectId)) return false;
+
+    const remainingProjects = projects.filter((p) => p.id !== projectId);
+    localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(remainingProjects));
+
+    try {
+      await deleteDoc(doc(db, 'projects', projectId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `projects/${projectId}`);
+    }
+
+    // Remove deleted projectId from any user's assignedProjects list
+    const users = this.getUsers();
+    const now = new Date().toISOString();
+    const updatedUsers = users.map((u) => {
+      if (u.assignedProjects?.includes(projectId)) {
+        const nextAssigned = u.assignedProjects.filter((id) => id !== projectId);
+        updateDoc(doc(db, 'users', u.id), {
+          assignedProjects: nextAssigned,
+          updatedAt: now
+        }).catch(() => undefined);
+        return { ...u, assignedProjects: nextAssigned, updatedAt: now };
+      }
+      return u;
+    });
+    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(updatedUsers));
+
+    this.notify();
+    return true;
   }
 
   // --- Daily Reports ---

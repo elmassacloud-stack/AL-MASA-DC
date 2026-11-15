@@ -20,6 +20,7 @@ import { SubmittalTrackerView } from './components/admin/SubmittalTrackerView';
 import { AdminIssuesView } from './components/admin/AdminIssuesView';
 import { AdminTasksView } from './components/admin/AdminTasksView';
 import { AdminAnnouncementsView } from './components/admin/AdminAnnouncementsView';
+import { AdminProjectsView } from './components/admin/AdminProjectsView';
 import { AdminUsersView } from './components/admin/AdminUsersView';
 import { ExportCenterView } from './components/admin/ExportCenterView';
 
@@ -334,6 +335,16 @@ export default function App() {
                 projects={projects}
                 users={users}
                 currentUser={currentUser}
+              />
+            )}
+
+            {activeTab === 'projects' && (
+              <AdminProjectsView
+                projects={projects}
+                reports={reports}
+                issues={issues}
+                tasks={tasks}
+                users={users}
               />
             )}
 

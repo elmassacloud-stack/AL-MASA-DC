@@ -9,7 +9,7 @@ import {
   Users,
   Download,
   FolderGit2,
-  Mail
+  Building2
 } from 'lucide-react';
 import { UserRole } from '../../types';
 
@@ -51,6 +51,7 @@ export const Navigation: React.FC<Props> = ({
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
     { id: 'tasks', label: 'المهام', icon: CheckSquare },
     { id: 'announcements', label: 'التعاميم', icon: BellRing },
+    { id: 'projects', label: 'إدارة المشاريع', icon: Building2 },
     { id: 'users', label: 'إدارة المستخدمين', icon: Users },
     { id: 'export', label: 'التصدير', icon: Download }
   ];
@@ -129,16 +130,22 @@ export const Navigation: React.FC<Props> = ({
           {/* If admin, show "More" button for remaining tabs */}
           {role === 'admin' && items.length > 5 && (
             <button
-              onClick={() => onTabChange(activeTab === 'users' || activeTab === 'announcements' || activeTab === 'export' ? activeTab : 'announcements')}
+              onClick={() =>
+                onTabChange(
+                  ['announcements', 'projects', 'users', 'export'].includes(activeTab)
+                    ? activeTab
+                    : 'projects'
+                )
+              }
               className={`flex-1 flex flex-col items-center justify-center py-1 px-1 h-full relative transition-colors ${
-                ['announcements', 'users', 'export'].includes(activeTab)
+                ['announcements', 'projects', 'users', 'export'].includes(activeTab)
                   ? 'text-blue-600 dark:text-blue-400 font-bold'
                   : 'text-slate-700 dark:text-slate-300 font-medium'
               }`}
             >
               <FolderGit2 className="w-5 h-5" />
               <span className="text-[11px] mt-1 leading-tight truncate">المزيد</span>
-              {['announcements', 'users', 'export'].includes(activeTab) && (
+              {['announcements', 'projects', 'users', 'export'].includes(activeTab) && (
                 <span className="absolute top-0 w-8 h-0.5 bg-blue-600 dark:bg-blue-400 rounded-full" />
               )}
             </button>
@@ -146,21 +153,21 @@ export const Navigation: React.FC<Props> = ({
         </div>
 
         {/* Secondary drawer pills if "More" tabs are active on mobile */}
-        {role === 'admin' && ['announcements', 'users', 'export'].includes(activeTab) && (
-          <div className="flex items-center justify-center gap-2 py-1.5 bg-slate-100 dark:bg-slate-800/90 border-t border-slate-200 dark:border-slate-700 px-2 text-xs">
+        {role === 'admin' && ['announcements', 'projects', 'users', 'export'].includes(activeTab) && (
+          <div className="flex items-center justify-center flex-wrap gap-1.5 py-1.5 bg-slate-100 dark:bg-slate-800/90 border-t border-slate-200 dark:border-slate-700 px-2 text-xs">
             <button
-              onClick={() => onTabChange('announcements')}
-              className={`px-3 py-1 rounded-md font-semibold ${
-                activeTab === 'announcements'
+              onClick={() => onTabChange('projects')}
+              className={`px-2.5 py-1 rounded-md font-semibold ${
+                activeTab === 'projects'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-600 dark:text-slate-300'
               }`}
             >
-              التعاميم
+              إدارة المشاريع
             </button>
             <button
               onClick={() => onTabChange('users')}
-              className={`px-3 py-1 rounded-md font-semibold ${
+              className={`px-2.5 py-1 rounded-md font-semibold ${
                 activeTab === 'users'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-600 dark:text-slate-300'
@@ -169,8 +176,18 @@ export const Navigation: React.FC<Props> = ({
               إدارة المستخدمين
             </button>
             <button
+              onClick={() => onTabChange('announcements')}
+              className={`px-2.5 py-1 rounded-md font-semibold ${
+                activeTab === 'announcements'
+                  ? 'bg-blue-600 text-white'
+                  : 'text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              التعاميم
+            </button>
+            <button
               onClick={() => onTabChange('export')}
-              className={`px-3 py-1 rounded-md font-semibold ${
+              className={`px-2.5 py-1 rounded-md font-semibold ${
                 activeTab === 'export'
                   ? 'bg-blue-600 text-white'
                   : 'text-slate-600 dark:text-slate-300'
