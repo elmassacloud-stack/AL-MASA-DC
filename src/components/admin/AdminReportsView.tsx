@@ -1,0 +1,524 @@
+import React, { useState } from 'react';
+import {
+  FileText,
+  Filter,
+  Calendar,
+  Building,
+  User,
+  Eye,
+  FileSpreadsheet,
+  CheckCircle2,
+  Clock,
+  X,
+  MessageSquare,
+  Search,
+  Check,
+  Copy,
+  Share2
+} from 'lucide-react';
+import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
+import { StatusBadge } from '../common/StatusBadge';
+import { exportDailyReportToExcel } from '../../utils/exportUtils';
+import { dataService } from '../../services/dataService';
+
+interface Props {
+  reports: DailyReport[];
+  projects: Project[];
+  users: UserProfile[];
+}
+
+export const AdminReportsView: React.FC<Props> = ({
+  reports,
+  projects,
+  users
+}) => {
+  const [filterProjectId, setFilterProjectId] = useState<string>('all');
+  const [filterDate, setFilterDate] = useState<string>('');
+  const [filterSender, setFilterSender] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
+  const [adminFeedbackInput, setAdminFeedbackInput] = useState<string>('');
+  const [savedFeedbackMsg, setSavedFeedbackMsg] = useState<boolean>(false);
+  const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
+
+  const handleCopyReportSummary = (report: DailyReport) => {
+    const lines = [
+      `تقرير الأعمال اليومي - إدارة مراقبة الوثائق (DC)`,
+      `المشروع: ${report.projectName}`,
+      `التاريخ: ${report.reportDate}`,
+      `المرسل: ${report.senderName}`,
+      `حالة التقرير: ${report.status}`,
+      `الأعمال المقدمة (${report.submittedWorks.length}):`,
+      ...report.submittedWorks.map(
+        (s, i) => `  ${i + 1}. [${s.submittalNumber} REV ${s.rev}] ${s.itemDescription} (${s.status})`
+      ),
+      `الأعمال المستلمة (${report.receivedWorks.length}):`,
+      ...report.receivedWorks.map(
+        (r, i) => `  ${i + 1}. [${r.submittalNumber} REV ${r.rev}] ${r.itemDescription} (${r.status})`
+      ),
+      report.notes ? `ملاحظات: ${report.notes}` : '',
+      report.adminFeedback ? `ملاحظات المراجعة: ${report.adminFeedback}` : ''
+    ].filter(Boolean);
+
+    const text = lines.join('\n');
+    navigator.clipboard?.writeText(text);
+    setCopiedSummary(true);
+    setTimeout(() => setCopiedSummary(false), 2500);
+  };
+
+  // Apply filters
+  const filteredReports = reports.filter((report) => {
+    if (filterProjectId !== 'all' && report.projectId !== filterProjectId) return false;
+    if (filterDate && report.reportDate !== filterDate) return false;
+    if (filterSender !== 'all' && report.senderId !== filterSender) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      const inProject = report.projectName.toLowerCase().includes(q);
+      const inSender = report.senderName.toLowerCase().includes(q);
+      const inNotes = (report.notes || '').toLowerCase().includes(q);
+      const inSubmitted = report.submittedWorks.some(
+        (s) => s.itemDescription.toLowerCase().includes(q) || s.submittalNumber.toLowerCase().includes(q)
+      );
+      const inReceived = report.receivedWorks.some(
+        (r) => r.itemDescription.toLowerCase().includes(q) || r.submittalNumber.toLowerCase().includes(q)
+      );
+      if (!inProject && !inSender && !inNotes && !inSubmitted && !inReceived) return false;
+    }
+    return true;
+  });
+
+  const handleOpenReport = (report: DailyReport) => {
+    setSelectedReport(report);
+    setAdminFeedbackInput(report.adminFeedback || '');
+    setSavedFeedbackMsg(false);
+  };
+
+  const handleSaveFeedback = (status: DailyReport['status']) => {
+    if (!selectedReport) return;
+    dataService.updateReportStatus(selectedReport.id, status, adminFeedbackInput.trim());
+    setSelectedReport((prev: DailyReport | null) =>
+      prev ? { ...prev, status, adminFeedback: adminFeedbackInput.trim() } : null
+    );
+    setSavedFeedbackMsg(true);
+    setTimeout(() => setSavedFeedbackMsg(false), 2000);
+  };
+
+  return (
+    <div className="space-y-6 max-w-7xl mx-auto pb-16">
+      {/* Header Card */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <FileText className="w-5 h-5 text-blue-600" />
+            <span>سجل تقارير الأعمال اليومية لجميع المواقع</span>
+          </h2>
+          <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 font-medium">
+            تدقيق ومراجعة تقارير المشاريع، اعتماد الأعمال، وتصدير النماذج المعتمدة
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-800">
+            {filteredReports.length} تقرير مطابق للبحث
+          </span>
+        </div>
+      </div>
+
+      {/* Filters Toolbar */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+        {/* Project Filter */}
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">المشروع</label>
+          <select
+            value={filterProjectId}
+            onChange={(e) => setFilterProjectId(e.target.value)}
+            className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          >
+            <option value="all">كافة المشاريع</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Date Filter */}
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">تاريخ محدد</label>
+          <div className="relative">
+            <input
+              type="date"
+              value={filterDate}
+              onChange={(e) => setFilterDate(e.target.value)}
+              className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+            />
+            {filterDate && (
+              <button
+                onClick={() => setFilterDate('')}
+                className="absolute left-2 top-2.5 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+              >
+                مسح
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Sender Filter */}
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">المهندس المرسل</label>
+          <select
+            value={filterSender}
+            onChange={(e) => setFilterSender(e.target.value)}
+            className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          >
+            <option value="all">كافة المهندسين</option>
+            {users
+              .filter((u) => u.role === 'site')
+              .map((u) => (
+                <option key={u.id} value={u.id}>
+                  {u.displayName}
+                </option>
+              ))}
+          </select>
+        </div>
+
+        {/* Search Input */}
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">بحث برقم التقديم أو البند</label>
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="مثال: MAS_RAV أو Columns..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full h-10 pr-9 pl-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+            />
+            <Search className="w-4 h-4 text-slate-400 absolute right-3 top-3 pointer-events-none" />
+          </div>
+        </div>
+      </div>
+
+      {/* Reports List */}
+      <div className="space-y-3">
+        {filteredReports.length === 0 ? (
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-10 text-center border border-slate-200 dark:border-slate-800">
+            <FileText className="w-12 h-12 text-slate-400 mx-auto mb-3" />
+            <p className="font-bold text-slate-700 dark:text-slate-300">
+              لا توجد تقارير مطابقة لمعايير التصفية الحالية
+            </p>
+          </div>
+        ) : (
+          filteredReports.map((report) => (
+            <div
+              key={report.id}
+              className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs hover:border-blue-400 dark:hover:border-blue-700 transition-all space-y-3"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
+                    <Building className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                      {report.projectName}
+                    </h3>
+                    <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 mt-0.5">
+                      <Calendar className="w-3.5 h-3.5" />
+                      <span>{report.reportDate}</span>
+                      <span>•</span>
+                      <User className="w-3.5 h-3.5" />
+                      <span>المرسل: {report.senderName} ({report.senderEmail})</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  {report.status === 'reviewed' ? (
+                    <span className="text-xs px-2.5 py-1 rounded-full font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>معتمد ومراجع من DC</span>
+                    </span>
+                  ) : report.status === 'needs_revision' ? (
+                    <span className="text-xs px-2.5 py-1 rounded-full font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                      يتطلب تعديل من الموقع
+                    </span>
+                  ) : (
+                    <span className="text-xs px-2.5 py-1 rounded-full font-bold bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-300 dark:border-blue-800">
+                      جديد بانتظار مراجعة DC
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Rows Count preview */}
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2.5 py-1 rounded-lg">
+                  الأعمال المقدمة: <strong className="text-blue-600 dark:text-blue-400 font-mono">{report.submittedWorks.length}</strong>
+                </span>
+                <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2.5 py-1 rounded-lg">
+                  الأعمال المستلمة: <strong className="text-emerald-600 dark:text-emerald-400 font-mono">{report.receivedWorks.length}</strong>
+                </span>
+                {report.notes && (
+                  <span className="text-slate-700 dark:text-slate-300 font-medium truncate max-w-md">
+                    ملاحظات: {report.notes}
+                  </span>
+                )}
+              </div>
+
+              {/* Admin feedback if present */}
+              {report.adminFeedback && (
+                <div className="p-2.5 rounded-xl bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900 text-xs text-blue-900 dark:text-blue-200 flex items-center gap-2">
+                  <MessageSquare className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>
+                    <strong>تعليق الإدارة:</strong> {report.adminFeedback}
+                  </span>
+                </div>
+              )}
+
+              {/* Card Actions */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  onClick={() => handleCopyReportSummary(report)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title="نسخ ملخص التقرير لمشاركته"
+                >
+                  <Copy className="w-3.5 h-3.5 text-blue-500" />
+                  <span>نسخ الملخص</span>
+                </button>
+                <button
+                  onClick={() => exportDailyReportToExcel(report)}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title="تصدير نموذج إكسل مطابق"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير Excel (.xlsx)</span>
+                </button>
+                <button
+                  onClick={() => handleOpenReport(report)}
+                  className="px-4 py-1.5 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Eye className="w-4 h-4" />
+                  <span>فتح وتدقيق التقرير</span>
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* =========================================================================
+          REPORT INSPECTION & AUDIT MODAL
+          ========================================================================= */}
+      {selectedReport && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-5xl rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 max-h-[92vh] flex flex-col my-auto">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base sm:text-lg text-slate-900 dark:text-white flex items-center gap-2">
+                  <span>تدقيق تقرير الأعمال اليومي: {selectedReport.projectName}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 font-mono">
+                    {selectedReport.reportDate}
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-700 dark:text-slate-300 font-medium mt-0.5">
+                  المرسل: {selectedReport.senderName} ({selectedReport.senderEmail})
+                </p>
+              </div>
+              <button
+                onClick={() => setSelectedReport(null)}
+                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-4 sm:p-6 overflow-y-auto space-y-6 text-sm">
+              {/* TABLE 1: Submitted Works */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-blue-600" />
+                    <span>الأعمال المقدمة (Submitted Works)</span>
+                    <span className="text-xs font-mono bg-blue-50 dark:bg-blue-950 text-blue-600 px-2 py-0.5 rounded-md">
+                      {selectedReport.submittedWorks.length}
+                    </span>
+                  </h4>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                  <table className="w-full text-right border-collapse text-xs">
+                    <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      <tr>
+                        <th className="py-2 px-3 w-10 text-center">م</th>
+                        <th className="py-2 px-3">البند (Item Description)</th>
+                        <th className="py-2 px-3 w-48 text-left">رقم التقديم (Submittal No.)</th>
+                        <th className="py-2 px-3 w-16 text-center">REV</th>
+                        <th className="py-2 px-3 w-36 text-center">الموقف</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {selectedReport.submittedWorks.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-3 text-center text-slate-400">
+                            لا توجد تقديمات مسجلة لهذا اليوم
+                          </td>
+                        </tr>
+                      ) : (
+                        selectedReport.submittedWorks.map((item: SubmittalItem, idx: number) => (
+                          <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-500">
+                              {idx + 1}
+                            </td>
+                            <td className="py-2 px-3 font-medium">{item.itemDescription}</td>
+                            <td className="py-2 px-3 font-submittal font-mono text-left text-blue-600 dark:text-blue-400">
+                              {item.submittalNumber}
+                            </td>
+                            <td className="py-2 px-3 text-center font-mono">{item.rev}</td>
+                            <td className="py-2 px-3 text-center">
+                              <StatusBadge status={item.status} size="sm" />
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* TABLE 2: Received Works */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h4 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-600" />
+                    <span>الأعمال المستلمة (Received Works)</span>
+                    <span className="text-xs font-mono bg-emerald-50 dark:bg-emerald-950 text-emerald-600 px-2 py-0.5 rounded-md">
+                      {selectedReport.receivedWorks.length}
+                    </span>
+                  </h4>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+                  <table className="w-full text-right border-collapse text-xs">
+                    <thead className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                      <tr>
+                        <th className="py-2 px-3 w-10 text-center">م</th>
+                        <th className="py-2 px-3">البند (Item Description)</th>
+                        <th className="py-2 px-3 w-48 text-left">رقم التقديم (Submittal No.)</th>
+                        <th className="py-2 px-3 w-16 text-center">REV</th>
+                        <th className="py-2 px-3 w-36 text-center">الموقف</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {selectedReport.receivedWorks.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="py-3 text-center text-slate-400">
+                            لا توجد أعمال مستلمة مسجلة لهذا اليوم
+                          </td>
+                        </tr>
+                      ) : (
+                        selectedReport.receivedWorks.map((item: SubmittalItem, idx: number) => (
+                          <tr key={item.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                            <td className="py-2 px-3 text-center font-mono font-bold text-slate-500">
+                              {idx + 1}
+                            </td>
+                            <td className="py-2 px-3 font-medium">{item.itemDescription}</td>
+                            <td className="py-2 px-3 font-submittal font-mono text-left text-emerald-600 dark:text-emerald-400">
+                              {item.submittalNumber}
+                            </td>
+                            <td className="py-2 px-3 text-center font-mono">{item.rev}</td>
+                            <td className="py-2 px-3 text-center">
+                              <StatusBadge status={item.status} size="sm" />
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Notes & Attachments */}
+              {selectedReport.notes && (
+                <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 text-xs">
+                  <span className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                    ملاحظات مهندس الموقع:
+                  </span>
+                  <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
+                    {selectedReport.notes}
+                  </p>
+                </div>
+              )}
+
+              {/* Admin Feedback Box */}
+              <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-2xl space-y-3">
+                <label className="block text-xs font-bold text-blue-950 dark:text-blue-200">
+                  إضافة ملاحظات وتوجيهات إدارة مراقبة الوثائق (DC Feedback)
+                </label>
+                <textarea
+                  rows={2}
+                  value={adminFeedbackInput}
+                  onChange={(e) => setAdminFeedbackInput(e.target.value)}
+                  placeholder="اكتب التوجيهات أو الملاحظات التي ستظهر لمهندس الموقع..."
+                  className="w-full p-2.5 text-xs bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+                />
+
+                {savedFeedbackMsg && (
+                  <div className="text-xs text-emerald-600 font-bold flex items-center gap-1">
+                    <Check className="w-4 h-4" />
+                    <span>تم حفظ الملاحظات وتحديث حالة التقرير بنجاح</span>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    onClick={() => handleSaveFeedback('reviewed')}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>اعتماد التقرير (Reviewed)</span>
+                  </button>
+                  <button
+                    onClick={() => handleSaveFeedback('needs_revision')}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <Clock className="w-4 h-4" />
+                    <span>طلب تعديل من الموقع</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => exportDailyReportToExcel(selectedReport)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير نموذج إكسل (.xlsx)</span>
+                </button>
+                <button
+                  onClick={() => handleCopyReportSummary(selectedReport)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors shadow-xs"
+                >
+                  {copiedSummary ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedSummary ? 'تم نسخ الملخص!' : 'نسخ ملخص التقرير للمشاركة'}</span>
+                </button>
+              </div>
+              <button
+                onClick={() => setSelectedReport(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs sm:text-sm font-semibold cursor-pointer transition-colors"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
