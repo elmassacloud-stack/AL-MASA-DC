@@ -12,25 +12,37 @@ import {
   Send,
   Eye
 } from 'lucide-react';
-import { IssueReport, Project, IssueStatus, IssuePriority } from '../../types';
+import { IssueReport, Project, IssueStatus, IssuePriority, UserProfile } from '../../types';
 import { ISSUE_TYPES_CONFIG, ISSUE_PRIORITY_CONFIG } from '../../config';
 import { dataService } from '../../services/dataService';
 
 interface Props {
   issues: IssueReport[];
   projects: Project[];
+  users?: UserProfile[];
 }
 
-export const AdminIssuesView: React.FC<Props> = ({ issues, projects }) => {
+export const AdminIssuesView: React.FC<Props> = ({ issues, projects, users = [] }) => {
   const [filterProject, setFilterProject] = useState<string>('all');
+  const [filterAuthor, setFilterAuthor] = useState<string>('all');
   const [filterPriority, setFilterPriority] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [selectedIssue, setSelectedIssue] = useState<IssueReport | null>(null);
   const [commentInput, setCommentInput] = useState<string>('');
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
+  const engineerOptions = Array.from(
+    new Map(
+      [
+        ...users.map((u) => [u.id, { id: u.id, name: u.displayName }] as const),
+        ...issues.map((i) => [i.authorId, { id: i.authorId, name: i.authorName }] as const)
+      ]
+    ).values()
+  );
+
   const filteredIssues = issues.filter((iss) => {
     if (filterProject !== 'all' && iss.projectId !== filterProject) return false;
+    if (filterAuthor !== 'all' && iss.authorId !== filterAuthor) return false;
     if (filterPriority !== 'all' && iss.priority !== filterPriority) return false;
     if (filterStatus !== 'all' && iss.status !== filterStatus) return false;
     return true;
@@ -79,7 +91,7 @@ export const AdminIssuesView: React.FC<Props> = ({ issues, projects }) => {
       </div>
 
       {/* Filter toolbar */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
         <div>
           <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">المشروع</label>
           <select
@@ -91,6 +103,22 @@ export const AdminIssuesView: React.FC<Props> = ({ issues, projects }) => {
             {projects.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">المهندس المرسل</label>
+          <select
+            value={filterAuthor}
+            onChange={(e) => setFilterAuthor(e.target.value)}
+            className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          >
+            <option value="all">كافة المهندسين</option>
+            {engineerOptions.map((eng) => (
+              <option key={eng.id} value={eng.id}>
+                {eng.name}
               </option>
             ))}
           </select>

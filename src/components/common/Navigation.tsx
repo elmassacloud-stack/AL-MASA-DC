@@ -51,7 +51,7 @@ export const Navigation: React.FC<Props> = ({
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
     { id: 'tasks', label: 'المهام', icon: CheckSquare },
     { id: 'announcements', label: 'التعاميم', icon: BellRing },
-    { id: 'users', label: 'المستخدمين', icon: Users },
+    { id: 'users', label: 'إدارة المستخدمين', icon: Users },
     { id: 'export', label: 'التصدير', icon: Download }
   ];
 
@@ -166,7 +166,7 @@ export const Navigation: React.FC<Props> = ({
                   : 'text-slate-600 dark:text-slate-300'
               }`}
             >
-              المستخدمين
+              إدارة المستخدمين
             </button>
             <button
               onClick={() => onTabChange('export')}

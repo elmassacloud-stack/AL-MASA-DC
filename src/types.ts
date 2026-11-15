@@ -115,7 +115,9 @@ export interface UserProfile {
   id: string;
   email: string;
   displayName: string;
+  jobTitle?: string;
   role: UserRole;
+  allProjects?: boolean;
   assignedProjects: string[]; // array of project IDs
   status: 'active' | 'disabled';
   phone?: string;

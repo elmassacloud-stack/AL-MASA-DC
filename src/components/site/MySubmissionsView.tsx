@@ -16,6 +16,7 @@ import { UserProfile, DailyReport, IssueReport } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ISSUE_TYPES_CONFIG, ISSUE_PRIORITY_CONFIG } from '../../config';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
+import { canAccessProject } from '../../utils/accessControl';
 
 interface Props {
   currentUser: UserProfile;
@@ -32,16 +33,25 @@ export const MySubmissionsView: React.FC<Props> = ({
   const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
-  // Filter to user's submissions (or show all if admin)
+  // Filter strictly to user's assigned projects (or all if admin)
   const myReports =
     currentUser.role === 'admin'
       ? reports
-      : reports.filter((r) => r.senderId === currentUser.id);
+      : reports.filter(
+          (r) =>
+            canAccessProject(currentUser, r.projectId) &&
+            (r.senderId === currentUser.id ||
+              r.senderEmail.toLowerCase() === currentUser.email.toLowerCase())
+        );
 
   const myIssues =
     currentUser.role === 'admin'
       ? issues
-      : issues.filter((i) => i.authorId === currentUser.id);
+      : issues.filter(
+          (i) =>
+            canAccessProject(currentUser, i.projectId) &&
+            i.authorId === currentUser.id
+        );
 
   const getStatusBadge = (status: DailyReport['status']) => {
     switch (status) {

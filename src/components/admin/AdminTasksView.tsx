@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CheckSquare,
   Plus,
@@ -20,6 +20,8 @@ interface Props {
 }
 
 export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }) => {
+  const [filterProject, setFilterProject] = useState<string>('all');
+  const [filterStatus, setFilterStatus] = useState<string>('all');
   const [isCreating, setIsCreating] = useState<boolean>(false);
   const [projectId, setProjectId] = useState<string>(projects[0]?.id || '');
   const [title, setTitle] = useState<string>('');
@@ -29,7 +31,21 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
   );
   const [priority, setPriority] = useState<'normal' | 'urgent'>('normal');
 
+  useEffect(() => {
+    if (!projectId && projects.length > 0) {
+      setProjectId(projects[0].id);
+    }
+  }, [projects, projectId]);
+
   const todayStr = new Date().toISOString().split('T')[0];
+
+  const filteredTasks = tasks.filter((t) => {
+    if (filterProject !== 'all' && t.projectId !== filterProject) return false;
+    if (filterStatus === 'done' && t.status !== 'done') return false;
+    if (filterStatus === 'open' && t.status === 'done') return false;
+    if (filterStatus === 'overdue' && !(t.status !== 'done' && t.deadline < todayStr)) return false;
+    return true;
+  });
 
   const handleCreateTask = (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,9 +90,42 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
         </button>
       </div>
 
+      {/* Filter Toolbar */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">تصفية حسب المشروع</label>
+          <select
+            value={filterProject}
+            onChange={(e) => setFilterProject(e.target.value)}
+            className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          >
+            <option value="all">كافة المشاريع</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block font-bold text-slate-700 dark:text-slate-300 mb-1">حالة المهمة</label>
+          <select
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+            className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          >
+            <option value="all">كافة المهام</option>
+            <option value="open">قيد التنفيذ</option>
+            <option value="overdue">متأخرة</option>
+            <option value="done">منجزة</option>
+          </select>
+        </div>
+      </div>
+
       {/* Tasks Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {tasks.map((task) => {
+        {filteredTasks.map((task) => {
           const isOverdue = task.status !== 'done' && task.deadline < todayStr;
           return (
             <div

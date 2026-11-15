@@ -1,0 +1,150 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile with role, job title, account status, and assigned project access.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "jobTitle": { "type": "string", "maxLength": 150 },
+        "role": { "type": "string", "enum": ["admin", "site"] },
+        "allProjects": { "type": "boolean" },
+        "assignedProjects": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "disabled"] },
+        "phone": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "email", "displayName", "role", "assignedProjects", "status", "createdAt", "updatedAt"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "Construction site / project tracked by Document Control.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["active", "completed"] },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "name", "code", "status", "createdAt", "updatedAt"]
+    },
+    "DailyReport": {
+      "title": "DailyReport",
+      "description": "Daily site work report with submitted and received engineering submittals.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "maxLength": 200 },
+        "reportDate": { "type": "string", "maxLength": 20 },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 150 },
+        "senderEmail": { "type": "string", "maxLength": 200 },
+        "submittedWorks": { "type": "array" },
+        "receivedWorks": { "type": "array" },
+        "notes": { "type": "string", "maxLength": 4000 },
+        "attachments": { "type": "array" },
+        "status": { "type": "string", "enum": ["submitted", "reviewed", "needs_revision"] },
+        "adminFeedback": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "projectId", "projectName", "reportDate", "senderId", "senderName", "senderEmail", "submittedWorks", "receivedWorks", "status", "createdAt", "updatedAt"]
+    },
+    "IssueReport": {
+      "title": "IssueReport",
+      "description": "Site issue or blocker escalated to Document Control.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "issueNumber": { "type": "string", "maxLength": 40 },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "maxLength": 200 },
+        "authorId": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 150 },
+        "type": { "type": "string", "enum": ["equipment", "network", "electrical_ac", "documents_archive", "other"] },
+        "priority": { "type": "string", "enum": ["normal", "urgent"] },
+        "description": { "type": "string", "maxLength": 4000 },
+        "photoUrl": { "type": "string", "maxLength": 900000 },
+        "status": { "type": "string", "enum": ["new", "in_progress", "resolved"] },
+        "adminComment": { "type": "string", "maxLength": 2000 },
+        "resolvedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "issueNumber", "projectId", "projectName", "authorId", "authorName", "type", "priority", "description", "status", "createdAt", "updatedAt"]
+    },
+    "ProjectTask": {
+      "title": "ProjectTask",
+      "description": "Document Control task assigned to a project site.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "maxLength": 300 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "deadline": { "type": "string", "maxLength": 20 },
+        "priority": { "type": "string", "enum": ["normal", "urgent"] },
+        "status": { "type": "string", "enum": ["pending", "in_progress", "done"] },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "completedBy": { "type": "string", "maxLength": 150 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "proofNote": { "type": "string", "maxLength": 2000 },
+        "proofAttachment": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "projectId", "projectName", "title", "description", "deadline", "priority", "status", "createdBy", "createdAt", "updatedAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Administrative circular sent by DC management to projects.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "maxLength": 300 },
+        "content": { "type": "string", "maxLength": 5000 },
+        "targetProjects": { "type": "array" },
+        "isUrgent": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 128 },
+        "authorName": { "type": "string", "maxLength": 150 },
+        "readBy": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "title", "content", "targetProjects", "isUrgent", "createdBy", "authorName", "readBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User accounts created and managed by Admin, keyed by Firebase Auth UID."
+    },
+    "/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/Project" },
+      "description": "Construction projects and sites."
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/DailyReport" },
+      "description": "Daily work reports submitted by site engineers."
+    },
+    "/issues/{issueId}": {
+      "schema": { "$ref": "#/entities/IssueReport" },
+      "description": "Site issues and blockers."
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/ProjectTask" },
+      "description": "Tasks assigned to project sites."
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Official DC announcements."
+    }
+  }
+}

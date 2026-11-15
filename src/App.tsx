@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
+import { Loader2, FolderArchive } from 'lucide-react';
 import { Header } from './components/common/Header';
 import { Navigation } from './components/common/Navigation';
-import { LoginModal } from './components/common/LoginModal';
+import { LoginScreen } from './components/common/LoginScreen';
 import { NotificationsDrawer } from './components/common/NotificationsDrawer';
 import { SettingsModal } from './components/common/SettingsModal';
 import { ShareAppModal } from './components/common/ShareAppModal';
@@ -23,6 +24,8 @@ import { AdminUsersView } from './components/admin/AdminUsersView';
 import { ExportCenterView } from './components/admin/ExportCenterView';
 
 import { dataService } from './services/dataService';
+import { subscribeToAuthState, signOutUser } from './services/firebase';
+import { canAccessProject } from './utils/accessControl';
 import {
   UserProfile,
   Project,
@@ -41,15 +44,13 @@ export default function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
 
-  // Active user session
-  const [currentUser, setCurrentUser] = useState<UserProfile>(() =>
-    dataService.getCurrentUser()
-  );
+  // Firebase Auth Gate State (No dashboard access until authenticated & authorized)
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
 
   // Active navigation tab
-  const [activeTab, setActiveTab] = useState<string>(() =>
-    currentUser.role === 'admin' ? 'dashboard' : 'daily-report'
-  );
+  const [activeTab, setActiveTab] = useState<string>('daily-report');
 
   // Live collections state
   const [projects, setProjects] = useState<Project[]>(() => dataService.getProjects());
@@ -61,7 +62,7 @@ export default function App() {
   );
   const [users, setUsers] = useState<UserProfile[]>(() => dataService.getUsers());
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
-    dataService.getNotifications()
+    dataService.getNotifications(null)
   );
   const [stalledDays, setStalledDays] = useState<number>(() =>
     dataService.getStalledDaysThreshold()
@@ -71,7 +72,6 @@ export default function App() {
   );
 
   // Modals state
-  const [isLoginOpen, setIsLoginOpen] = useState<boolean>(false);
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isShareOpen, setIsShareOpen] = useState<boolean>(false);
@@ -87,32 +87,84 @@ export default function App() {
     }
   }, [darkMode]);
 
+  // Listen to Firebase Auth State
+  useEffect(() => {
+    let active = true;
+    const unsubscribeAuth = subscribeToAuthState(async (firebaseUser) => {
+      if (!active) return;
+
+      if (!firebaseUser) {
+        dataService.clearSession();
+        setCurrentUser(null);
+        setAuthChecking(false);
+        return;
+      }
+
+      setAuthChecking(true);
+      try {
+        const resolvedProfile = await dataService.resolveAuthenticatedProfile(firebaseUser);
+        if (!active) return;
+        setAuthError(null);
+        setCurrentUser(resolvedProfile);
+        setActiveTab(resolvedProfile.role === 'admin' ? 'dashboard' : 'daily-report');
+      } catch (err) {
+        if (!active) return;
+        const code = err instanceof Error ? err.message : '';
+        if (code === 'ACCOUNT_DISABLED') {
+          setAuthError('هذا الحساب معطل حالياً. يرجى التواصل مع مسؤول النظام لإعادة التفعيل.');
+        } else if (code === 'ACCOUNT_NOT_AUTHORIZED') {
+          setAuthError('هذا الحساب غير مسجل أو تم حذفه من قبل مسؤول النظام.');
+        } else {
+          setAuthError('تعذر التحقق من صلاحيات الحساب. يرجى المحاولة مرة أخرى.');
+        }
+        await signOutUser().catch(() => undefined);
+        dataService.clearSession();
+        setCurrentUser(null);
+      } finally {
+        if (active) setAuthChecking(false);
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribeAuth();
+      dataService.stopRealtimeSync();
+    };
+  }, []);
+
   // Subscribe to reactive data store changes
   useEffect(() => {
     const unsubscribe = dataService.subscribe(() => {
+      const activeUser = dataService.getCurrentUser();
       setProjects(dataService.getProjects());
       setReports(dataService.getReports());
       setIssues(dataService.getIssues());
       setTasks(dataService.getTasks());
       setAnnouncements(dataService.getAnnouncements());
       setUsers(dataService.getUsers());
-      setNotifications(dataService.getNotifications());
+      setNotifications(dataService.getNotifications(activeUser));
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
-      setCurrentUser(dataService.getCurrentUser());
+      setCurrentUser((prev) => {
+        if (prev && !activeUser) {
+          // Session was revoked (disabled or deleted in real-time)
+          signOutUser().catch(() => undefined);
+          setAuthError('تم تحديث حالة حسابك أو إيقافه من قبل مسؤول النظام.');
+        }
+        return activeUser;
+      });
     });
     return unsubscribe;
   }, []);
 
-  // When current user changes role, adjust active tab safely
-  const handleSelectUser = (user: UserProfile) => {
-    dataService.setCurrentUser(user);
-    setCurrentUser(user);
-    if (user.role === 'admin') {
-      setActiveTab('dashboard');
-    } else {
-      setActiveTab('daily-report');
-    }
+  const handleLogout = async () => {
+    setIsNotificationsOpen(false);
+    setIsSettingsOpen(false);
+    setIsShareOpen(false);
+    setAuthError(null);
+    dataService.clearSession();
+    setCurrentUser(null);
+    await signOutUser().catch(() => undefined);
   };
 
   const handleToggleDarkMode = () => {
@@ -129,22 +181,44 @@ export default function App() {
     setCutoffHour(hour);
   };
 
-  const handleResetSeedData = () => {
-    dataService.resetToSeed();
-    const freshUser = dataService.getCurrentUser();
-    setCurrentUser(freshUser);
-    setActiveTab(freshUser.role === 'admin' ? 'dashboard' : 'daily-report');
+  const handleResetSeedData = async () => {
+    await dataService.resetToSeed();
   };
 
-  // Urgent counts for navigation badges
+  // Loading Screen while resolving Firebase Auth session
+  if (authChecking) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 p-4">
+        <div className="w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center shadow-lg shadow-blue-600/25 mb-4">
+          <FolderArchive className="w-7 h-7" />
+        </div>
+        <div className="flex items-center gap-2.5 text-sm font-bold text-slate-700 dark:text-slate-300">
+          <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+          <span>جاري التحقق من جلسة الدخول والصلاحيات...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Strict Auth Gate: Show ONLY LoginScreen when unauthenticated
+  if (!currentUser) {
+    return (
+      <LoginScreen
+        darkMode={darkMode}
+        onToggleDarkMode={handleToggleDarkMode}
+        externalError={authError}
+        onClearExternalError={() => setAuthError(null)}
+      />
+    );
+  }
+
+  // Urgent & task counts scoped by role and project access
   const urgentIssuesCount = issues.filter(
-    (i) => i.priority === 'urgent' && i.status !== 'resolved'
+    (i) => i.priority === 'urgent' && i.status !== 'resolved' && canAccessProject(currentUser, i.projectId)
   ).length;
 
   const userOpenTasksCount = tasks.filter(
-    (t) =>
-      t.status !== 'done' &&
-      (currentUser.role === 'admin' || currentUser.assignedProjects.includes(t.projectId))
+    (t) => t.status !== 'done' && canAccessProject(currentUser, t.projectId)
   ).length;
 
   return (
@@ -152,11 +226,13 @@ export default function App() {
       {/* Top Application Header */}
       <Header
         currentUser={currentUser}
+        activeTab={activeTab}
+        onNavigateTab={(tabId) => setActiveTab(tabId)}
         darkMode={darkMode}
         onToggleDarkMode={handleToggleDarkMode}
         onOpenNotifications={() => setIsNotificationsOpen(true)}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenAuth={() => setIsLoginOpen(true)}
+        onLogout={handleLogout}
         onOpenShare={() => setIsShareOpen(true)}
         notifications={notifications}
       />
@@ -171,7 +247,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 transition-all">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 transition-all pb-24 md:pb-8">
         {/* SITE USER SCREENS */}
         {currentUser.role === 'site' && (
           <>
@@ -230,13 +306,18 @@ export default function App() {
             {activeTab === 'submittal-tracker' && (
               <SubmittalTrackerView
                 reports={reports}
+                projects={projects}
                 stalledDaysThreshold={stalledDays}
                 onUpdateStalledDays={handleUpdateStalledDays}
               />
             )}
 
             {activeTab === 'issues' && (
-              <AdminIssuesView issues={issues} projects={projects} />
+              <AdminIssuesView
+                issues={issues}
+                projects={projects}
+                users={users}
+              />
             )}
 
             {activeTab === 'tasks' && (
@@ -261,7 +342,6 @@ export default function App() {
                 users={users}
                 projects={projects}
                 currentUser={currentUser}
-                onSwitchUser={handleSelectUser}
               />
             )}
 
@@ -276,15 +356,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Global Modals & Drawers */}
-      <LoginModal
-        isOpen={isLoginOpen}
-        onClose={() => setIsLoginOpen(false)}
-        users={users}
-        currentUser={currentUser}
-        onSelectUser={handleSelectUser}
-      />
-
+      {/* Global Drawers & Modals */}
       <NotificationsDrawer
         isOpen={isNotificationsOpen}
         onClose={() => setIsNotificationsOpen(false)}
@@ -292,15 +364,17 @@ export default function App() {
         onNavigateTab={(tabId) => setActiveTab(tabId)}
       />
 
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        stalledDays={stalledDays}
-        onUpdateStalledDays={handleUpdateStalledDays}
-        cutoffHour={cutoffHour}
-        onUpdateCutoffHour={handleUpdateCutoffHour}
-        onResetSeedData={handleResetSeedData}
-      />
+      {currentUser.role === 'admin' && (
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          stalledDays={stalledDays}
+          onUpdateStalledDays={handleUpdateStalledDays}
+          cutoffHour={cutoffHour}
+          onUpdateCutoffHour={handleUpdateCutoffHour}
+          onResetSeedData={handleResetSeedData}
+        />
+      )}
 
       <ShareAppModal
         isOpen={isShareOpen}

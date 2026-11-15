@@ -37,6 +37,7 @@ export const SettingsModal: React.FC<Props> = ({
   const [resetConfirmMsg, setResetConfirmMsg] = useState<boolean>(false);
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
   const [backupSuccessMsg, setBackupSuccessMsg] = useState<string | null>(null);
+  const [backupErrorMsg, setBackupErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   if (!isOpen) return null;
@@ -82,6 +83,7 @@ export const SettingsModal: React.FC<Props> = ({
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBackupErrorMsg(null);
     const reader = new FileReader();
     reader.onload = (event) => {
       const content = event.target?.result as string;
@@ -92,7 +94,7 @@ export const SettingsModal: React.FC<Props> = ({
           onClose();
         }, 1500);
       } else {
-        alert('تعذر استيراد الملف. يرجى التأكد من اختيار ملف JSON صحيح.');
+        setBackupErrorMsg('تعذر استيراد الملف. يرجى التأكد من اختيار ملف JSON صحيح.');
       }
     };
     reader.readAsText(file);
@@ -139,19 +141,25 @@ export const SettingsModal: React.FC<Props> = ({
           </div>
         )}
 
-        {/* Setting 0: Standalone Storage Status */}
+        {backupErrorMsg && (
+          <div className="p-3 bg-red-50 dark:bg-red-950 border border-red-300 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-xs font-medium">
+            {backupErrorMsg}
+          </div>
+        )}
+
+        {/* Setting 0: Firebase Auth & Firestore Status */}
         <div className="p-3.5 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs space-y-1.5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 font-bold text-emerald-900 dark:text-emerald-200">
               <Database className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              <span>نمط العمل: تخزين محلي مستقل (100% Local Storage)</span>
+              <span>المصادقة والمزامنة: Firebase Auth & Firestore</span>
             </div>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-300 font-bold">
-              Standalone Static
+              Cloud Sync
             </span>
           </div>
           <p className="text-slate-600 dark:text-slate-400 text-[11px] leading-relaxed">
-            يعمل التطبيق بشكل مستقل تماماً داخل متصفحك دون الحاجة لأي خوادم سحابية أو اشتراكات خارجية، ويتم حفظ كافة المشاريع والتقارير والبلاغات والمسودات محلياً.
+            تتم مصادقة المستخدمين عبر Firebase Authentication ومزامنة بيانات المشاريع والتقارير والصلاحيات عبر Firestore مع حفظ المسودات محلياً.
           </p>
         </div>
 

@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { UserProfile, ProjectTask } from '../../types';
 import { dataService } from '../../services/dataService';
+import { canAccessProject } from '../../utils/accessControl';
 
 interface Props {
   currentUser: UserProfile;
@@ -22,11 +23,8 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
   const [proofNote, setProofNote] = useState<string>('');
   const [proofAttachment, setProofAttachment] = useState<string>('');
 
-  // Filter tasks belonging to user's assigned projects (or all for admin)
-  const myTasks =
-    currentUser.role === 'admin'
-      ? tasks
-      : tasks.filter((t) => currentUser.assignedProjects.includes(t.projectId));
+  // Filter tasks belonging to user's assigned projects (or all for admin / allProjects)
+  const myTasks = tasks.filter((t) => canAccessProject(currentUser, t.projectId));
 
   const todayStr = new Date().toISOString().split('T')[0];
 

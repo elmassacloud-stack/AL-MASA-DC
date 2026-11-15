@@ -26,19 +26,25 @@ export function getAppUrl(): string {
   return SHARED_APP_URL;
 }
 
-// 1. PRIMARY ADMIN EMAILS (البريد الإلكتروني المعتمد لمدير مراقبة الوثائق DC Manager)
-// Configurable at the very top: matches admin accounts and grants full control.
-export const ADMIN_EMAIL_CONFIG = 'admin@dc-manager.com';
+// 1. PRIMARY SUPER ADMIN EMAIL (البريد الإلكتروني المعتمد للمسؤول الرئيسي)
+export const SUPER_ADMIN_EMAIL = 'elmassacloud@gmail.com';
+export const ADMIN_EMAIL_CONFIG = SUPER_ADMIN_EMAIL;
 export const ALLOWED_ADMIN_EMAILS: string[] = [
-  ADMIN_EMAIL_CONFIG,
-  'elmassacloud@gmail.com', // Active session user
+  SUPER_ADMIN_EMAIL,
+  'admin@dc-manager.com',
   'dc.manager@example.com'
 ];
+
+// Helper to check if an email is the primary Super Admin
+export function isSuperAdminEmail(email?: string | null): boolean {
+  if (!email) return false;
+  return email.trim().toLowerCase() === SUPER_ADMIN_EMAIL;
+}
 
 // Helper to check if an email has admin privileges
 export function isConfiguredAdminEmail(email?: string | null): boolean {
   if (!email) return false;
-  return ALLOWED_ADMIN_EMAILS.some((adm) => adm.toLowerCase() === email.toLowerCase());
+  return ALLOWED_ADMIN_EMAILS.some((adm) => adm.toLowerCase() === email.trim().toLowerCase());
 }
 
 // 2. SUBMITTAL STATUS CODES CONFIGURATION (مواقف التقديمات الهندسية)

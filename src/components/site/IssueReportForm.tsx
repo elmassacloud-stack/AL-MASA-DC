@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   AlertTriangle,
   Camera,
@@ -14,6 +14,7 @@ import {
 import { UserProfile, Project, IssueType, IssuePriority } from '../../types';
 import { ISSUE_TYPES_CONFIG } from '../../config';
 import { dataService } from '../../services/dataService';
+import { getAccessibleProjects } from '../../utils/accessControl';
 
 interface Props {
   currentUser: UserProfile;
@@ -26,14 +27,21 @@ export const IssueReportForm: React.FC<Props> = ({
   projects,
   onIssueReported
 }) => {
-  const accessibleProjects =
-    currentUser.role === 'admin'
-      ? projects
-      : projects.filter((p) => currentUser.assignedProjects.includes(p.id));
+  const accessibleProjects = getAccessibleProjects(currentUser, projects);
 
   const [projectId, setProjectId] = useState<string>(
-    accessibleProjects[0]?.id || 'proj-ravel-3'
+    accessibleProjects[0]?.id || ''
   );
+
+  useEffect(() => {
+    if (accessibleProjects.length === 0) {
+      if (projectId !== '') setProjectId('');
+      return;
+    }
+    if (!accessibleProjects.some((p) => p.id === projectId)) {
+      setProjectId(accessibleProjects[0].id);
+    }
+  }, [accessibleProjects, projectId]);
   const [type, setType] = useState<IssueType>('documents_archive');
   const [priority, setPriority] = useState<IssuePriority>('urgent');
   const [description, setDescription] = useState<string>('');
@@ -164,13 +172,18 @@ export const IssueReportForm: React.FC<Props> = ({
             <select
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              className="w-full h-11 px-3 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+              disabled={accessibleProjects.length === 0}
+              className="w-full h-11 px-3 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white disabled:opacity-60"
             >
-              {accessibleProjects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.code})
-                </option>
-              ))}
+              {accessibleProjects.length === 0 ? (
+                <option value="">لا توجد مشاريع مسندة لحسابك</option>
+              ) : (
+                accessibleProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.code})
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
@@ -308,8 +321,8 @@ export const IssueReportForm: React.FC<Props> = ({
         <div className="flex justify-end">
           <button
             type="submit"
-            disabled={isSubmitting}
-            className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50"
+            disabled={isSubmitting || accessibleProjects.length === 0}
+            className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Send className="w-5 h-5" />
             <span>تسجيل وإرسال البلاغ فوراً</span>

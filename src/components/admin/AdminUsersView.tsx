@@ -2,78 +2,179 @@ import React, { useState } from 'react';
 import {
   Users,
   UserPlus,
-  Building,
   Mail,
   Phone,
-  Shield,
   CheckCircle2,
   XCircle,
   Edit2,
   Lock,
   Unlock,
   X,
-  LogIn
+  Trash2,
+  Briefcase,
+  KeyRound,
+  Eye,
+  EyeOff,
+  AlertCircle,
+  Loader2,
+  ShieldCheck,
+  Search
 } from 'lucide-react';
 import { UserProfile, Project, UserRole } from '../../types';
 import { dataService } from '../../services/dataService';
+import { translateFirebaseAuthError } from '../../services/firebase';
+import { isSuperAdminEmail } from '../../config';
 
 interface Props {
   users: UserProfile[];
   projects: Project[];
   currentUser: UserProfile;
-  onSwitchUser: (user: UserProfile) => void;
 }
 
 export const AdminUsersView: React.FC<Props> = ({
   users,
   projects,
-  currentUser,
-  onSwitchUser
+  currentUser
 }) => {
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [isCreating, setIsCreating] = useState<boolean>(false);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
   // New user form state
-  const [email, setEmail] = useState<string>('');
   const [displayName, setDisplayName] = useState<string>('');
+  const [jobTitle, setJobTitle] = useState<string>('');
+  const [email, setEmail] = useState<string>('');
+  const [password, setPassword] = useState<string>('');
+  const [showPassword, setShowPassword] = useState<boolean>(false);
   const [role, setRole] = useState<UserRole>('site');
-  const [assignedProjects, setAssignedProjects] = useState<string[]>(['proj-ravel-3']);
+  const [allProjects, setAllProjects] = useState<boolean>(false);
+  const [assignedProjects, setAssignedProjects] = useState<string[]>(
+    projects[0]?.id ? [projects[0].id] : []
+  );
   const [phone, setPhone] = useState<string>('');
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState<boolean>(false);
 
-  const handleCreateUser = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email.trim() || !displayName.trim()) return;
+  // Edit user state
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState<boolean>(false);
 
-    dataService.addUser({
-      email: email.trim().toLowerCase(),
-      displayName: displayName.trim(),
-      role,
-      assignedProjects: role === 'admin' ? projects.map((p) => p.id) : assignedProjects,
-      status: 'active',
-      phone: phone.trim()
-    });
-
-    setIsCreating(false);
-    setEmail('');
-    setDisplayName('');
-    setPhone('');
-    setAssignedProjects(['proj-ravel-3']);
+  const showToast = (msg: string) => {
+    setActionFeedback(msg);
+    setTimeout(() => setActionFeedback(null), 3500);
   };
 
-  const handleUpdateProjects = (e: React.FormEvent) => {
+  const resetCreateForm = () => {
+    setDisplayName('');
+    setJobTitle('');
+    setEmail('');
+    setPassword('');
+    setShowPassword(false);
+    setRole('site');
+    setAllProjects(false);
+    setAssignedProjects(projects[0]?.id ? [projects[0].id] : []);
+    setPhone('');
+    setCreateError(null);
+  };
+
+  const handleOpenCreateModal = () => {
+    resetCreateForm();
+    setIsCreating(true);
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateError(null);
+
+    if (!displayName.trim() || !jobTitle.trim() || !email.trim() || !password) {
+      setCreateError('يرجى تعبئة جميع الحقول الإلزامية (الاسم، المسمى الوظيفي، البريد، كلمة المرور).');
+      return;
+    }
+
+    if (password.length < 6) {
+      setCreateError('كلمة المرور يجب أن تتكون من 6 أحرف على الأقل.');
+      return;
+    }
+
+    if (role === 'site' && !allProjects && assignedProjects.length === 0) {
+      setCreateError('يرجى تحديد مشروع واحد على الأقل أو تفعيل خيار "جميع المشاريع".');
+      return;
+    }
+
+    setIsSubmittingCreate(true);
+    try {
+      await dataService.createUserWithAuth({
+        displayName: displayName.trim(),
+        jobTitle: jobTitle.trim(),
+        email: email.trim().toLowerCase(),
+        password,
+        role,
+        allProjects: role === 'admin' ? true : allProjects,
+        assignedProjects: role === 'admin' || allProjects ? projects.map((p) => p.id) : assignedProjects,
+        phone: phone.trim()
+      });
+
+      setIsCreating(false);
+      resetCreateForm();
+      showToast('تم إنشاء حساب المستخدم وإضافته بنجاح.');
+    } catch (err) {
+      setCreateError(translateFirebaseAuthError(err));
+    } finally {
+      setIsSubmittingCreate(false);
+    }
+  };
+
+  const handleSaveEditUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
+    setEditError(null);
 
-    dataService.updateUser(editingUser.id, {
-      assignedProjects: editingUser.assignedProjects
-    });
+    if (!editingUser.displayName.trim()) {
+      setEditError('يرجى إدخال الاسم الكامل للمستخدم.');
+      return;
+    }
 
-    setEditingUser(null);
+    const isAll = editingUser.role === 'admin' || Boolean(editingUser.allProjects);
+    if (!isAll && (!editingUser.assignedProjects || editingUser.assignedProjects.length === 0)) {
+      setEditError('يرجى تحديد مشروع واحد على الأقل أو تفعيل خيار "جميع المشاريع".');
+      return;
+    }
+
+    setIsSubmittingEdit(true);
+    try {
+      await dataService.updateUser(editingUser.id, {
+        displayName: editingUser.displayName.trim(),
+        jobTitle: (editingUser.jobTitle || '').trim(),
+        role: editingUser.role,
+        allProjects: isAll,
+        assignedProjects: isAll ? projects.map((p) => p.id) : editingUser.assignedProjects,
+        phone: (editingUser.phone || '').trim() || undefined
+      });
+      setEditingUser(null);
+      showToast('تم تحديث بيانات المستخدم والمشاريع المسندة بنجاح.');
+    } catch {
+      setEditError('حدث خطأ أثناء حفظ التعديلات. يرجى المحاولة مجدداً.');
+    } finally {
+      setIsSubmittingEdit(false);
+    }
   };
 
-  const toggleStatus = (user: UserProfile) => {
+  const toggleStatus = async (user: UserProfile) => {
+    if (isSuperAdminEmail(user.email) || user.id === currentUser.id) return;
     const nextStatus = user.status === 'active' ? 'disabled' : 'active';
-    dataService.updateUser(user.id, { status: nextStatus });
+    await dataService.updateUser(user.id, { status: nextStatus });
+    showToast(nextStatus === 'active' ? `تم تفعيل حساب ${user.displayName}.` : `تم تعطيل حساب ${user.displayName}.`);
+  };
+
+  const handleDeleteUser = async (user: UserProfile) => {
+    if (isSuperAdminEmail(user.email) || user.id === currentUser.id) return;
+    const ok = await dataService.deleteUser(user.id);
+    setConfirmDeleteId(null);
+    if (ok) {
+      showToast(`تم حذف حساب ${user.displayName} من النظام.`);
+    }
   };
 
   const toggleProjectInAssign = (projId: string) => {
@@ -91,6 +192,19 @@ export const AdminUsersView: React.FC<Props> = ({
     setEditingUser({ ...editingUser, assignedProjects: updated });
   };
 
+  const filteredUsers = users.filter((u) => {
+    if (!searchQuery.trim()) return true;
+    const q = searchQuery.toLowerCase();
+    return (
+      u.displayName.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      (u.jobTitle || '').toLowerCase().includes(q)
+    );
+  });
+
+  const activeCount = users.filter((u) => u.status === 'active').length;
+  const disabledCount = users.filter((u) => u.status === 'disabled').length;
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
       {/* Header */}
@@ -98,78 +212,137 @@ export const AdminUsersView: React.FC<Props> = ({
         <div>
           <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
             <Users className="w-5 h-5 text-blue-600" />
-            <span>إدارة مستخدمي ومسؤولي المواقع (Users & Access)</span>
+            <span>إدارة المستخدمين والصلاحيات</span>
           </h2>
-          <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 font-medium">
-            إضافة مهندسي المواقع، تحديد الصلاحيات (Admin / Site)، وإسناد المشاريع المعتمدة
+          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 font-medium mt-0.5">
+            إضافة المستخدمين، تحديد المسمى الوظيفي وكلمة المرور، وتخصيص المواقع والمشاريع المصرح بها
           </p>
         </div>
 
         <button
-          onClick={() => setIsCreating(true)}
-          className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer shadow-xs self-start sm:self-auto transition-colors"
+          type="button"
+          onClick={handleOpenCreateModal}
+          className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer shadow-xs self-start sm:self-auto transition-colors whitespace-nowrap"
         >
           <UserPlus className="w-4 h-4" />
           <span>إضافة مستخدم جديد</span>
         </button>
       </div>
 
-      {/* Users List */}
+      {actionFeedback && (
+        <div className="p-3.5 bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 rounded-xl text-emerald-800 dark:text-emerald-300 text-xs sm:text-sm font-bold flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+          <span>{actionFeedback}</span>
+        </div>
+      )}
+
+      {/* Search & Summary Bar */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="relative flex-1 max-w-md">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="بحث بالاسم، المسمى الوظيفي، أو البريد الإلكتروني..."
+            className="w-full h-10 pr-9 pl-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+          />
+          <Search className="w-4 h-4 text-slate-400 absolute right-3 top-3 pointer-events-none" />
+        </div>
+
+        <div className="flex items-center gap-2 text-xs font-bold tabular-nums">
+          <span className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+            الإجمالي: {users.length}
+          </span>
+          <span className="px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+            نشط: {activeCount}
+          </span>
+          <span className="px-3 py-1.5 rounded-lg bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+            معطل: {disabledCount}
+          </span>
+        </div>
+      </div>
+
+      {/* Users Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {users.map((user) => {
+        {filteredUsers.map((user) => {
           const isMe = user.id === currentUser.id;
-          const userProjs = projects.filter((p) => user.assignedProjects.includes(p.id));
+          const isSuper = isSuperAdminEmail(user.email);
+          const hasAll = user.role === 'admin' || user.allProjects === true || isSuper;
+          const userProjs = projects.filter((p) => (user.assignedProjects || []).includes(p.id));
+          const isConfirmingDelete = confirmDeleteId === user.id;
 
           return (
             <div
               key={user.id}
               className={`bg-white dark:bg-slate-900 rounded-2xl p-5 border transition-all shadow-xs flex flex-col justify-between ${
                 user.status === 'disabled'
-                  ? 'border-slate-300 dark:border-slate-800 opacity-60'
+                  ? 'border-rose-200 dark:border-rose-900/60 opacity-75'
                   : 'border-slate-200 dark:border-slate-800'
               }`}
             >
               <div className="space-y-3">
+                {/* User Header */}
                 <div className="flex items-start justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <h3 className="font-bold text-base text-slate-900 dark:text-white truncate">
                         {user.displayName}
                       </h3>
                       {isMe && (
-                        <span className="text-[10px] bg-blue-600 text-white px-2 py-0.2 rounded-full font-bold">
+                        <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-bold">
                           أنت
                         </span>
                       )}
+                      {isSuper && (
+                        <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800 px-2 py-0.5 rounded-full font-bold inline-flex items-center gap-1">
+                          <ShieldCheck className="w-3 h-3" />
+                          <span>المسؤول الرئيسي</span>
+                        </span>
+                      )}
                     </div>
-                    <div className="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-300 mt-1 font-medium">
-                      <Mail className="w-3.5 h-3.5 text-slate-400" />
-                      <span>{user.email}</span>
+
+                    {user.jobTitle && (
+                      <div className="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-300 mt-1 font-semibold">
+                        <Briefcase className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                        <span className="truncate">{user.jobTitle}</span>
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400 mt-1 font-mono">
+                      <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span className="truncate" dir="ltr">{user.email}</span>
                     </div>
+
+                    {user.phone && (
+                      <div className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400 mt-0.5 font-mono">
+                        <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                        <span dir="ltr">{user.phone}</span>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Role pill */}
+                  {/* Role Badge */}
                   <span
-                    className={`text-xs px-2.5 py-1 rounded-full font-bold ${
-                      user.role === 'admin'
-                        ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 border border-purple-200 dark:border-purple-800'
+                    className={`text-xs px-2.5 py-1 rounded-full font-bold shrink-0 ${
+                      user.role === 'admin' || isSuper
+                        ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800'
                         : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800'
                     }`}
                   >
-                    {user.role === 'admin' ? 'مدير DC' : 'مهندس موقع'}
+                    {user.role === 'admin' || isSuper ? 'مسؤول نظام (Admin)' : 'مستخدم موقع'}
                   </span>
                 </div>
 
                 {/* Status Indicator */}
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-700 dark:text-slate-300 font-medium">حالة الحساب:</span>
+                  <span className="text-slate-600 dark:text-slate-400 font-medium">حالة الحساب:</span>
                   {user.status === 'active' ? (
-                    <span className="inline-flex items-center gap-1 text-emerald-600 font-bold">
+                    <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 font-bold">
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>نشط</span>
+                      <span>نشط ومفعل</span>
                     </span>
                   ) : (
-                    <span className="inline-flex items-center gap-1 text-red-600 font-bold">
+                    <span className="inline-flex items-center gap-1 text-rose-600 dark:text-rose-400 font-bold">
                       <XCircle className="w-3.5 h-3.5" />
                       <span>معطل</span>
                     </span>
@@ -178,23 +351,23 @@ export const AdminUsersView: React.FC<Props> = ({
 
                 {/* Assigned Projects */}
                 <div>
-                  <span className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    المشاريع المسندة:
+                  <span className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                    المشاريع والمواقع المصرح بها:
                   </span>
-                  <div className="flex flex-wrap gap-1">
-                    {user.role === 'admin' ? (
-                      <span className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
-                        كافة مشاريع الشركة (صلاحية كاملة)
+                  <div className="flex flex-wrap gap-1.5">
+                    {hasAll ? (
+                      <span className="text-[11px] px-2.5 py-1 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        جميع المشاريع (صلاحية كاملة)
                       </span>
                     ) : userProjs.length === 0 ? (
-                      <span className="text-[11px] text-slate-400 italic">
-                        لم يتم تعيين مشاريع بعد
+                      <span className="text-[11px] text-rose-600 dark:text-rose-400 font-semibold">
+                        لا توجد مشاريع مسندة
                       </span>
                     ) : (
                       userProjs.map((p) => (
                         <span
                           key={p.id}
-                          className="text-[11px] px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-100 dark:border-blue-900"
+                          className="text-[11px] px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-900 font-semibold"
                         >
                           {p.name}
                         </span>
@@ -205,93 +378,233 @@ export const AdminUsersView: React.FC<Props> = ({
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center justify-between gap-2 pt-3 mt-3 border-t border-slate-100 dark:border-slate-800 text-xs">
-                {/* Switch to user test button */}
-                <button
-                  type="button"
-                  onClick={() => onSwitchUser(user)}
-                  className="px-2.5 py-1.5 rounded-lg font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950 flex items-center gap-1 cursor-pointer"
-                  title="تجربة الدخول بهذا المستخدم"
-                >
-                  <LogIn className="w-3.5 h-3.5" />
-                  <span>دخول كـ {user.displayName.split(' ')[0]}</span>
-                </button>
-
-                <div className="flex items-center gap-1">
-                  {user.role === 'site' && (
+              <div className="pt-3 mt-4 border-t border-slate-100 dark:border-slate-800 text-xs">
+                {isConfirmingDelete ? (
+                  <div className="flex items-center justify-between gap-2 bg-rose-50 dark:bg-rose-950/50 p-2 rounded-xl border border-rose-200 dark:border-rose-800">
+                    <span className="font-bold text-rose-800 dark:text-rose-200">تأكيد حذف المستخدم؟</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteUser(user)}
+                        className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                      >
+                        حذف نهائي
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-2">
                     <button
-                      onClick={() => setEditingUser(user)}
-                      className="p-1.5 text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg cursor-pointer"
-                      title="تعديل المشاريع المسندة"
+                      type="button"
+                      onClick={() => {
+                        setEditError(null);
+                        setEditingUser({ ...user });
+                      }}
+                      className="px-3 py-1.5 rounded-lg font-bold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-blue-50 hover:text-blue-700 dark:hover:bg-blue-950 dark:hover:text-blue-300 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="تعديل بيانات ومشاريع المستخدم"
                     >
-                      <Edit2 className="w-4 h-4" />
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>تعديل المشاريع والبيانات</span>
                     </button>
-                  )}
 
-                  {!isMe && (
-                    <button
-                      onClick={() => toggleStatus(user)}
-                      className="p-1.5 text-slate-500 hover:text-red-500 rounded-lg cursor-pointer"
-                      title={user.status === 'active' ? 'تعطيل الحساب' : 'تفعيل الحساب'}
-                    >
-                      {user.status === 'active' ? (
-                        <Lock className="w-4 h-4" />
-                      ) : (
-                        <Unlock className="w-4 h-4 text-emerald-600" />
-                      )}
-                    </button>
-                  )}
-                </div>
+                    {!isSuper && !isMe && (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleStatus(user)}
+                          className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                            user.status === 'active'
+                              ? 'border-slate-200 dark:border-slate-700 text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950'
+                              : 'border-emerald-200 dark:border-emerald-800 text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950'
+                          }`}
+                          title={user.status === 'active' ? 'تعطيل الحساب' : 'تفعيل الحساب'}
+                        >
+                          {user.status === 'active' ? (
+                            <Lock className="w-4 h-4" />
+                          ) : (
+                            <Unlock className="w-4 h-4" />
+                          )}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteId(user.id)}
+                          className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950 transition-colors cursor-pointer"
+                          title="حذف المستخدم"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* Edit Projects Modal */}
+      {/* Edit User & Assigned Projects Modal */}
       {editingUser && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl p-5 shadow-xl border border-slate-200 dark:border-slate-800 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl p-5 sm:p-6 shadow-xl border border-slate-200 dark:border-slate-800 space-y-4 my-auto">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
               <div>
-                <h3 className="font-bold text-slate-900 dark:text-white">
-                  تعديل المشاريع المسندة للمستخدم
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  تعديل بيانات المستخدم والمشاريع
                 </h3>
-                <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">{editingUser.displayName}</p>
+                <p className="text-xs text-slate-600 dark:text-slate-400 font-mono mt-0.5" dir="ltr">
+                  {editingUser.email}
+                </p>
               </div>
               <button
+                type="button"
                 onClick={() => setEditingUser(null)}
-                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleUpdateProjects} className="space-y-4 text-xs sm:text-sm">
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {projects.map((p) => {
-                  const isChecked = editingUser.assignedProjects.includes(p.id);
-                  return (
-                    <label
-                      key={p.id}
-                      className="flex items-center gap-2 p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => toggleProjectInEdit(p.id)}
-                        className="w-4 h-4 rounded-md text-blue-600 focus:ring-blue-500"
-                      />
-                      <div>
-                        <span className="font-bold text-slate-800 dark:text-slate-200 block">
-                          {p.name}
-                        </span>
-                        <span className="text-[11px] text-slate-400 font-mono">{p.code}</span>
-                      </div>
-                    </label>
-                  );
-                })}
+            {editError && (
+              <div className="p-3 bg-red-50 dark:bg-red-950/80 border border-red-300 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{editError}</span>
               </div>
+            )}
+
+            <form onSubmit={handleSaveEditUser} className="space-y-4 text-xs sm:text-sm">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    الاسم الكامل
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editingUser.displayName}
+                    onChange={(e) =>
+                      setEditingUser({ ...editingUser, displayName: e.target.value })
+                    }
+                    className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    المسمى الوظيفي
+                  </label>
+                  <input
+                    type="text"
+                    value={editingUser.jobTitle || ''}
+                    onChange={(e) =>
+                      setEditingUser({ ...editingUser, jobTitle: e.target.value })
+                    }
+                    placeholder="مهندس موقع / مراقب وثائق"
+                    className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+                  />
+                </div>
+              </div>
+
+              {!isSuperAdminEmail(editingUser.email) && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      الدور والصلاحية
+                    </label>
+                    <select
+                      value={editingUser.role}
+                      onChange={(e) =>
+                        setEditingUser({
+                          ...editingUser,
+                          role: e.target.value as UserRole,
+                          allProjects: e.target.value === 'admin' ? true : editingUser.allProjects
+                        })
+                      }
+                      className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-bold"
+                    >
+                      <option value="site">مهندس / مراقب موقع (Site)</option>
+                      <option value="admin">مسؤول النظام / مدير DC (Admin)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      رقم الجوال (اختياري)
+                    </label>
+                    <input
+                      type="text"
+                      dir="ltr"
+                      value={editingUser.phone || ''}
+                      onChange={(e) =>
+                        setEditingUser({ ...editingUser, phone: e.target.value })
+                      }
+                      className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-mono text-left"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* All Projects Toggle */}
+              {editingUser.role === 'site' && (
+                <div className="space-y-2.5">
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingUser.allProjects)}
+                      onChange={(e) =>
+                        setEditingUser({ ...editingUser, allProjects: e.target.checked })
+                      }
+                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <div>
+                      <span className="font-bold text-emerald-900 dark:text-emerald-200 text-xs block">
+                        منح صلاحية الوصول إلى "جميع المشاريع"
+                      </span>
+                      <span className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                        يتيح للمستخدم عرض وتقديم التقارير لجميع المشاريع الحالية والمستقبلية
+                      </span>
+                    </div>
+                  </label>
+
+                  {!editingUser.allProjects && (
+                    <div className="space-y-2 max-h-52 overflow-y-auto p-1">
+                      <span className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                        أو اختر المشاريع / المواقع المحددة:
+                      </span>
+                      {projects.map((p) => {
+                        const isChecked = (editingUser.assignedProjects || []).includes(p.id);
+                        return (
+                          <label
+                            key={p.id}
+                            className="flex items-center gap-2.5 p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => toggleProjectInEdit(p.id)}
+                              className="w-4 h-4 rounded-md text-blue-600 focus:ring-blue-500"
+                            />
+                            <div>
+                              <span className="font-bold text-slate-800 dark:text-slate-200 block text-xs">
+                                {p.name}
+                              </span>
+                              <span className="text-[11px] text-slate-500 font-mono">{p.code}</span>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
                 <button
@@ -303,9 +616,11 @@ export const AdminUsersView: React.FC<Props> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs"
+                  disabled={isSubmittingEdit}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs flex items-center gap-2 disabled:opacity-50"
                 >
-                  حفظ التعديلات
+                  {isSubmittingEdit && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>حفظ التعديلات</span>
                 </button>
               </div>
             </form>
@@ -313,63 +628,124 @@ export const AdminUsersView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Create User Modal */}
+      {/* Create New User Modal */}
       {isCreating && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl p-5 shadow-xl border border-slate-200 dark:border-slate-800 space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-2xl p-5 sm:p-6 shadow-xl border border-slate-200 dark:border-slate-800 space-y-4 my-auto">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-              <h3 className="font-bold text-slate-900 dark:text-white">
-                إضافة مستخدم موقع أو مدير جديد
-              </h3>
+              <div>
+                <h3 className="font-bold text-slate-900 dark:text-white text-base">
+                  إضافة مستخدم جديد للنظام
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400">
+                  يُنشأ الحساب فوراً في Firebase Authentication مع تعيين المشاريع المصرح بها
+                </p>
+              </div>
               <button
+                type="button"
                 onClick={() => setIsCreating(false)}
-                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
+            {createError && (
+              <div className="p-3 bg-red-50 dark:bg-red-950/80 border border-red-300 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{createError}</span>
+              </div>
+            )}
+
             <form onSubmit={handleCreateUser} className="space-y-4 text-xs sm:text-sm">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  الاسم الكامل
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="مثال: م/ عبد الله الشمري"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  البريد الإلكتروني للوجين (Email)
-                </label>
-                <input
-                  type="email"
-                  required
-                  placeholder="engineer@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-mono text-left"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    الدور والصلاحية (Role)
+                    الاسم الكامل <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="مثال: م/ عبد الله الشمري"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    المسمى الوظيفي <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="مثال: مهندس موقع / مراقب وثائق"
+                    value={jobTitle}
+                    onChange={(e) => setJobTitle(e.target.value)}
+                    className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    البريد الإلكتروني <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="email"
+                      required
+                      dir="ltr"
+                      placeholder="engineer@company.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      className="w-full h-11 pr-9 pl-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-mono text-left"
+                    />
+                    <Mail className="w-4 h-4 text-slate-400 absolute right-3 top-3.5 pointer-events-none" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    كلمة المرور <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      required
+                      minLength={6}
+                      dir="ltr"
+                      placeholder="6 أحرف على الأقل"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      className="w-full h-11 pr-9 pl-9 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-mono text-left"
+                    />
+                    <KeyRound className="w-4 h-4 text-slate-400 absolute right-3 top-3.5 pointer-events-none" />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute left-3 top-3 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    الدور والصلاحية
                   </label>
                   <select
                     value={role}
                     onChange={(e) => setRole(e.target.value as UserRole)}
                     className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-bold"
                   >
-                    <option value="site">site (مهندس موقع - يرى ويكتب بيانات مشاريعه فقط)</option>
-                    <option value="admin">admin (مدير DC - يرى ويدير كل شيء)</option>
+                    <option value="site">مهندس / مراقب موقع (مقيد بمشاريع)</option>
+                    <option value="admin">مسؤول النظام / مدير DC (كامل الصلاحيات)</option>
                   </select>
                 </div>
 
@@ -379,6 +755,7 @@ export const AdminUsersView: React.FC<Props> = ({
                   </label>
                   <input
                     type="text"
+                    dir="ltr"
                     placeholder="+966 50 000 0000"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
@@ -389,30 +766,51 @@ export const AdminUsersView: React.FC<Props> = ({
 
               {/* Projects Assignment (if site role) */}
               {role === 'site' && (
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                    المشاريع المصرح بها لهذا المهندس:
+                <div className="space-y-2.5">
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    صلاحية الوصول للمشاريع والمواقع:
                   </label>
-                  <div className="space-y-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 max-h-36 overflow-y-auto">
-                    {projects.map((p) => {
-                      const isChecked = assignedProjects.includes(p.id);
-                      return (
-                        <label key={p.id} className="flex items-center gap-2 cursor-pointer text-xs">
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => toggleProjectInAssign(p.id)}
-                            className="w-4 h-4 rounded-md text-blue-600 focus:ring-blue-500"
-                          />
-                          <span className="text-slate-800 dark:text-slate-200">{p.name} ({p.code})</span>
-                        </label>
-                      );
-                    })}
-                  </div>
+
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allProjects}
+                      onChange={(e) => setAllProjects(e.target.checked)}
+                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <span className="font-bold text-emerald-900 dark:text-emerald-200 text-xs">
+                      جميع المشاريع (منح صلاحية الوصول لكافة المواقع)
+                    </span>
+                  </label>
+
+                  {!allProjects && (
+                    <div className="space-y-1.5 p-3 rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 max-h-40 overflow-y-auto">
+                      {projects.length === 0 ? (
+                        <p className="text-xs text-slate-500">لا توجد مشاريع مضافة حالياً.</p>
+                      ) : (
+                        projects.map((p) => {
+                          const isChecked = assignedProjects.includes(p.id);
+                          return (
+                            <label key={p.id} className="flex items-center gap-2 cursor-pointer text-xs py-1">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => toggleProjectInAssign(p.id)}
+                                className="w-4 h-4 rounded-md text-blue-600 focus:ring-blue-500"
+                              />
+                              <span className="text-slate-800 dark:text-slate-200 font-semibold">
+                                {p.name} ({p.code})
+                              </span>
+                            </label>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
                 <button
                   type="button"
                   onClick={() => setIsCreating(false)}
@@ -422,9 +820,11 @@ export const AdminUsersView: React.FC<Props> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs"
+                  disabled={isSubmittingCreate}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs flex items-center gap-2 disabled:opacity-50"
                 >
-                  إنشاء المستخدم
+                  {isSubmittingCreate && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>إنشاء المستخدم</span>
                 </button>
               </div>
             </form>

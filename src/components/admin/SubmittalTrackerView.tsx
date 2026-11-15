@@ -12,12 +12,13 @@ import {
   Calendar,
   Sparkles
 } from 'lucide-react';
-import { DailyReport, SubmittalStatusCode } from '../../types';
+import { DailyReport, SubmittalStatusCode, Project } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { DEFAULT_STALLED_DAYS_THRESHOLD, SUBMITTAL_STATUS_CONFIG } from '../../config';
 
 interface Props {
   reports: DailyReport[];
+  projects?: Project[];
   stalledDaysThreshold?: number;
   onUpdateStalledDays?: (days: number) => void;
 }
@@ -48,10 +49,12 @@ interface GroupedSubmittal {
 
 export const SubmittalTrackerView: React.FC<Props> = ({
   reports,
+  projects = [],
   stalledDaysThreshold = DEFAULT_STALLED_DAYS_THRESHOLD,
   onUpdateStalledDays
 }) => {
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [filterProject, setFilterProject] = useState<string>('all');
   const [thresholdDays, setThresholdDays] = useState<number>(stalledDaysThreshold);
   const [expandedSubmittals, setExpandedSubmittals] = useState<Set<string>>(new Set());
 
@@ -143,17 +146,19 @@ export const SubmittalTrackerView: React.FC<Props> = ({
     return result;
   }, [allSubmittals, thresholdDays]);
 
-  // Filtered by search query
+  // Filtered by project and search query
   const filteredSubmittals = useMemo(() => {
-    if (!searchQuery.trim()) return groupedSubmittals;
-    const q = searchQuery.toLowerCase();
-    return groupedSubmittals.filter(
-      (s) =>
+    return groupedSubmittals.filter((s) => {
+      if (filterProject !== 'all' && s.projectId !== filterProject) return false;
+      if (!searchQuery.trim()) return true;
+      const q = searchQuery.toLowerCase();
+      return (
         s.submittalNumber.toLowerCase().includes(q) ||
         s.itemDescription.toLowerCase().includes(q) ||
         s.projectName.toLowerCase().includes(q)
-    );
-  }, [groupedSubmittals, searchQuery]);
+      );
+    });
+  }, [groupedSubmittals, searchQuery, filterProject]);
 
   // Stalled Submittals list
   const stalledSubmittals = useMemo(() => {
@@ -271,8 +276,23 @@ export const SubmittalTrackerView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Search Toolbar */}
+      {/* Search & Project Filter Toolbar */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row gap-3">
+        {projects.length > 0 && (
+          <select
+            value={filterProject}
+            onChange={(e) => setFilterProject(e.target.value)}
+            className="h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white text-xs sm:text-sm sm:w-56"
+          >
+            <option value="all">كافة المشاريع</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        )}
+
         <div className="relative flex-1">
           <input
             type="text"

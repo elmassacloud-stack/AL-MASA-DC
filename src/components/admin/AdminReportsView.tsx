@@ -173,13 +173,18 @@ export const AdminReportsView: React.FC<Props> = ({
             className="w-full h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
           >
             <option value="all">كافة المهندسين</option>
-            {users
-              .filter((u) => u.role === 'site')
-              .map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.displayName}
-                </option>
-              ))}
+            {Array.from(
+              new Map(
+                [
+                  ...users.map((u) => [u.id, { id: u.id, name: u.displayName }] as const),
+                  ...reports.map((r) => [r.senderId, { id: r.senderId, name: r.senderName }] as const)
+                ]
+              ).values()
+            ).map((eng) => (
+              <option key={eng.id} value={eng.id}>
+                {eng.name}
+              </option>
+            ))}
           </select>
         </div>
 

@@ -20,6 +20,7 @@ import {
 import { SUBMITTAL_STATUS_CONFIG } from '../../config';
 import { dataService } from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
+import { getAccessibleProjects } from '../../utils/accessControl';
 
 interface Props {
   currentUser: UserProfile;
@@ -32,19 +33,24 @@ export const DailyReportForm: React.FC<Props> = ({
   projects,
   onReportSubmitted
 }) => {
-  // Filter projects assigned to this user (or all if admin)
-  const accessibleProjects =
-    currentUser.role === 'admin'
-      ? projects
-      : projects.filter((p) => currentUser.assignedProjects.includes(p.id));
+  // Strictly filter projects assigned to this user (or all if admin / allProjects)
+  const accessibleProjects = getAccessibleProjects(currentUser, projects);
 
-  // Default to first accessible project or 'proj-ravel-3'
-  const defaultProjectId =
-    accessibleProjects.find((p) => p.id === 'proj-ravel-3')?.id ||
-    accessibleProjects[0]?.id ||
-    '';
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(
+    accessibleProjects[0]?.id || ''
+  );
 
-  const [selectedProjectId, setSelectedProjectId] = useState<string>(defaultProjectId);
+  // Keep selectedProjectId strictly aligned with accessibleProjects
+  useEffect(() => {
+    if (accessibleProjects.length === 0) {
+      if (selectedProjectId !== '') setSelectedProjectId('');
+      return;
+    }
+    const stillValid = accessibleProjects.some((p) => p.id === selectedProjectId);
+    if (!stillValid) {
+      setSelectedProjectId(accessibleProjects[0].id);
+    }
+  }, [accessibleProjects, selectedProjectId]);
   const [reportDate, setReportDate] = useState<string>(getTodayDateStr());
   const [notes, setNotes] = useState<string>('');
   const [attachments, setAttachments] = useState<ReportAttachment[]>([]);
@@ -207,7 +213,9 @@ export const DailyReportForm: React.FC<Props> = ({
 
   // Quick fill sample data button for demonstration testing
   const loadQuickSample = () => {
-    setSelectedProjectId('proj-ravel-3');
+    if (!selectedProjectId && accessibleProjects[0]?.id) {
+      setSelectedProjectId(accessibleProjects[0].id);
+    }
     setSubmittedWorks([
       {
         id: 'sub-sample-1',
@@ -339,13 +347,18 @@ export const DailyReportForm: React.FC<Props> = ({
             <select
               value={selectedProjectId}
               onChange={(e) => setSelectedProjectId(e.target.value)}
-              className="w-full h-11 px-3 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
+              disabled={accessibleProjects.length === 0}
+              className="w-full h-11 px-3 text-sm bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white disabled:opacity-60"
             >
-              {accessibleProjects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.code})
-                </option>
-              ))}
+              {accessibleProjects.length === 0 ? (
+                <option value="">لا توجد مشاريع مسندة لحسابك</option>
+              ) : (
+                accessibleProjects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} ({p.code})
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
@@ -376,6 +389,14 @@ export const DailyReportForm: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* Empty Assigned Projects Warning */}
+      {accessibleProjects.length === 0 && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-800 rounded-xl text-amber-800 dark:text-amber-300 text-sm flex items-center gap-2.5">
+          <AlertCircle className="w-5 h-5 shrink-0" />
+          <span>لم يتم تعيين أي مشاريع أو مواقع لحسابك حتى الآن. يرجى التواصل مع مسؤول النظام لإسناد المشاريع المصرح بها.</span>
+        </div>
+      )}
 
       {/* Validation or Success Banner */}
       {validationError && (
@@ -709,7 +730,8 @@ export const DailyReportForm: React.FC<Props> = ({
         <div className="flex items-center justify-end gap-3 pt-2">
           <button
             type="submit"
-            className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation"
+            disabled={accessibleProjects.length === 0}
+            className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <Save className="w-5 h-5" />
             <span>إرسال التقرير اليومي للإدارة</span>
