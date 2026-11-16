@@ -13,10 +13,17 @@ import {
 import {
   getFirestore,
   doc,
+  collection,
   getDocFromServer,
+  getDocs,
+  query,
+  where,
+  writeBatch,
   Firestore
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { SITE_DELIVERABLE_RETENTION_MS } from '../config';
+import { SiteDeliverable } from '../types';
 
 // Primary Firebase Application
 const primaryApp: FirebaseApp =
@@ -183,4 +190,213 @@ export function translateFirebaseAuthError(error: unknown): string {
     return 'تعذر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى.';
   }
   return 'حدث خطأ أثناء المصادقة. يرجى التحقق من البيانات والمحاولة مجدداً.';
+}
+
+/**
+ * ============================================================================
+ * 48-HOUR AUTO CLEANUP & MEMORY MANAGEMENT FOR SITE PDF DELIVERABLES
+ * الحذف التلقائي لملفات PDF في تبويب "تسليمات الموقع" بعد مرور 48 ساعة على الرفع
+ * ============================================================================
+ */
+const SITE_DELIVERABLES_COLLECTION = 'siteDeliverables';
+const SITE_DELIVERABLES_CLEANUP_INTERVAL_MS = 2 * 60 * 1000; // فحص دوري كل دقيقتين
+
+const inFlightDeliverableDeletions = new Set<string>();
+const pdfBlobUrlMemoryCache = new Map<string, string>();
+let deliverablesCleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+export interface DeliverableCleanupScope {
+  canAccessDeliverables: boolean;
+  hasAllProjects: boolean;
+  assignedProjectIds: string[];
+}
+
+export function cachePdfBlobUrl(deliverableId: string, url: string): void {
+  const existingUrl = pdfBlobUrlMemoryCache.get(deliverableId);
+  if (existingUrl && existingUrl !== url) {
+    URL.revokeObjectURL(existingUrl);
+  }
+  pdfBlobUrlMemoryCache.set(deliverableId, url);
+}
+
+export function getCachedPdfBlobUrl(deliverableId: string): string | undefined {
+  return pdfBlobUrlMemoryCache.get(deliverableId);
+}
+
+export function revokePdfBlobUrl(deliverableId: string): void {
+  const cachedUrl = pdfBlobUrlMemoryCache.get(deliverableId);
+  if (cachedUrl) {
+    URL.revokeObjectURL(cachedUrl);
+    pdfBlobUrlMemoryCache.delete(deliverableId);
+  }
+}
+
+export function revokeAllPdfBlobUrls(): void {
+  pdfBlobUrlMemoryCache.forEach((url) => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore revoke errors
+    }
+  });
+  pdfBlobUrlMemoryCache.clear();
+}
+
+/**
+ * Checks whether a SiteDeliverable has reached or exceeded 48 hours since its upload (`createdAt`).
+ */
+export function isDeliverableExpired(
+  deliverable: Pick<SiteDeliverable, 'createdAt' | 'expiresAtMs'>,
+  nowMs = Date.now()
+): boolean {
+  if (typeof deliverable.expiresAtMs === 'number' && Number.isFinite(deliverable.expiresAtMs)) {
+    return nowMs >= deliverable.expiresAtMs;
+  }
+  const uploadedAtMs = Date.parse(deliverable.createdAt);
+  if (Number.isFinite(uploadedAtMs)) {
+    return nowMs - uploadedAtMs >= SITE_DELIVERABLE_RETENTION_MS;
+  }
+  return false;
+}
+
+/**
+ * Atomically deletes a SiteDeliverable and all its PDF chunks from Firebase Firestore,
+ * and revokes its cached Blob URL from browser memory.
+ */
+export async function deleteDeliverableFromFirebase(deliverableId: string): Promise<boolean> {
+  if (!deliverableId || inFlightDeliverableDeletions.has(deliverableId)) {
+    return false;
+  }
+
+  inFlightDeliverableDeletions.add(deliverableId);
+  try {
+    const chunksRef = collection(db, SITE_DELIVERABLES_COLLECTION, deliverableId, 'chunks');
+    let chunkDocs;
+    try {
+      const snap = await getDocs(chunksRef);
+      chunkDocs = snap.docs;
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.DELETE,
+        `${SITE_DELIVERABLES_COLLECTION}/${deliverableId}/chunks`
+      );
+    }
+
+    const batch = writeBatch(db);
+    chunkDocs.forEach((chunkDoc) => {
+      batch.delete(doc(db, SITE_DELIVERABLES_COLLECTION, deliverableId, 'chunks', chunkDoc.id));
+    });
+    batch.delete(doc(db, SITE_DELIVERABLES_COLLECTION, deliverableId));
+
+    try {
+      await batch.commit();
+    } catch (error) {
+      handleFirestoreError(
+        error,
+        OperationType.DELETE,
+        `${SITE_DELIVERABLES_COLLECTION}/${deliverableId}`
+      );
+    }
+
+    revokePdfBlobUrl(deliverableId);
+    return true;
+  } finally {
+    inFlightDeliverableDeletions.delete(deliverableId);
+  }
+}
+
+/**
+ * Queries Firebase for any SiteDeliverables older than 48 hours within the user's authorized scope
+ * (or processes a preloaded snapshot list) and deletes them along with their chunks.
+ * Returns the array of deleted deliverable IDs.
+ */
+export async function purgeExpiredSiteDeliverablesFromFirebase(
+  scope: DeliverableCleanupScope,
+  preloadedDeliverables?: SiteDeliverable[]
+): Promise<string[]> {
+  if (!scope.canAccessDeliverables || !auth.currentUser) {
+    return [];
+  }
+
+  const nowMs = Date.now();
+  let candidates: SiteDeliverable[] = [];
+
+  if (preloadedDeliverables) {
+    candidates = preloadedDeliverables.filter((item) => isDeliverableExpired(item, nowMs));
+  } else {
+    try {
+      if (scope.hasAllProjects) {
+        const expiredQuery = query(
+          collection(db, SITE_DELIVERABLES_COLLECTION),
+          where('expiresAtMs', '<=', nowMs)
+        );
+        const snap = await getDocs(expiredQuery);
+        candidates = snap.docs
+          .map((d) => d.data() as SiteDeliverable)
+          .filter((item) => isDeliverableExpired(item, nowMs));
+      } else if (scope.assignedProjectIds.length > 0) {
+        const scopedQuery = query(
+          collection(db, SITE_DELIVERABLES_COLLECTION),
+          where('projectId', 'in', scope.assignedProjectIds.slice(0, 30))
+        );
+        const snap = await getDocs(scopedQuery);
+        candidates = snap.docs
+          .map((d) => d.data() as SiteDeliverable)
+          .filter((item) => isDeliverableExpired(item, nowMs));
+      }
+    } catch {
+      // Background sweep must not crash UI on transient network or rules boundary checks
+      return [];
+    }
+  }
+
+  const deletedIds: string[] = [];
+  for (const item of candidates) {
+    try {
+      const deleted = await deleteDeliverableFromFirebase(item.id);
+      if (deleted) {
+        deletedIds.push(item.id);
+      }
+    } catch {
+      // Skip if deleted concurrently by another client or pending server clock skew
+    }
+  }
+
+  return deletedIds;
+}
+
+/**
+ * Starts the periodic Firebase auto-cleanup scheduler that sweeps expired PDF deliverables
+ * (older than 48 hours) immediately and then periodically to manage database and memory usage.
+ */
+export function startFirebaseDeliverablesAutoCleanupScheduler(
+  getScope: () => DeliverableCleanupScope | null,
+  onPurged?: (deletedIds: string[]) => void
+): void {
+  stopFirebaseDeliverablesAutoCleanupScheduler();
+
+  const runSweep = async () => {
+    const scope = getScope();
+    if (!scope || !scope.canAccessDeliverables) return;
+    const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(scope);
+    if (deletedIds.length > 0 && onPurged) {
+      onPurged(deletedIds);
+    }
+  };
+
+  // Initial immediate sweep on activation
+  void runSweep();
+
+  // Periodic sweep while session remains active
+  deliverablesCleanupTimer = setInterval(() => {
+    void runSweep();
+  }, SITE_DELIVERABLES_CLEANUP_INTERVAL_MS);
+}
+
+export function stopFirebaseDeliverablesAutoCleanupScheduler(): void {
+  if (deliverablesCleanupTimer) {
+    clearInterval(deliverablesCleanupTimer);
+    deliverablesCleanupTimer = null;
+  }
 }

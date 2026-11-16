@@ -49,7 +49,15 @@ import {
   OperationType,
   handleFirestoreError,
   stripUndefined,
-  createFirebaseUserByAdmin
+  createFirebaseUserByAdmin,
+  isDeliverableExpired,
+  deleteDeliverableFromFirebase,
+  purgeExpiredSiteDeliverablesFromFirebase,
+  startFirebaseDeliverablesAutoCleanupScheduler,
+  stopFirebaseDeliverablesAutoCleanupScheduler,
+  cachePdfBlobUrl,
+  getCachedPdfBlobUrl,
+  revokeAllPdfBlobUrls
 } from './firebase';
 import {
   hasAllProjectsAccess,
@@ -107,9 +115,6 @@ class DataService {
   private listeners: Set<() => void> = new Set();
   private firestoreUnsubs: Unsubscribe[] = [];
   private currentSyncSignature: string | null = null;
-  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
-  private deletingDeliverableIds: Set<string> = new Set();
-  private pdfBlobUrlCache: Map<string, string> = new Map();
 
   constructor() {
     this.ensureInitialized();
@@ -531,9 +536,9 @@ class DataService {
     const processDeliverablesSnapshot = (rawList: SiteDeliverable[]) => {
       const nowMs = Date.now();
       const activeList = rawList
-        .filter((item) => item.expiresAtMs > nowMs)
+        .filter((item) => !isDeliverableExpired(item, nowMs))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      const expiredList = rawList.filter((item) => item.expiresAtMs <= nowMs);
+      const expiredList = rawList.filter((item) => isDeliverableExpired(item, nowMs));
 
       localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(activeList));
       this.notify();
@@ -571,10 +576,19 @@ class DataService {
       this.notify();
     }
 
-    // Periodic 48h expiration sweep every 2 minutes while session is open
-    this.cleanupIntervalId = setInterval(() => {
-      this.purgeExpiredDeliverablesFromState();
-    }, 2 * 60 * 1000);
+    // Start Firebase periodic 48-hour auto-cleanup scheduler for memory & storage management
+    if (canDeliverables) {
+      startFirebaseDeliverablesAutoCleanupScheduler(
+        () => ({
+          canAccessDeliverables: canDeliverables,
+          hasAllProjects: allProjAccess,
+          assignedProjectIds: assigned
+        }),
+        (deletedIds) => {
+          this.removeDeliverablesFromLocalState(deletedIds);
+        }
+      );
+    }
   }
 
   public stopRealtimeSync() {
@@ -587,10 +601,8 @@ class DataService {
     });
     this.firestoreUnsubs = [];
     this.currentSyncSignature = null;
-    if (this.cleanupIntervalId) {
-      clearInterval(this.cleanupIntervalId);
-      this.cleanupIntervalId = null;
-    }
+    stopFirebaseDeliverablesAutoCleanupScheduler();
+    revokeAllPdfBlobUrls();
   }
 
   private upsertLocalUser(user: UserProfile) {
@@ -870,14 +882,14 @@ class DataService {
     return true;
   }
 
-  // --- Site PDF Deliverables (مرسلات واستلامات PDF - حذف تلقائي بعد 48 ساعة) ---
+  // --- Site PDF Deliverables (تسليمات الموقع - حذف تلقائي من Firebase بعد 48 ساعة) ---
   public getSiteDeliverables(): SiteDeliverable[] {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
       if (!data) return [];
       const parsed: SiteDeliverable[] = JSON.parse(data);
       const nowMs = Date.now();
-      return parsed.filter((item) => item.expiresAtMs > nowMs);
+      return parsed.filter((item) => !isDeliverableExpired(item, nowMs));
     } catch {
       return [];
     }
@@ -963,12 +975,12 @@ class DataService {
   }
 
   public async fetchSiteDeliverablePdfUrl(deliverable: SiteDeliverable): Promise<string> {
-    if (deliverable.expiresAtMs <= Date.now()) {
+    if (isDeliverableExpired(deliverable)) {
       await this.deleteSiteDeliverable(deliverable.id).catch(() => undefined);
       throw new Error('انتهت مدة صلاحية الملف (48 ساعة) وتم حذفه تلقائياً من قاعدة البيانات.');
     }
 
-    const cached = this.pdfBlobUrlCache.get(deliverable.id);
+    const cached = getCachedPdfBlobUrl(deliverable.id);
     if (cached) {
       return cached;
     }
@@ -989,7 +1001,7 @@ class DataService {
     const fullBase64 = chunkDocs.map((c) => c.data).join('');
     const blob = base64ToBlob(fullBase64, 'application/pdf');
     const url = URL.createObjectURL(blob);
-    this.pdfBlobUrlCache.set(deliverable.id, url);
+    cachePdfBlobUrl(deliverable.id, url);
     return url;
   }
 
@@ -1044,69 +1056,40 @@ class DataService {
   }
 
   public async deleteSiteDeliverable(deliverableId: string): Promise<boolean> {
-    if (this.deletingDeliverableIds.has(deliverableId)) return false;
-    this.deletingDeliverableIds.add(deliverableId);
-
-    try {
-      // Delete chunks first while parent document still exists for rules evaluation
-      try {
-        const chunksSnap = await getDocs(collection(db, 'siteDeliverables', deliverableId, 'chunks'));
-        for (const chunkDoc of chunksSnap.docs) {
-          await deleteDoc(doc(db, 'siteDeliverables', deliverableId, 'chunks', chunkDoc.id));
-        }
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `siteDeliverables/${deliverableId}/chunks`);
-      }
-
-      try {
-        await deleteDoc(doc(db, 'siteDeliverables', deliverableId));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, `siteDeliverables/${deliverableId}`);
-      }
-
-      const cachedUrl = this.pdfBlobUrlCache.get(deliverableId);
-      if (cachedUrl) {
-        URL.revokeObjectURL(cachedUrl);
-        this.pdfBlobUrlCache.delete(deliverableId);
-      }
-
-      const stored = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
-      if (stored) {
-        const list: SiteDeliverable[] = JSON.parse(stored);
-        localStorage.setItem(
-          STORAGE_KEYS.SITE_DELIVERABLES,
-          JSON.stringify(list.filter((d) => d.id !== deliverableId))
-        );
-      }
-
-      this.notify();
-      return true;
-    } finally {
-      this.deletingDeliverableIds.delete(deliverableId);
+    const deleted = await deleteDeliverableFromFirebase(deliverableId);
+    if (deleted) {
+      this.removeDeliverablesFromLocalState([deliverableId]);
     }
+    return deleted;
   }
 
   public async cleanupExpiredDeliverables(expiredItems: SiteDeliverable[]): Promise<void> {
-    const nowMs = Date.now();
-    for (const item of expiredItems) {
-      if (item.expiresAtMs <= nowMs && !this.deletingDeliverableIds.has(item.id)) {
-        await this.deleteSiteDeliverable(item.id).catch(() => undefined);
-      }
+    const activeUser = this.getCurrentUser();
+    const isAdmin = activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
+    const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(
+      {
+        canAccessDeliverables: canAccessSiteDeliverablesTab(activeUser),
+        hasAllProjects: Boolean(isAdmin || hasAllProjectsAccess(activeUser)),
+        assignedProjectIds: activeUser?.assignedProjects || []
+      },
+      expiredItems
+    );
+    if (deletedIds.length > 0) {
+      this.removeDeliverablesFromLocalState(deletedIds);
     }
   }
 
-  private purgeExpiredDeliverablesFromState() {
+  private removeDeliverablesFromLocalState(deletedIds: string[]) {
+    if (deletedIds.length === 0) return;
     try {
       const stored = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
       if (!stored) return;
       const list: SiteDeliverable[] = JSON.parse(stored);
-      const nowMs = Date.now();
-      const expired = list.filter((d) => d.expiresAtMs <= nowMs);
-      if (expired.length > 0) {
-        const active = list.filter((d) => d.expiresAtMs > nowMs);
-        localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(active));
+      const idSet = new Set(deletedIds);
+      const filtered = list.filter((d) => !idSet.has(d.id));
+      if (filtered.length !== list.length) {
+        localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(filtered));
         this.notify();
-        this.cleanupExpiredDeliverables(expired).catch(() => undefined);
       }
     } catch {
       // ignore parse errors
