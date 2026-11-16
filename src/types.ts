@@ -200,6 +200,7 @@ export interface AppNotification {
   message: string;
   type:
     | 'urgent_issue'
+    | 'issue_reported'
     | 'missing_report'
     | 'task_assigned'
     | 'announcement'
@@ -212,7 +213,12 @@ export interface AppNotification {
     | 'deliverable_sent'
     | 'deliverable_reviewed';
   linkTab?: string;
-  targetUserId?: string; // empty means admin or all
+  targetRole?: 'admin' | 'site' | 'all';
+  targetUserId?: string; // empty means role-based / all
+  projectId?: string;
+  senderId?: string;
+  senderName?: string;
+  readBy?: string[];
   isRead: boolean;
   createdAt: string;
 }

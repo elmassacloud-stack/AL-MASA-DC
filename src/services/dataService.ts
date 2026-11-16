@@ -113,6 +113,9 @@ export interface CreateSiteDeliverablePayload {
 
 class DataService {
   private listeners: Set<() => void> = new Set();
+  private liveNotificationListeners: Set<(notif: AppNotification) => void> = new Set();
+  private seenNotificationIds: Set<string> = new Set();
+  private notificationsInitialized = false;
   private firestoreUnsubs: Unsubscribe[] = [];
   private currentSyncSignature: string | null = null;
 
@@ -147,6 +150,21 @@ class DataService {
   public subscribe(callback: () => void): () => void {
     this.listeners.add(callback);
     return () => this.listeners.delete(callback);
+  }
+
+  public subscribeToLiveNotifications(callback: (notif: AppNotification) => void): () => void {
+    this.liveNotificationListeners.add(callback);
+    return () => this.liveNotificationListeners.delete(callback);
+  }
+
+  private emitLiveNotification(notif: AppNotification) {
+    this.liveNotificationListeners.forEach((cb) => {
+      try {
+        cb(notif);
+      } catch (err) {
+        console.error('Live notification callback error:', err);
+      }
+    });
   }
 
   private notify() {
@@ -589,6 +607,83 @@ class DataService {
         }
       );
     }
+
+    // 9. Real-time Notifications sync across devices
+    this.seenNotificationIds.clear();
+    this.notificationsInitialized = false;
+
+    const processNotificationsList = (incomingList: AppNotification[]) => {
+      const normalized = incomingList
+        .map((n) => ({
+          ...n,
+          isRead: n.isRead || (Array.isArray(n.readBy) && n.readBy.includes(user.id))
+        }))
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 60);
+
+      if (!this.notificationsInitialized) {
+        normalized.forEach((n) => this.seenNotificationIds.add(n.id));
+        this.notificationsInitialized = true;
+      } else {
+        normalized.forEach((n) => {
+          if (!this.seenNotificationIds.has(n.id)) {
+            this.seenNotificationIds.add(n.id);
+            const isFromSelf = n.senderId && n.senderId === user.id;
+            const visibleToUser = isAdmin
+              ? !n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all'
+              : n.targetUserId === user.id || n.targetRole === 'site' || n.targetRole === 'all';
+            if (!n.isRead && !isFromSelf && visibleToUser) {
+              this.emitLiveNotification(n);
+            }
+          }
+        });
+      }
+
+      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(normalized));
+      this.notify();
+    };
+
+    if (isAdmin) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, 'notifications'),
+          (snap) => {
+            processNotificationsList(snap.docs.map((d) => d.data() as AppNotification));
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
+        )
+      );
+    } else {
+      let directItems: AppNotification[] = [];
+      let broadcastItems: AppNotification[] = [];
+      const mergeAndProcess = () => {
+        const mergedMap = new Map<string, AppNotification>();
+        [...directItems, ...broadcastItems].forEach((n) => mergedMap.set(n.id, n));
+        processNotificationsList(Array.from(mergedMap.values()));
+      };
+
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'notifications'), where('targetUserId', '==', user.id)),
+          (snap) => {
+            directItems = snap.docs.map((d) => d.data() as AppNotification);
+            mergeAndProcess();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
+        )
+      );
+
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'notifications'), where('targetRole', 'in', ['site', 'all'])),
+          (snap) => {
+            broadcastItems = snap.docs.map((d) => d.data() as AppNotification);
+            mergeAndProcess();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
+        )
+      );
+    }
   }
 
   public stopRealtimeSync() {
@@ -601,6 +696,8 @@ class DataService {
     });
     this.firestoreUnsubs = [];
     this.currentSyncSignature = null;
+    this.seenNotificationIds.clear();
+    this.notificationsInitialized = false;
     stopFirebaseDeliverablesAutoCleanupScheduler();
     revokeAllPdfBlobUrls();
   }
@@ -778,6 +875,10 @@ class DataService {
       title: `عمل منفذ جديد: ${newWork.projectName}`,
       message: `سجّل ${newWork.authorName}: ${newWork.workDescription.slice(0, 80)} (${newWork.completionPercent}%)`,
       type: 'work_logged',
+      targetRole: 'admin',
+      projectId: newWork.projectId,
+      senderId: newWork.authorId,
+      senderName: newWork.authorName,
       linkTab: 'executed-works'
     });
 
@@ -967,6 +1068,10 @@ class DataService {
       title: `ملف PDF مستلم جديد: ${deliverable.projectName}`,
       message: `أرسل ${deliverable.senderName} ملف "${deliverable.title}" (${deliverable.fileName}) — متاح لمدة 48 ساعة.`,
       type: 'deliverable_sent',
+      targetRole: 'admin',
+      projectId: deliverable.projectId,
+      senderId: deliverable.senderId,
+      senderName: deliverable.senderName,
       linkTab: 'site-deliverables'
     });
 
@@ -1037,6 +1142,7 @@ class DataService {
       handleFirestoreError(error, OperationType.UPDATE, `siteDeliverables/${deliverableId}`);
     }
 
+    const adminUser = this.getCurrentUser();
     this.addNotification({
       title:
         status === 'received'
@@ -1047,7 +1153,11 @@ class DataService {
           ? `أكدت الإدارة استلام ملف "${list[idx].fileName}" لمشروع ${list[idx].projectName}.`
           : `طلبت الإدارة مراجعة ملف "${list[idx].fileName}"${cleanedNote ? `: ${cleanedNote}` : '.'}`,
       type: 'deliverable_reviewed',
+      targetRole: 'site',
       targetUserId: list[idx].senderId,
+      projectId: list[idx].projectId,
+      senderId: adminUser?.id,
+      senderName: adminUser?.displayName,
       linkTab: 'site-deliverables'
     });
 
@@ -1132,6 +1242,10 @@ class DataService {
       title: `تقرير يومي جديد: ${newReport.projectName}`,
       message: `قام ${newReport.senderName} بتقديم تقرير أعمال اليوم (${newReport.reportDate}) مع ${newReport.submittedWorks.length} تقديمات و ${newReport.receivedWorks.length} استلامات.`,
       type: 'report_submitted',
+      targetRole: 'admin',
+      projectId: newReport.projectId,
+      senderId: newReport.senderId,
+      senderName: newReport.senderName,
       linkTab: 'reports'
     });
 
@@ -1163,10 +1277,16 @@ class DataService {
       })
     ).catch((error) => handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`));
 
+    const adminUser = this.getCurrentUser();
     this.addNotification({
       title: `مراجعة تقرير: ${reports[index].projectName}`,
       message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${status}"${adminFeedback ? ` مع ملاحظات: ${adminFeedback}` : ''}`,
       type: 'report_reviewed',
+      targetRole: 'site',
+      targetUserId: reports[index].senderId,
+      projectId: reports[index].projectId,
+      senderId: adminUser?.id,
+      senderName: adminUser?.displayName,
       linkTab: 'my-submissions'
     });
 
@@ -1241,14 +1361,19 @@ class DataService {
       handleFirestoreError(error, OperationType.CREATE, `issues/${newIssue.id}`)
     );
 
-    if (newIssue.priority === 'urgent') {
-      this.addNotification({
-        title: `بلاغ عاجل: ${newIssue.issueNumber}`,
-        message: `تم تسجيل مشكلة عاجلة في ${newIssue.projectName}: ${newIssue.description.slice(0, 70)}...`,
-        type: 'urgent_issue',
-        linkTab: 'issues'
-      });
-    }
+    const isUrgent = newIssue.priority === 'urgent';
+    this.addNotification({
+      title: isUrgent
+        ? `بلاغ عاجل: ${newIssue.issueNumber} — ${newIssue.projectName}`
+        : `بلاغ مشكلة جديدة: ${newIssue.issueNumber} — ${newIssue.projectName}`,
+      message: `أبلغ ${newIssue.authorName} عن ${isUrgent ? 'مشكلة عاجلة' : 'مشكلة بالموقع'}: ${newIssue.description.slice(0, 80)}${newIssue.description.length > 80 ? '...' : ''}`,
+      type: isUrgent ? 'urgent_issue' : 'issue_reported',
+      targetRole: 'admin',
+      projectId: newIssue.projectId,
+      senderId: newIssue.authorId,
+      senderName: newIssue.authorName,
+      linkTab: 'issues'
+    });
 
     this.notify();
     return newIssue;
@@ -1311,10 +1436,15 @@ class DataService {
       handleFirestoreError(error, OperationType.CREATE, `tasks/${newTask.id}`)
     );
 
+    const adminUser = this.getCurrentUser();
     this.addNotification({
       title: `مهمة جديدة: ${newTask.title}`,
       message: `تم إسناد مهمة جديدة لمشروع ${newTask.projectName}، موعد التسليم: ${newTask.deadline}`,
       type: 'task_assigned',
+      targetRole: 'site',
+      projectId: newTask.projectId,
+      senderId: adminUser?.id || newTask.createdBy,
+      senderName: adminUser?.displayName,
       linkTab: 'my-tasks'
     });
 
@@ -1346,6 +1476,18 @@ class DataService {
     updateDoc(doc(db, 'tasks', taskId), patch).catch((error) =>
       handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`)
     );
+
+    const activeUser = this.getCurrentUser();
+    this.addNotification({
+      title: `تم إنجاز مهمة: ${tasks[idx].title}`,
+      message: `أنهى ${activeUser?.displayName || 'مهندس الموقع'} المهمة في مشروع ${tasks[idx].projectName}.`,
+      type: 'task_done',
+      targetRole: 'admin',
+      projectId: tasks[idx].projectId,
+      senderId: userId,
+      senderName: activeUser?.displayName,
+      linkTab: 'tasks'
+    });
 
     this.notify();
     return true;
@@ -1380,6 +1522,9 @@ class DataService {
       title: `تعميم إداري: ${newAnn.title}`,
       message: newAnn.content.slice(0, 90) + '...',
       type: 'announcement',
+      targetRole: 'all',
+      senderId: newAnn.createdBy,
+      senderName: newAnn.authorName,
       linkTab: 'announcements'
     });
 
@@ -1557,22 +1702,31 @@ class DataService {
       }
 
       if (!activeUser || isAdmin) {
-        return list;
+        return list.filter((n) => !n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all');
       }
 
-      // Filter notifications for site users so admin-only missing/submitted alerts don't leak
+      // Filter notifications for site users so admin-only alerts don't leak and project scope is respected
       return list.filter((n) => {
         if (
+          n.targetRole === 'admin' ||
           n.type === 'missing_report' ||
           n.type === 'report_submitted' ||
           n.type === 'urgent_issue' ||
+          n.type === 'issue_reported' ||
           n.type === 'work_logged' ||
-          n.type === 'deliverable_sent'
+          n.type === 'deliverable_sent' ||
+          n.type === 'task_done'
         ) {
           return false;
         }
         if (n.targetUserId && n.targetUserId !== activeUser.id) return false;
-        // Ensure site user is not shown irrelevant project tasks if projects can be matched
+        if (
+          n.projectId &&
+          !hasAllProjectsAccess(activeUser) &&
+          !(activeUser.assignedProjects || []).includes(n.projectId)
+        ) {
+          return false;
+        }
         return true;
       });
     } catch {
@@ -1580,21 +1734,43 @@ class DataService {
     }
   }
 
-  public addNotification(notif: Omit<AppNotification, 'id' | 'isRead' | 'createdAt'>) {
+  public addNotification(
+    notif: Omit<AppNotification, 'id' | 'isRead' | 'createdAt' | 'readBy'>
+  ) {
     try {
-      const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-      const notifs: AppNotification[] = data ? JSON.parse(data) : [];
-      const newNotif: AppNotification = {
+      const id = 'notif-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5);
+      const newNotif: AppNotification = stripUndefined({
         ...notif,
-        id: 'notif-' + Date.now().toString(36),
+        id,
+        title: notif.title.trim().slice(0, 300),
+        message: notif.message.trim().slice(0, 1500),
+        readBy: [],
         isRead: false,
         createdAt: new Date().toISOString()
-      };
-      notifs.unshift(newNotif);
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs.slice(0, 50)));
-      this.notify();
+      });
+
+      this.seenNotificationIds.add(id);
+
+      setDoc(doc(db, 'notifications', id), stripUndefined(newNotif)).catch((error) =>
+        handleFirestoreError(error, OperationType.CREATE, `notifications/${id}`)
+      );
+
+      const activeUser = this.getCurrentUser();
+      const activeIsAdmin =
+        activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
+      const isRelevantLocally = activeIsAdmin
+        ? !newNotif.targetRole || newNotif.targetRole === 'admin' || newNotif.targetRole === 'all'
+        : newNotif.targetRole !== 'admin';
+
+      if (isRelevantLocally) {
+        const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
+        const notifs: AppNotification[] = data ? JSON.parse(data) : [];
+        notifs.unshift(newNotif);
+        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs.slice(0, 60)));
+        this.notify();
+      }
     } catch {
-      // ignore local notification errors
+      // ignore notification write errors
     }
   }
 
@@ -1602,19 +1778,56 @@ class DataService {
     const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
     const notifs: AppNotification[] = data ? JSON.parse(data) : [];
     const idx = notifs.findIndex((n) => n.id === id);
+    const activeUser = this.getCurrentUser();
+
     if (idx !== -1) {
-      notifs[idx].isRead = true;
+      const prevReadBy = Array.isArray(notifs[idx].readBy) ? notifs[idx].readBy! : [];
+      const nextReadBy =
+        activeUser && !prevReadBy.includes(activeUser.id)
+          ? [...prevReadBy, activeUser.id]
+          : prevReadBy;
+      notifs[idx] = {
+        ...notifs[idx],
+        isRead: true,
+        readBy: nextReadBy
+      };
       localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs));
       this.notify();
+
+      if (!id.startsWith('notif-missing-')) {
+        updateDoc(doc(db, 'notifications', id), {
+          isRead: true,
+          readBy: nextReadBy
+        }).catch(() => undefined);
+      }
     }
   }
 
   public markAllNotificationsAsRead() {
     const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-    const notifs: AppNotification[] = (data ? JSON.parse(data) : []).map((n: AppNotification) => ({
-      ...n,
-      isRead: true
-    }));
+    const activeUser = this.getCurrentUser();
+    const rawList: AppNotification[] = data ? JSON.parse(data) : [];
+
+    const notifs: AppNotification[] = rawList.map((n: AppNotification) => {
+      const prevReadBy = Array.isArray(n.readBy) ? n.readBy : [];
+      const nextReadBy =
+        activeUser && !prevReadBy.includes(activeUser.id)
+          ? [...prevReadBy, activeUser.id]
+          : prevReadBy;
+      const shouldSyncRemote = !n.isRead && !n.id.startsWith('notif-missing-');
+      if (shouldSyncRemote) {
+        updateDoc(doc(db, 'notifications', n.id), {
+          isRead: true,
+          readBy: nextReadBy
+        }).catch(() => undefined);
+      }
+      return {
+        ...n,
+        isRead: true,
+        readBy: nextReadBy
+      };
+    });
+
     localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs));
     this.notify();
   }

@@ -110,7 +110,14 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     } else if (projectId && !accessibleProjects.some((p) => p.id === projectId)) {
       setProjectId(accessibleProjects[0]?.id || '');
     }
-  }, [accessibleProjects, projectId]);
+    if (
+      filterProjectId !== 'all' &&
+      accessibleProjects.length > 0 &&
+      !accessibleProjects.some((p) => p.id === filterProjectId)
+    ) {
+      setFilterProjectId('all');
+    }
+  }, [accessibleProjects, projectId, filterProjectId]);
 
   const showSuccess = (msg: string) => {
     setSuccessBanner(msg);
@@ -272,9 +279,21 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       .filter((d) => isAdmin || canAccessProject(currentUser, d.projectId));
   }, [deliverables, currentUser, isAdmin, nowTick]);
 
+  const projectCountsMap = useMemo(() => {
+    const map = new Map<string, number>();
+    scopedDeliverables.forEach((d) => {
+      map.set(d.projectId, (map.get(d.projectId) || 0) + 1);
+    });
+    return map;
+  }, [scopedDeliverables]);
+
+  const projectScopedDeliverables = useMemo(() => {
+    if (filterProjectId === 'all') return scopedDeliverables;
+    return scopedDeliverables.filter((d) => d.projectId === filterProjectId);
+  }, [scopedDeliverables, filterProjectId]);
+
   const filteredDeliverables = useMemo(() => {
-    return scopedDeliverables.filter((d) => {
-      if (filterProjectId !== 'all' && d.projectId !== filterProjectId) return false;
+    return projectScopedDeliverables.filter((d) => {
       if (filterSenderId !== 'all' && d.senderId !== filterSenderId) return false;
       if (filterStatus !== 'all' && d.status !== filterStatus) return false;
       if (filterType !== 'all' && d.deliverableType !== filterType) return false;
@@ -290,27 +309,32 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       }
       return true;
     });
-  }, [scopedDeliverables, filterProjectId, filterSenderId, filterStatus, filterType, searchQuery]);
+  }, [projectScopedDeliverables, filterSenderId, filterStatus, filterType, searchQuery]);
 
   const uniqueSenders = useMemo(() => {
     const map = new Map<string, string>();
-    scopedDeliverables.forEach((d) => {
+    projectScopedDeliverables.forEach((d) => {
       if (!map.has(d.senderId)) map.set(d.senderId, d.senderName);
     });
     users.forEach((u) => {
       if (!map.has(u.id)) map.set(u.id, u.displayName);
     });
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [scopedDeliverables, users]);
+  }, [projectScopedDeliverables, users]);
 
   const counts = useMemo(() => {
     return {
-      total: scopedDeliverables.length,
-      pending: scopedDeliverables.filter((d) => d.status === 'pending_receipt').length,
-      received: scopedDeliverables.filter((d) => d.status === 'received').length,
-      revision: scopedDeliverables.filter((d) => d.status === 'needs_revision').length
+      total: projectScopedDeliverables.length,
+      pending: projectScopedDeliverables.filter((d) => d.status === 'pending_receipt').length,
+      received: projectScopedDeliverables.filter((d) => d.status === 'received').length,
+      revision: projectScopedDeliverables.filter((d) => d.status === 'needs_revision').length
     };
-  }, [scopedDeliverables]);
+  }, [projectScopedDeliverables]);
+
+  const selectedFilterProject = useMemo(
+    () => accessibleProjects.find((p) => p.id === filterProjectId) || null,
+    [accessibleProjects, filterProjectId]
+  );
 
   const typeEntries = Object.entries(DELIVERABLE_TYPE_CONFIG) as [
     SiteDeliverableType,
@@ -320,7 +344,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
       {/* Header Card */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex items-start gap-3">
           <div className="w-11 h-11 rounded-xl bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
             <FileUp className="w-6 h-6" />
@@ -337,26 +361,52 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2.5 self-stretch lg:self-auto">
+          {/* Prominent Project Filter Dropdown */}
+          <div className="flex items-center gap-2 bg-slate-50 dark:bg-slate-800/80 border border-slate-300 dark:border-slate-700 rounded-xl px-3 h-10 flex-1 sm:flex-initial min-w-[220px]">
+            <Building2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <label
+              htmlFor="site-deliverables-project-filter"
+              className="text-xs font-bold text-slate-600 dark:text-slate-300 whitespace-nowrap"
+            >
+              المشروع:
+            </label>
+            <select
+              id="site-deliverables-project-filter"
+              aria-label="تصفية الملفات حسب المشروع"
+              value={filterProjectId}
+              onChange={(e) => setFilterProjectId(e.target.value)}
+              className="bg-transparent text-xs sm:text-sm font-bold text-slate-900 dark:text-white focus:outline-none w-full cursor-pointer"
+            >
+              <option value="all" className="dark:bg-slate-900">
+                جميع المشاريع ({scopedDeliverables.length})
+              </option>
+              {accessibleProjects.map((p) => (
+                <option key={p.id} value={p.id} className="dark:bg-slate-900">
+                  {p.name} ({p.code}) — {projectCountsMap.get(p.id) || 0}
+                </option>
+              ))}
+            </select>
+            {filterProjectId !== 'all' && (
+              <button
+                type="button"
+                onClick={() => setFilterProjectId('all')}
+                title="عرض جميع المشاريع"
+                className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/60 cursor-pointer shrink-0 transition-colors"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
           <button
             type="button"
             onClick={() => setShowUploadForm((prev) => !prev)}
-            className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer shadow-xs transition-colors whitespace-nowrap"
+            className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors whitespace-nowrap"
           >
             {showUploadForm ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
             <span>{showUploadForm ? 'إخفاء نموذج الإرسال' : 'إرسال ملف PDF جديد'}</span>
           </button>
-        </div>
-      </div>
-
-      {/* 48-Hour Auto Deletion Policy Banner */}
-      <div className="p-3.5 sm:p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 flex items-start sm:items-center gap-3 text-xs sm:text-sm text-amber-900 dark:text-amber-200">
-        <Clock className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
-        <div className="leading-relaxed">
-          <span className="font-bold">سياسة الحذف التلقائي من Firebase بعد 48 ساعة: </span>
-          <span>
-            تُحفظ ملفات الـ PDF المرسلة مؤقتاً لمدة <strong>48 ساعة</strong> فقط من وقت الإرسال لتسهيل تسليم الشغل للإدارة، ثم يتم حذفها تلقائياً من قاعدة البيانات. يرجى تحميل الملفات المهمة للأرشفة الدائمة قبل انتهاء المهلة.
-          </span>
         </div>
       </div>
 
@@ -638,14 +688,15 @@ export const SiteDeliverablesView: React.FC<Props> = ({
         </div>
 
         <select
+          aria-label="تصفية حسب المشروع"
           value={filterProjectId}
           onChange={(e) => setFilterProjectId(e.target.value)}
           className="h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-semibold"
         >
-          <option value="all">جميع المشاريع</option>
+          <option value="all">جميع المشاريع ({scopedDeliverables.length})</option>
           {accessibleProjects.map((p) => (
             <option key={p.id} value={p.id}>
-              {p.name}
+              {p.name} ({p.code}) — {projectCountsMap.get(p.id) || 0}
             </option>
           ))}
         </select>
@@ -695,11 +746,24 @@ export const SiteDeliverablesView: React.FC<Props> = ({
         <div className="bg-white dark:bg-slate-900 rounded-2xl p-10 border border-slate-200 dark:border-slate-800 text-center space-y-2">
           <FileText className="w-10 h-10 text-slate-300 dark:text-slate-600 mx-auto" />
           <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
-            لا توجد ملفات PDF مرسلة خلال آخر 48 ساعة مطابقة للبحث
+            {selectedFilterProject
+              ? `لا توجد ملفات PDF مرسلة لمشروع «${selectedFilterProject.name}» مطابقة للتصفية`
+              : 'لا توجد ملفات PDF مرسلة خلال آخر 48 ساعة مطابقة للبحث'}
           </p>
           <p className="text-xs text-slate-500 dark:text-slate-400">
             الملفات المرسلة من المواقع تظهر هنا فوراً وتُحذف تلقائياً بعد مرور 48 ساعة من الإرسال.
           </p>
+          {filterProjectId !== 'all' && (
+            <div className="pt-2">
+              <button
+                type="button"
+                onClick={() => setFilterProjectId('all')}
+                className="px-4 py-2 bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 rounded-xl text-xs font-bold cursor-pointer transition-colors"
+              >
+                عرض ملفات جميع المشاريع
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

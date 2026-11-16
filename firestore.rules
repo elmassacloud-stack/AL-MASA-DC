@@ -229,6 +229,24 @@ service cloud.firestore {
         && data.expiresAtMs is int && data.expiresAtMs > 0;
     }
 
+    function isValidAppNotification(data) {
+      return data.keys().hasAll(['id', 'title', 'message', 'type', 'isRead', 'createdAt'])
+        && data.keys().hasOnly(['id', 'title', 'message', 'type', 'linkTab', 'targetRole', 'targetUserId', 'projectId', 'senderId', 'senderName', 'readBy', 'isRead', 'createdAt'])
+        && isValidId(data.id)
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 1500
+        && data.type in ['urgent_issue', 'issue_reported', 'missing_report', 'task_assigned', 'announcement', 'status_alert', 'report_submitted', 'report_reviewed', 'issue_status', 'task_done', 'work_logged', 'deliverable_sent', 'deliverable_reviewed']
+        && (!('linkTab' in data) || (data.linkTab is string && data.linkTab.size() <= 64))
+        && (!('targetRole' in data) || data.targetRole in ['admin', 'site', 'all'])
+        && (!('targetUserId' in data) || (data.targetUserId is string && data.targetUserId.size() <= 128))
+        && (!('projectId' in data) || isValidId(data.projectId))
+        && (!('senderId' in data) || (data.senderId is string && data.senderId.size() <= 128))
+        && (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 150))
+        && (!('readBy' in data) || (data.readBy is list && data.readBy.size() <= 500))
+        && data.isRead is bool
+        && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
     // Users collection (PII isolated to owner or Admin)
     match /users/{userId} {
       allow get: if isValidId(userId) && (isAdmin() || (isSignedIn() && request.auth.uid == userId));
@@ -404,6 +422,54 @@ service cloud.firestore {
           )
         );
       }
+    }
+
+    // Real-time Notifications collection
+    match /notifications/{notificationId} {
+      allow get: if isValidId(notificationId) && (
+        isAdmin() ||
+        (
+          isActiveUser() &&
+          (
+            existing().targetUserId == request.auth.uid ||
+            existing().targetRole in ['site', 'all']
+          )
+        )
+      );
+      allow list: if isAdmin() || (
+        isActiveUser() &&
+        (
+          resource.data.targetUserId == request.auth.uid ||
+          resource.data.targetRole in ['site', 'all']
+        )
+      );
+      allow create: if isValidId(notificationId)
+        && isValidAppNotification(incoming())
+        && isActiveUser()
+        && (
+          isAdmin() ||
+          (
+            incoming().targetRole == 'admin'
+            && incoming().senderId == request.auth.uid
+            && incoming().type in ['report_submitted', 'urgent_issue', 'issue_reported', 'deliverable_sent', 'work_logged', 'task_done']
+            && (!('projectId' in incoming()) || hasProjectAccess(incoming().projectId))
+          )
+        );
+      allow update: if isValidId(notificationId)
+        && isValidAppNotification(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['readBy', 'isRead'])
+        && (
+          isAdmin() ||
+          (
+            isActiveUser() &&
+            (
+              existing().targetUserId == request.auth.uid ||
+              existing().targetRole in ['site', 'all']
+            )
+          )
+        );
+      allow delete: if isValidId(notificationId) && isAdmin();
     }
   }
 }

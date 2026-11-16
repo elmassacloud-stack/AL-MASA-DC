@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Loader2, FolderArchive } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Loader2, FolderArchive, BellRing, X, ArrowUpLeft } from 'lucide-react';
 import { Header } from './components/common/Header';
 import { Navigation } from './components/common/Navigation';
 import { LoginScreen } from './components/common/LoginScreen';
@@ -33,6 +33,10 @@ import {
   canAccessExecutedWorksTab,
   canAccessSiteDeliverablesTab
 } from './utils/accessControl';
+import {
+  showBrowserNotification,
+  playSubtleNotificationChime
+} from './utils/browserNotifications';
 import {
   UserProfile,
   Project,
@@ -86,10 +90,12 @@ export default function App() {
     dataService.getCutoffHour()
   );
 
-  // Modals state
+  // Modals & Live Toast state
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isShareOpen, setIsShareOpen] = useState<boolean>(false);
+  const [liveToast, setLiveToast] = useState<AppNotification | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   // Sync dark mode class with HTML element
   useEffect(() => {
@@ -184,10 +190,44 @@ export default function App() {
     }
   }, [currentUser, activeTab]);
 
+  // Real-time live notifications (in-app toast + chime + Web Notification)
+  useEffect(() => {
+    if (!currentUser) return;
+    const unsubscribeLive = dataService.subscribeToLiveNotifications((notif) => {
+      setLiveToast(notif);
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      toastTimerRef.current = window.setTimeout(() => {
+        setLiveToast(null);
+        toastTimerRef.current = null;
+      }, 7000);
+
+      playSubtleNotificationChime();
+      showBrowserNotification(notif.title, notif.message, () => {
+        dataService.markNotificationAsRead(notif.id);
+        if (notif.linkTab) {
+          setActiveTab(notif.linkTab);
+        } else {
+          setIsNotificationsOpen(true);
+        }
+      });
+    });
+
+    return () => {
+      unsubscribeLive();
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+    };
+  }, [currentUser?.id]);
+
   const handleLogout = async () => {
     setIsNotificationsOpen(false);
     setIsSettingsOpen(false);
     setIsShareOpen(false);
+    setLiveToast(null);
     setAuthError(null);
     dataService.clearSession();
     setCurrentUser(null);
@@ -461,6 +501,62 @@ export default function App() {
         isOpen={isShareOpen}
         onClose={() => setIsShareOpen(false)}
       />
+
+      {/* Live Real-Time Notification Floating Toast */}
+      {liveToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-20 md:bottom-6 left-4 right-4 sm:right-auto sm:w-96 z-50 bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-800 rounded-2xl shadow-2xl p-3.5 flex items-start gap-3 animate-in slide-in-from-bottom-4 duration-200"
+        >
+          <div
+            className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+              liveToast.type === 'urgent_issue'
+                ? 'bg-red-100 text-red-600 dark:bg-red-950/60 dark:text-red-400'
+                : 'bg-blue-100 text-blue-600 dark:bg-blue-950/60 dark:text-blue-400'
+            }`}
+          >
+            <BellRing className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-start justify-between gap-2">
+              <h4 className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
+                {liveToast.title}
+              </h4>
+              <button
+                onClick={() => setLiveToast(null)}
+                className="p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded cursor-pointer shrink-0"
+                aria-label="إغلاق التنبيه"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 line-clamp-2 leading-relaxed">
+              {liveToast.message}
+            </p>
+            <div className="flex items-center justify-between gap-2 mt-2">
+              <span className="text-[10px] text-slate-400">
+                {liveToast.senderName ? `من: ${liveToast.senderName}` : 'إشعار فوري'}
+              </span>
+              <button
+                onClick={() => {
+                  dataService.markNotificationAsRead(liveToast.id);
+                  if (liveToast.linkTab) {
+                    setActiveTab(liveToast.linkTab);
+                  } else {
+                    setIsNotificationsOpen(true);
+                  }
+                  setLiveToast(null);
+                }}
+                className="text-xs font-bold text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <span>عرض</span>
+                <ArrowUpLeft className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

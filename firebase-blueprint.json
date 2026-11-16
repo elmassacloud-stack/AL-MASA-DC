@@ -188,6 +188,44 @@
         "expiresAtMs": { "type": "number" }
       },
       "required": ["index", "data", "expiresAtMs"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Real-time notification for reports, issues, PDF uploads, tasks, and reviews.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1500 },
+        "type": {
+          "type": "string",
+          "enum": [
+            "urgent_issue",
+            "issue_reported",
+            "missing_report",
+            "task_assigned",
+            "announcement",
+            "status_alert",
+            "report_submitted",
+            "report_reviewed",
+            "issue_status",
+            "task_done",
+            "work_logged",
+            "deliverable_sent",
+            "deliverable_reviewed"
+          ]
+        },
+        "linkTab": { "type": "string", "maxLength": 64 },
+        "targetRole": { "type": "string", "enum": ["admin", "site", "all"] },
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 150 },
+        "readBy": { "type": "array" },
+        "isRead": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "title", "message", "type", "isRead", "createdAt"]
     }
   },
   "firestore": {
@@ -226,6 +264,10 @@
     "/siteDeliverables/{deliverableId}/chunks/{chunkId}": {
       "schema": { "$ref": "#/entities/SiteDeliverableChunk" },
       "description": "Chunked Base64 PDF payload for a SiteDeliverable."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/AppNotification" },
+      "description": "Real-time in-app and browser push notifications between site engineers and management."
     }
   }
 }

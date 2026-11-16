@@ -1,16 +1,26 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Bell,
   X,
   AlertTriangle,
+  AlertCircle,
   FileText,
+  FileCheck2,
+  Hammer,
   CheckSquare,
+  CheckCircle2,
   BellRing,
   Clock,
-  CheckCheck
+  CheckCheck,
+  Volume2,
+  ShieldAlert
 } from 'lucide-react';
 import { AppNotification } from '../../types';
 import { dataService } from '../../services/dataService';
+import {
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission
+} from '../../utils/browserNotifications';
 
 interface Props {
   isOpen: boolean;
@@ -25,7 +35,22 @@ export const NotificationsDrawer: React.FC<Props> = ({
   notifications,
   onNavigateTab
 }) => {
+  const [browserPermission, setBrowserPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => getBrowserNotificationPermission());
+
+  useEffect(() => {
+    if (isOpen) {
+      setBrowserPermission(getBrowserNotificationPermission());
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const handleEnableBrowserNotifications = async () => {
+    const result = await requestBrowserNotificationPermission();
+    setBrowserPermission(result);
+  };
 
   const handleNotificationClick = (notif: AppNotification) => {
     dataService.markNotificationAsRead(notif.id);
@@ -43,15 +68,28 @@ export const NotificationsDrawer: React.FC<Props> = ({
     switch (type) {
       case 'urgent_issue':
         return <AlertTriangle className="w-5 h-5 text-red-500" />;
+      case 'issue_reported':
+        return <AlertCircle className="w-5 h-5 text-orange-500" />;
+      case 'issue_status':
+        return <AlertCircle className="w-5 h-5 text-sky-500" />;
+      case 'report_submitted':
+        return <FileCheck2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />;
+      case 'report_reviewed':
+        return <FileCheck2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />;
+      case 'work_logged':
+        return <Hammer className="w-5 h-5 text-amber-600 dark:text-amber-400" />;
       case 'missing_report':
         return <Clock className="w-5 h-5 text-amber-500" />;
       case 'task_assigned':
         return <CheckSquare className="w-5 h-5 text-emerald-500" />;
+      case 'task_done':
+        return <CheckCircle2 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />;
       case 'announcement':
         return <BellRing className="w-5 h-5 text-blue-500" />;
       case 'deliverable_sent':
+        return <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />;
       case 'deliverable_reviewed':
-        return <FileText className="w-5 h-5 text-blue-600" />;
+        return <FileText className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />;
       default:
         return <Bell className="w-5 h-5 text-blue-500" />;
     }
@@ -96,6 +134,38 @@ export const NotificationsDrawer: React.FC<Props> = ({
           </div>
         </div>
 
+        {/* Browser Push Notification Banner */}
+        {browserPermission !== 'unsupported' && (
+          <div className="px-4 py-2.5 border-b border-slate-100 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
+            {browserPermission === 'default' && (
+              <button
+                onClick={handleEnableBrowserNotifications}
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <BellRing className="w-4 h-4 shrink-0" />
+                  <span>تفعيل إشعارات المتصفح الفورية</span>
+                </span>
+                <span className="text-[11px] bg-white/20 px-2 py-0.5 rounded-md">
+                  تفعيل
+                </span>
+              </button>
+            )}
+            {browserPermission === 'granted' && (
+              <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                <Volume2 className="w-4 h-4 shrink-0" />
+                <span>إشعارات المتصفح الفورية مفعّلة مع التنبيه الصوتي</span>
+              </div>
+            )}
+            {browserPermission === 'denied' && (
+              <div className="flex items-center gap-2 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+                <span>إشعارات المتصفح محظورة — يمكنك تفعيلها من إعدادات الموقع في المتصفح</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Drawer List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
           {notifications.length === 0 ? (
@@ -129,9 +199,16 @@ export const NotificationsDrawer: React.FC<Props> = ({
                   <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed line-clamp-2">
                     {notif.message}
                   </p>
-                  <span className="text-[10px] text-slate-400 mt-1 block">
-                    {new Date(notif.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
-                  </span>
+                  <div className="flex items-center justify-between gap-2 mt-1">
+                    <span className="text-[10px] text-slate-400">
+                      {new Date(notif.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    {notif.senderName && (
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 font-medium truncate">
+                        {notif.senderName}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             ))
