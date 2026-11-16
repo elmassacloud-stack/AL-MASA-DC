@@ -327,7 +327,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           </div>
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">
-              تسليمات واستلامات PDF (مرسلات الموقع)
+              تسليمات الموقع (ملفات PDF)
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5">
               {isAdmin

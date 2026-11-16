@@ -47,7 +47,7 @@ export const Navigation: React.FC<Props> = ({
   const siteNavItems: NavItem[] = [
     { id: 'daily-report', label: 'تقرير اليوم', icon: FileText },
     ...(canAccessSiteDeliverables
-      ? [{ id: 'site-deliverables', label: 'تسليمات PDF', icon: FileUp }]
+      ? [{ id: 'site-deliverables', label: 'تسليمات الموقع', icon: FileUp }]
       : []),
     ...(canAccessExecutedWorks
       ? [{ id: 'executed-works', label: 'الأعمال المنفذة', icon: Hammer }]
@@ -63,7 +63,7 @@ export const Navigation: React.FC<Props> = ({
     { id: 'reports', label: 'التقارير', icon: FileText },
     {
       id: 'site-deliverables',
-      label: 'تسليمات PDF',
+      label: 'تسليمات الموقع',
       icon: FileUp,
       badge: pendingDeliverablesCount
     },

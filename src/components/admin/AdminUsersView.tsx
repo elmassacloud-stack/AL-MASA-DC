@@ -409,7 +409,7 @@ export const AdminUsersView: React.FC<Props> = ({
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-slate-600 dark:text-slate-400 font-medium flex items-center gap-1">
                       <FileUp className="w-3.5 h-3.5 text-blue-600" />
-                      <span>تبويب تسليمات PDF:</span>
+                      <span>تبويب تسليمات الموقع:</span>
                     </span>
                     {user.role === 'admin' || isSuper || user.canAccessSiteDeliverables !== false ? (
                       <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
@@ -640,7 +640,7 @@ export const AdminUsersView: React.FC<Props> = ({
                     <div>
                       <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
                         <FileUp className="w-3.5 h-3.5" />
-                        <span>صلاحية الوصول إلى تبويب «تسليمات واستلامات PDF»</span>
+                        <span>صلاحية الوصول إلى تبويب «تسليمات الموقع»</span>
                       </span>
                       <span className="text-[11px] text-blue-700 dark:text-blue-400">
                         يتيح للمستخدم إرسال ملفات PDF للمستندات المستلمة بالموقع (تُحذف بعد 48 ساعة)
@@ -886,7 +886,7 @@ export const AdminUsersView: React.FC<Props> = ({
                     />
                     <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
                       <FileUp className="w-3.5 h-3.5" />
-                      <span>السماح بالوصول إلى تبويب «تسليمات واستلامات PDF»</span>
+                      <span>السماح بالوصول إلى تبويب «تسليمات الموقع»</span>
                     </span>
                   </label>
 
