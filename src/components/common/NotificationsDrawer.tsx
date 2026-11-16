@@ -49,6 +49,9 @@ export const NotificationsDrawer: React.FC<Props> = ({
         return <CheckSquare className="w-5 h-5 text-emerald-500" />;
       case 'announcement':
         return <BellRing className="w-5 h-5 text-blue-500" />;
+      case 'deliverable_sent':
+      case 'deliverable_reviewed':
+        return <FileText className="w-5 h-5 text-blue-600" />;
       default:
         return <Bell className="w-5 h-5 text-blue-500" />;
     }

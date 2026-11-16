@@ -15,7 +15,8 @@ import {
   Calendar,
   FileText,
   UserCheck,
-  ShieldCheck
+  ShieldCheck,
+  BarChart3
 } from 'lucide-react';
 import {
   ExecutedWork,
@@ -49,12 +50,13 @@ export const ExecutedWorksView: React.FC<Props> = ({
     [currentUser, projects]
   );
 
-  // Filters
+  // Filters & Daily Progress Date
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [filterProjectId, setFilterProjectId] = useState<string>('all');
   const [filterDiscipline, setFilterDiscipline] = useState<string>('all');
   const [filterAuthorId, setFilterAuthorId] = useState<string>('all');
   const [filterReviewStatus, setFilterReviewStatus] = useState<string>('all');
+  const [progressDate, setProgressDate] = useState<string>(() => getTodayDateStr());
 
   // Create / Edit Modal state
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -144,6 +146,37 @@ export const ExecutedWorksView: React.FC<Props> = ({
   const completedCount = scopedWorks.filter((w) => w.completionPercent === 100).length;
   const approvedCount = scopedWorks.filter((w) => w.reviewStatus === 'approved').length;
   const pendingCount = scopedWorks.filter((w) => w.reviewStatus === 'pending').length;
+
+  // Daily progress calculation per accessible project based on logged works for progressDate
+  const dailyProjectProgress = useMemo(() => {
+    const targetProjects =
+      filterProjectId === 'all'
+        ? accessibleProjects
+        : accessibleProjects.filter((p) => p.id === filterProjectId);
+
+    return targetProjects.map((proj) => {
+      const dayWorks = scopedWorks.filter(
+        (w) => w.projectId === proj.id && w.workDate === progressDate
+      );
+      const worksCount = dayWorks.length;
+      const avgPercent =
+        worksCount > 0
+          ? Math.round(
+              dayWorks.reduce((sum, w) => sum + (Number(w.completionPercent) || 0), 0) / worksCount
+            )
+          : 0;
+      const completedWorksCount = dayWorks.filter((w) => w.completionPercent === 100).length;
+      const approvedWorksCount = dayWorks.filter((w) => w.reviewStatus === 'approved').length;
+
+      return {
+        project: proj,
+        worksCount,
+        avgPercent,
+        completedWorksCount,
+        approvedWorksCount
+      };
+    });
+  }, [accessibleProjects, filterProjectId, scopedWorks, progressDate]);
 
   const openCreateModal = () => {
     setEditingWork(null);
@@ -368,6 +401,125 @@ export const ExecutedWorksView: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* Daily Progress Bar Per Project */}
+      {accessibleProjects.length > 0 && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-blue-50 dark:bg-blue-950/70 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                <BarChart3 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white">
+                  نسبة الإنجاز اليومي لكل مشروع
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 font-medium">
+                  متوسط إنجاز الأعمال المنفذة المسجلة بتاريخ{' '}
+                  <span className="font-mono font-bold text-slate-800 dark:text-slate-200">
+                    {progressDate}
+                  </span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-auto">
+              <input
+                type="date"
+                value={progressDate}
+                onChange={(e) => setProgressDate(e.target.value || getTodayDateStr())}
+                className="h-9 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              {progressDate !== getTodayDateStr() && (
+                <button
+                  type="button"
+                  onClick={() => setProgressDate(getTodayDateStr())}
+                  className="h-9 px-3 rounded-xl bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 text-xs font-bold cursor-pointer transition-colors"
+                >
+                  اليوم
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            {dailyProjectProgress.map(
+              ({ project, worksCount, avgPercent, completedWorksCount, approvedWorksCount }) => {
+                const barColorClass =
+                  worksCount === 0
+                    ? 'bg-slate-300 dark:bg-slate-700'
+                    : avgPercent === 100
+                    ? 'bg-emerald-500'
+                    : avgPercent >= 50
+                    ? 'bg-blue-600'
+                    : 'bg-amber-500';
+
+                const percentTextClass =
+                  worksCount === 0
+                    ? 'text-slate-400 dark:text-slate-500'
+                    : avgPercent === 100
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : avgPercent >= 50
+                    ? 'text-blue-600 dark:text-blue-400'
+                    : 'text-amber-600 dark:text-amber-400';
+
+                return (
+                  <div
+                    key={project.id}
+                    className="p-3.5 rounded-xl bg-slate-50/80 dark:bg-slate-800/50 border border-slate-200/80 dark:border-slate-700/80 space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white truncate">
+                            {project.name}
+                          </span>
+                          <span
+                            dir="ltr"
+                            className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700"
+                          >
+                            {project.code}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5 font-medium">
+                          {worksCount === 0 ? (
+                            <span>لا توجد أعمال مسجلة لهذا اليوم</span>
+                          ) : (
+                            <span>
+                              {worksCount} {worksCount === 1 ? 'بند مسجل' : 'بنود مسجلة'} •{' '}
+                              {completedWorksCount} مكتمل 100% • {approvedWorksCount} معتمد
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      <span
+                        className={`text-sm sm:text-base font-extrabold font-mono tabular-nums shrink-0 ${percentTextClass}`}
+                      >
+                        {avgPercent}%
+                      </span>
+                    </div>
+
+                    <div
+                      className="w-full h-3 bg-slate-200/80 dark:bg-slate-700/70 rounded-full overflow-hidden"
+                      role="progressbar"
+                      aria-valuenow={avgPercent}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`نسبة الإنجاز اليومي لمشروع ${project.name}`}
+                    >
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${barColorClass}`}
+                        style={{ width: `${avgPercent}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              }
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Filters Toolbar */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">

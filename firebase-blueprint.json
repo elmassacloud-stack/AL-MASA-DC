@@ -12,6 +12,7 @@
         "role": { "type": "string", "enum": ["admin", "site"] },
         "allProjects": { "type": "boolean" },
         "canAccessExecutedWorks": { "type": "boolean" },
+        "canAccessSiteDeliverables": { "type": "boolean" },
         "assignedProjects": { "type": "array" },
         "status": { "type": "string", "enum": ["active", "disabled"] },
         "phone": { "type": "string", "maxLength": 40 },
@@ -146,6 +147,47 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "projectId", "projectName", "workDate", "workDescription", "discipline", "completionPercent", "authorId", "authorName", "reviewStatus", "createdAt", "updatedAt"]
+    },
+    "SiteDeliverable": {
+      "title": "SiteDeliverable",
+      "description": "PDF deliverable sent from construction site to Document Control, auto-deleted after 48 hours.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "deliverableType": { "type": "string", "enum": ["ir", "mir", "shop_drawing", "handover", "other"] },
+        "submittalNumber": { "type": "string", "maxLength": 120 },
+        "rev": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 260 },
+        "fileSizeBytes": { "type": "number" },
+        "chunkCount": { "type": "number" },
+        "pageCount": { "type": "number" },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 150 },
+        "senderEmail": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["pending_receipt", "received", "needs_revision"] },
+        "adminNote": { "type": "string", "maxLength": 1000 },
+        "receivedAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "expiresAt": { "type": "string", "maxLength": 64 },
+        "expiresAtMs": { "type": "number" }
+      },
+      "required": ["id", "projectId", "projectName", "title", "deliverableType", "fileName", "fileSizeBytes", "chunkCount", "senderId", "senderName", "senderEmail", "status", "createdAt", "updatedAt", "expiresAt", "expiresAtMs"]
+    },
+    "SiteDeliverableChunk": {
+      "title": "SiteDeliverableChunk",
+      "description": "Base64 PDF data chunk stored under a SiteDeliverable document.",
+      "type": "object",
+      "properties": {
+        "index": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 700000 },
+        "expiresAtMs": { "type": "number" }
+      },
+      "required": ["index", "data", "expiresAtMs"]
     }
   },
   "firestore": {
@@ -176,6 +218,14 @@
     "/executedWorks/{workId}": {
       "schema": { "$ref": "#/entities/ExecutedWork" },
       "description": "Site executed construction works logs."
+    },
+    "/siteDeliverables/{deliverableId}": {
+      "schema": { "$ref": "#/entities/SiteDeliverable" },
+      "description": "Temporary 48-hour PDF deliverables sent from site engineers to Document Control."
+    },
+    "/siteDeliverables/{deliverableId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/SiteDeliverableChunk" },
+      "description": "Chunked Base64 PDF payload for a SiteDeliverable."
     }
   }
 }

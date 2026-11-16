@@ -21,7 +21,11 @@ import {
   UserProfile,
   UserRole,
   AppNotification,
-  ExecutedWork
+  ExecutedWork,
+  SiteDeliverable,
+  SiteDeliverableChunk,
+  SiteDeliverableType,
+  SiteDeliverableStatus
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -33,7 +37,13 @@ import {
   SEED_EXECUTED_WORKS,
   getTodayDateStr
 } from '../seedData';
-import { DEFAULT_DAILY_REPORT_CUTOFF_HOUR, isSuperAdminEmail, SUPER_ADMIN_EMAIL } from '../config';
+import {
+  DEFAULT_DAILY_REPORT_CUTOFF_HOUR,
+  SITE_DELIVERABLE_RETENTION_MS,
+  PDF_CHUNK_SIZE_CHARS,
+  isSuperAdminEmail,
+  SUPER_ADMIN_EMAIL
+} from '../config';
 import {
   db,
   OperationType,
@@ -41,7 +51,12 @@ import {
   stripUndefined,
   createFirebaseUserByAdmin
 } from './firebase';
-import { hasAllProjectsAccess, canAccessExecutedWorksTab } from '../utils/accessControl';
+import {
+  hasAllProjectsAccess,
+  canAccessExecutedWorksTab,
+  canAccessSiteDeliverablesTab
+} from '../utils/accessControl';
+import { base64ToBlob, splitBase64IntoChunks } from '../utils/pdfUtils';
 
 const STORAGE_KEYS = {
   PROJECTS: 'dc_projects_v2',
@@ -50,6 +65,7 @@ const STORAGE_KEYS = {
   TASKS: 'dc_tasks_v2',
   ANNOUNCEMENTS: 'dc_announcements_v2',
   EXECUTED_WORKS: 'dc_executed_works_v2',
+  SITE_DELIVERABLES: 'dc_site_deliverables_v2',
   USERS: 'dc_users_v2',
   NOTIFICATIONS: 'dc_notifications_v2',
   CURRENT_USER: 'dc_active_user_v2',
@@ -66,14 +82,34 @@ export interface CreateUserPayload {
   role: UserRole;
   allProjects: boolean;
   canAccessExecutedWorks: boolean;
+  canAccessSiteDeliverables: boolean;
   assignedProjects: string[];
   phone?: string;
+}
+
+export interface CreateSiteDeliverablePayload {
+  projectId: string;
+  projectName: string;
+  title: string;
+  deliverableType: SiteDeliverableType;
+  submittalNumber?: string;
+  rev?: number;
+  notes?: string;
+  fileName: string;
+  fileSizeBytes: number;
+  pageCount?: number;
+  senderId: string;
+  senderName: string;
+  senderEmail: string;
 }
 
 class DataService {
   private listeners: Set<() => void> = new Set();
   private firestoreUnsubs: Unsubscribe[] = [];
   private currentSyncSignature: string | null = null;
+  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+  private deletingDeliverableIds: Set<string> = new Set();
+  private pdfBlobUrlCache: Map<string, string> = new Map();
 
   constructor() {
     this.ensureInitialized();
@@ -175,6 +211,8 @@ class DataService {
         jobTitle: profile?.jobTitle || 'المدير العام — إدارة مراقبة الوثائق',
         role: 'admin',
         allProjects: true,
+        canAccessExecutedWorks: true,
+        canAccessSiteDeliverables: true,
         assignedProjects: profile?.assignedProjects?.length ? profile.assignedProjects : allProjectIds,
         status: 'active',
         phone: profile?.phone || '',
@@ -244,7 +282,8 @@ class DataService {
 
   public startRealtimeSync(user: UserProfile) {
     const canExecWorks = canAccessExecutedWorksTab(user);
-    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : (user.assignedProjects || []).join(',')}:${canExecWorks ? '1' : '0'}`;
+    const canDeliverables = canAccessSiteDeliverablesTab(user);
+    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : (user.assignedProjects || []).join(',')}:${canExecWorks ? '1' : '0'}:${canDeliverables ? '1' : '0'}`;
     if (this.currentSyncSignature === signature && this.firestoreUnsubs.length > 0) {
       return;
     }
@@ -291,7 +330,8 @@ class DataService {
           this.upsertLocalUser(updatedProfile);
           localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedProfile));
           const nextCanExec = canAccessExecutedWorksTab(updatedProfile);
-          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : (updatedProfile.assignedProjects || []).join(',')}:${nextCanExec ? '1' : '0'}`;
+          const nextCanDeliverables = canAccessSiteDeliverablesTab(updatedProfile);
+          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : (updatedProfile.assignedProjects || []).join(',')}:${nextCanExec ? '1' : '0'}:${nextCanDeliverables ? '1' : '0'}`;
           if (nextSig !== this.currentSyncSignature) {
             this.startRealtimeSync(updatedProfile);
           } else {
@@ -486,6 +526,55 @@ class DataService {
       localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
       this.notify();
     }
+
+    // 8. Site PDF Deliverables sync (48-hour auto-expiring items)
+    const processDeliverablesSnapshot = (rawList: SiteDeliverable[]) => {
+      const nowMs = Date.now();
+      const activeList = rawList
+        .filter((item) => item.expiresAtMs > nowMs)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const expiredList = rawList.filter((item) => item.expiresAtMs <= nowMs);
+
+      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(activeList));
+      this.notify();
+
+      if (expiredList.length > 0) {
+        this.cleanupExpiredDeliverables(expiredList).catch(() => undefined);
+      }
+    };
+
+    if (!canDeliverables) {
+      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify([]));
+      this.notify();
+    } else if (allProjAccess) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, 'siteDeliverables'),
+          (snap) => {
+            processDeliverablesSnapshot(snap.docs.map((d) => d.data() as SiteDeliverable));
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
+        )
+      );
+    } else if (assigned.length > 0) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'siteDeliverables'), where('projectId', 'in', assigned)),
+          (snap) => {
+            processDeliverablesSnapshot(snap.docs.map((d) => d.data() as SiteDeliverable));
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
+        )
+      );
+    } else {
+      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify([]));
+      this.notify();
+    }
+
+    // Periodic 48h expiration sweep every 2 minutes while session is open
+    this.cleanupIntervalId = setInterval(() => {
+      this.purgeExpiredDeliverablesFromState();
+    }, 2 * 60 * 1000);
   }
 
   public stopRealtimeSync() {
@@ -498,6 +587,10 @@ class DataService {
     });
     this.firestoreUnsubs = [];
     this.currentSyncSignature = null;
+    if (this.cleanupIntervalId) {
+      clearInterval(this.cleanupIntervalId);
+      this.cleanupIntervalId = null;
+    }
   }
 
   private upsertLocalUser(user: UserProfile) {
@@ -775,6 +868,249 @@ class DataService {
 
     this.notify();
     return true;
+  }
+
+  // --- Site PDF Deliverables (مرسلات واستلامات PDF - حذف تلقائي بعد 48 ساعة) ---
+  public getSiteDeliverables(): SiteDeliverable[] {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
+      if (!data) return [];
+      const parsed: SiteDeliverable[] = JSON.parse(data);
+      const nowMs = Date.now();
+      return parsed.filter((item) => item.expiresAtMs > nowMs);
+    } catch {
+      return [];
+    }
+  }
+
+  public async createSiteDeliverable(
+    payload: CreateSiteDeliverablePayload,
+    base64Pdf: string,
+    onProgress?: (percent: number) => void
+  ): Promise<SiteDeliverable> {
+    const chunks = splitBase64IntoChunks(base64Pdf, PDF_CHUNK_SIZE_CHARS);
+    if (chunks.length === 0 || chunks.length > 20) {
+      throw new Error('حجم ملف الـ PDF غير صالح أو يتجاوز الحد المسموح (4 ميجابايت).');
+    }
+
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + SITE_DELIVERABLE_RETENTION_MS;
+    const nowIso = new Date(nowMs).toISOString();
+    const expiresIso = new Date(expiresAtMs).toISOString();
+    const id = 'deliv-' + nowMs.toString(36) + '-' + Math.random().toString(36).substring(2, 6);
+
+    const deliverable: SiteDeliverable = stripUndefined({
+      id,
+      projectId: payload.projectId,
+      projectName: payload.projectName.trim().slice(0, 200),
+      title: payload.title.trim().slice(0, 300),
+      deliverableType: payload.deliverableType,
+      submittalNumber: payload.submittalNumber?.trim().slice(0, 120) || undefined,
+      rev: typeof payload.rev === 'number' && Number.isFinite(payload.rev) ? payload.rev : undefined,
+      notes: payload.notes?.trim().slice(0, 2000) || undefined,
+      fileName: payload.fileName.trim().slice(0, 260),
+      fileSizeBytes: Math.max(1, Math.round(payload.fileSizeBytes)),
+      chunkCount: chunks.length,
+      pageCount: payload.pageCount,
+      senderId: payload.senderId,
+      senderName: payload.senderName.trim().slice(0, 150),
+      senderEmail: payload.senderEmail.trim().slice(0, 200),
+      status: 'pending_receipt',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      expiresAt: expiresIso,
+      expiresAtMs
+    });
+
+    onProgress?.(10);
+
+    try {
+      await setDoc(doc(db, 'siteDeliverables', id), stripUndefined(deliverable));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}`);
+    }
+
+    try {
+      for (let idx = 0; idx < chunks.length; idx++) {
+        const chunkDoc: SiteDeliverableChunk = {
+          index: idx,
+          data: chunks[idx],
+          expiresAtMs
+        };
+        await setDoc(doc(db, 'siteDeliverables', id, 'chunks', `chunk-${idx}`), chunkDoc);
+        const pct = Math.round(15 + ((idx + 1) / chunks.length) * 85);
+        onProgress?.(pct);
+      }
+    } catch (error) {
+      // Roll back parent doc if chunk upload fails
+      await deleteDoc(doc(db, 'siteDeliverables', id)).catch(() => undefined);
+      handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}/chunks`);
+    }
+
+    const list = this.getSiteDeliverables();
+    list.unshift(deliverable);
+    localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(list));
+
+    this.addNotification({
+      title: `ملف PDF مستلم جديد: ${deliverable.projectName}`,
+      message: `أرسل ${deliverable.senderName} ملف "${deliverable.title}" (${deliverable.fileName}) — متاح لمدة 48 ساعة.`,
+      type: 'deliverable_sent',
+      linkTab: 'site-deliverables'
+    });
+
+    this.notify();
+    return deliverable;
+  }
+
+  public async fetchSiteDeliverablePdfUrl(deliverable: SiteDeliverable): Promise<string> {
+    if (deliverable.expiresAtMs <= Date.now()) {
+      await this.deleteSiteDeliverable(deliverable.id).catch(() => undefined);
+      throw new Error('انتهت مدة صلاحية الملف (48 ساعة) وتم حذفه تلقائياً من قاعدة البيانات.');
+    }
+
+    const cached = this.pdfBlobUrlCache.get(deliverable.id);
+    if (cached) {
+      return cached;
+    }
+
+    let chunkDocs: SiteDeliverableChunk[] = [];
+    try {
+      const snap = await getDocs(collection(db, 'siteDeliverables', deliverable.id, 'chunks'));
+      chunkDocs = snap.docs.map((d) => d.data() as SiteDeliverableChunk);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, `siteDeliverables/${deliverable.id}/chunks`);
+    }
+
+    if (chunkDocs.length === 0) {
+      throw new Error('تعذر العثور على بيانات ملف الـ PDF في قاعدة البيانات (ربما تم حذفه).');
+    }
+
+    chunkDocs.sort((a, b) => a.index - b.index);
+    const fullBase64 = chunkDocs.map((c) => c.data).join('');
+    const blob = base64ToBlob(fullBase64, 'application/pdf');
+    const url = URL.createObjectURL(blob);
+    this.pdfBlobUrlCache.set(deliverable.id, url);
+    return url;
+  }
+
+  public async updateSiteDeliverableStatus(
+    deliverableId: string,
+    status: SiteDeliverableStatus,
+    adminNote?: string
+  ): Promise<boolean> {
+    const list = this.getSiteDeliverables();
+    const idx = list.findIndex((d) => d.id === deliverableId);
+    if (idx === -1) return false;
+
+    const updatedAt = new Date().toISOString();
+    const receivedAt = status === 'received' ? updatedAt : list[idx].receivedAt;
+    const cleanedNote = adminNote?.trim().slice(0, 1000);
+
+    const patch = stripUndefined({
+      status,
+      adminNote: cleanedNote || undefined,
+      receivedAt,
+      updatedAt
+    });
+
+    list[idx] = stripUndefined({
+      ...list[idx],
+      ...patch
+    });
+    localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(list));
+
+    try {
+      await updateDoc(doc(db, 'siteDeliverables', deliverableId), patch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `siteDeliverables/${deliverableId}`);
+    }
+
+    this.addNotification({
+      title:
+        status === 'received'
+          ? `تم استلام ملف PDF: ${list[idx].title}`
+          : `ملاحظة إدارة على ملف PDF: ${list[idx].title}`,
+      message:
+        status === 'received'
+          ? `أكدت الإدارة استلام ملف "${list[idx].fileName}" لمشروع ${list[idx].projectName}.`
+          : `طلبت الإدارة مراجعة ملف "${list[idx].fileName}"${cleanedNote ? `: ${cleanedNote}` : '.'}`,
+      type: 'deliverable_reviewed',
+      targetUserId: list[idx].senderId,
+      linkTab: 'site-deliverables'
+    });
+
+    this.notify();
+    return true;
+  }
+
+  public async deleteSiteDeliverable(deliverableId: string): Promise<boolean> {
+    if (this.deletingDeliverableIds.has(deliverableId)) return false;
+    this.deletingDeliverableIds.add(deliverableId);
+
+    try {
+      // Delete chunks first while parent document still exists for rules evaluation
+      try {
+        const chunksSnap = await getDocs(collection(db, 'siteDeliverables', deliverableId, 'chunks'));
+        for (const chunkDoc of chunksSnap.docs) {
+          await deleteDoc(doc(db, 'siteDeliverables', deliverableId, 'chunks', chunkDoc.id));
+        }
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `siteDeliverables/${deliverableId}/chunks`);
+      }
+
+      try {
+        await deleteDoc(doc(db, 'siteDeliverables', deliverableId));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.DELETE, `siteDeliverables/${deliverableId}`);
+      }
+
+      const cachedUrl = this.pdfBlobUrlCache.get(deliverableId);
+      if (cachedUrl) {
+        URL.revokeObjectURL(cachedUrl);
+        this.pdfBlobUrlCache.delete(deliverableId);
+      }
+
+      const stored = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
+      if (stored) {
+        const list: SiteDeliverable[] = JSON.parse(stored);
+        localStorage.setItem(
+          STORAGE_KEYS.SITE_DELIVERABLES,
+          JSON.stringify(list.filter((d) => d.id !== deliverableId))
+        );
+      }
+
+      this.notify();
+      return true;
+    } finally {
+      this.deletingDeliverableIds.delete(deliverableId);
+    }
+  }
+
+  public async cleanupExpiredDeliverables(expiredItems: SiteDeliverable[]): Promise<void> {
+    const nowMs = Date.now();
+    for (const item of expiredItems) {
+      if (item.expiresAtMs <= nowMs && !this.deletingDeliverableIds.has(item.id)) {
+        await this.deleteSiteDeliverable(item.id).catch(() => undefined);
+      }
+    }
+  }
+
+  private purgeExpiredDeliverablesFromState() {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
+      if (!stored) return;
+      const list: SiteDeliverable[] = JSON.parse(stored);
+      const nowMs = Date.now();
+      const expired = list.filter((d) => d.expiresAtMs <= nowMs);
+      if (expired.length > 0) {
+        const active = list.filter((d) => d.expiresAtMs > nowMs);
+        localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(active));
+        this.notify();
+        this.cleanupExpiredDeliverables(expired).catch(() => undefined);
+      }
+    } catch {
+      // ignore parse errors
+    }
   }
 
   // --- Daily Reports ---
@@ -1114,6 +1450,7 @@ class DataService {
       role: isAdminUser ? 'admin' : 'site',
       allProjects: isAdminUser ? true : Boolean(payload.allProjects),
       canAccessExecutedWorks: isAdminUser ? true : Boolean(payload.canAccessExecutedWorks),
+      canAccessSiteDeliverables: isAdminUser ? true : Boolean(payload.canAccessSiteDeliverables),
       assignedProjects:
         isAdminUser || payload.allProjects
           ? this.getProjects().map((p) => p.id)
@@ -1148,6 +1485,7 @@ class DataService {
       sanitizedUpdates.status = 'active';
       sanitizedUpdates.allProjects = true;
       sanitizedUpdates.canAccessExecutedWorks = true;
+      sanitizedUpdates.canAccessSiteDeliverables = true;
     }
 
     const updatedUser: UserProfile = stripUndefined({
@@ -1245,7 +1583,8 @@ class DataService {
           n.type === 'missing_report' ||
           n.type === 'report_submitted' ||
           n.type === 'urgent_issue' ||
-          n.type === 'work_logged'
+          n.type === 'work_logged' ||
+          n.type === 'deliverable_sent'
         ) {
           return false;
         }

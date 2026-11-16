@@ -119,6 +119,7 @@ export interface UserProfile {
   role: UserRole;
   allProjects?: boolean;
   canAccessExecutedWorks?: boolean;
+  canAccessSiteDeliverables?: boolean;
   assignedProjects: string[]; // array of project IDs
   status: 'active' | 'disabled';
   phone?: string;
@@ -158,6 +159,41 @@ export interface ExecutedWork {
   updatedAt: string;
 }
 
+export type SiteDeliverableStatus = 'pending_receipt' | 'received' | 'needs_revision';
+
+export type SiteDeliverableType = 'ir' | 'mir' | 'shop_drawing' | 'handover' | 'other';
+
+export interface SiteDeliverable {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  deliverableType: SiteDeliverableType;
+  submittalNumber?: string;
+  rev?: number;
+  notes?: string;
+  fileName: string;
+  fileSizeBytes: number;
+  chunkCount: number;
+  pageCount?: number;
+  senderId: string;
+  senderName: string;
+  senderEmail: string;
+  status: SiteDeliverableStatus;
+  adminNote?: string;
+  receivedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  expiresAtMs: number;
+}
+
+export interface SiteDeliverableChunk {
+  index: number;
+  data: string;
+  expiresAtMs: number;
+}
+
 export interface AppNotification {
   id: string;
   title: string;
@@ -172,7 +208,9 @@ export interface AppNotification {
     | 'report_reviewed'
     | 'issue_status'
     | 'task_done'
-    | 'work_logged';
+    | 'work_logged'
+    | 'deliverable_sent'
+    | 'deliverable_reviewed';
   linkTab?: string;
   targetUserId?: string; // empty means admin or all
   isRead: boolean;

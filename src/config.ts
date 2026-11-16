@@ -1,4 +1,12 @@
-import { SubmittalStatusCode, SubmittalStatusMeta, IssueType, IssuePriority, WorkDiscipline } from './types';
+import {
+  SubmittalStatusCode,
+  SubmittalStatusMeta,
+  IssueType,
+  IssuePriority,
+  WorkDiscipline,
+  SiteDeliverableType,
+  SiteDeliverableStatus
+} from './types';
 
 /**
  * ============================================================================
@@ -160,5 +168,55 @@ export const WORK_DISCIPLINE_CONFIG: Record<WorkDiscipline, { labelAr: string; b
   other: {
     labelAr: 'أعمال أخرى',
     badgeClass: 'bg-slate-100 text-slate-800 border-slate-300 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700'
+  }
+};
+
+// 7. SITE PDF DELIVERABLES CONFIGURATION (إعدادات مرسلات واستلامات PDF المؤقتة - 48 ساعة)
+export const SITE_DELIVERABLE_RETENTION_HOURS = 48;
+export const SITE_DELIVERABLE_RETENTION_MS = SITE_DELIVERABLE_RETENTION_HOURS * 60 * 60 * 1000;
+export const MAX_PDF_FILE_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB max PDF
+export const PDF_CHUNK_SIZE_CHARS = 600000; // <= 600KB per Firestore chunk document
+
+export const DELIVERABLE_TYPE_CONFIG: Record<
+  SiteDeliverableType,
+  { labelAr: string; badgeClass: string }
+> = {
+  ir: {
+    labelAr: 'طلب فحص واستلام (IR)',
+    badgeClass: 'bg-blue-100 text-blue-800 border-blue-300 dark:bg-blue-950/70 dark:text-blue-300 dark:border-blue-800'
+  },
+  mir: {
+    labelAr: 'اعتماد وتوريد مواد (MIR)',
+    badgeClass: 'bg-indigo-100 text-indigo-800 border-indigo-300 dark:bg-indigo-950/70 dark:text-indigo-300 dark:border-indigo-800'
+  },
+  shop_drawing: {
+    labelAr: 'مخطط تنفيذي معتمد (Shop Drawing)',
+    badgeClass: 'bg-cyan-100 text-cyan-800 border-cyan-300 dark:bg-cyan-950/70 dark:text-cyan-300 dark:border-cyan-800'
+  },
+  handover: {
+    labelAr: 'محضر استلام / تسليم أعمال',
+    badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-950/70 dark:text-emerald-300 dark:border-emerald-800'
+  },
+  other: {
+    labelAr: 'مستند PDF آخر',
+    badgeClass: 'bg-slate-100 text-slate-800 border-slate-300 dark:bg-slate-800 dark:text-slate-200 dark:border-slate-700'
+  }
+};
+
+export const DELIVERABLE_STATUS_CONFIG: Record<
+  SiteDeliverableStatus,
+  { labelAr: string; badgeClass: string }
+> = {
+  pending_receipt: {
+    labelAr: 'في انتظار استلام الإدارة',
+    badgeClass: 'bg-amber-100 text-amber-900 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-800'
+  },
+  received: {
+    labelAr: 'تم الاستلام والأرشفة',
+    badgeClass: 'bg-emerald-100 text-emerald-900 border-emerald-300 dark:bg-emerald-950/80 dark:text-emerald-300 dark:border-emerald-800'
+  },
+  needs_revision: {
+    labelAr: 'يحتاج مراجعة / إعادة إرسال',
+    badgeClass: 'bg-rose-100 text-rose-900 border-rose-300 dark:bg-rose-950/80 dark:text-rose-300 dark:border-rose-800'
   }
 };

@@ -7,6 +7,7 @@ import { NotificationsDrawer } from './components/common/NotificationsDrawer';
 import { SettingsModal } from './components/common/SettingsModal';
 import { ShareAppModal } from './components/common/ShareAppModal';
 import { ExecutedWorksView } from './components/common/ExecutedWorksView';
+import { SiteDeliverablesView } from './components/common/SiteDeliverablesView';
 
 // Site User Views
 import { DailyReportForm } from './components/site/DailyReportForm';
@@ -27,7 +28,11 @@ import { ExportCenterView } from './components/admin/ExportCenterView';
 
 import { dataService } from './services/dataService';
 import { subscribeToAuthState, signOutUser } from './services/firebase';
-import { canAccessProject, canAccessExecutedWorksTab } from './utils/accessControl';
+import {
+  canAccessProject,
+  canAccessExecutedWorksTab,
+  canAccessSiteDeliverablesTab
+} from './utils/accessControl';
 import {
   UserProfile,
   Project,
@@ -36,7 +41,8 @@ import {
   ProjectTask,
   Announcement,
   AppNotification,
-  ExecutedWork
+  ExecutedWork,
+  SiteDeliverable
 } from './types';
 
 export default function App() {
@@ -65,6 +71,9 @@ export default function App() {
   );
   const [executedWorks, setExecutedWorks] = useState<ExecutedWork[]>(() =>
     dataService.getExecutedWorks()
+  );
+  const [siteDeliverables, setSiteDeliverables] = useState<SiteDeliverable[]>(() =>
+    dataService.getSiteDeliverables()
   );
   const [users, setUsers] = useState<UserProfile[]>(() => dataService.getUsers());
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
@@ -148,6 +157,7 @@ export default function App() {
       setTasks(dataService.getTasks());
       setAnnouncements(dataService.getAnnouncements());
       setExecutedWorks(dataService.getExecutedWorks());
+      setSiteDeliverables(dataService.getSiteDeliverables());
       setUsers(dataService.getUsers());
       setNotifications(dataService.getNotifications(activeUser));
       setStalledDays(dataService.getStalledDaysThreshold());
@@ -164,9 +174,12 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Redirect away from Executed Works tab immediately if permission is revoked
+  // Redirect away from restricted tabs immediately if permission is revoked
   useEffect(() => {
-    if (currentUser && !canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
+    if (!currentUser) return;
+    if (!canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
+      setActiveTab('daily-report');
+    } else if (!canAccessSiteDeliverablesTab(currentUser) && activeTab === 'site-deliverables') {
       setActiveTab('daily-report');
     }
   }, [currentUser, activeTab]);
@@ -235,7 +248,12 @@ export default function App() {
     (t) => t.status !== 'done' && canAccessProject(currentUser, t.projectId)
   ).length;
 
+  const pendingDeliverablesCount = siteDeliverables.filter(
+    (d) => d.status === 'pending_receipt' && canAccessProject(currentUser, d.projectId)
+  ).length;
+
   const canAccessExecutedWorks = canAccessExecutedWorksTab(currentUser);
+  const canAccessSiteDeliverables = canAccessSiteDeliverablesTab(currentUser);
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
@@ -260,7 +278,9 @@ export default function App() {
         onTabChange={(tabId) => setActiveTab(tabId)}
         urgentIssuesCount={urgentIssuesCount}
         openTasksCount={userOpenTasksCount}
+        pendingDeliverablesCount={pendingDeliverablesCount}
         canAccessExecutedWorks={canAccessExecutedWorks}
+        canAccessSiteDeliverables={canAccessSiteDeliverables}
       />
 
       {/* Main Content Area */}
@@ -273,6 +293,14 @@ export default function App() {
                 currentUser={currentUser}
                 projects={projects}
                 onReportSubmitted={() => setActiveTab('my-submissions')}
+              />
+            )}
+
+            {activeTab === 'site-deliverables' && canAccessSiteDeliverables && (
+              <SiteDeliverablesView
+                currentUser={currentUser}
+                projects={projects}
+                deliverables={siteDeliverables}
               />
             )}
 
@@ -324,6 +352,15 @@ export default function App() {
               <AdminReportsView
                 reports={reports}
                 projects={projects}
+                users={users}
+              />
+            )}
+
+            {activeTab === 'site-deliverables' && (
+              <SiteDeliverablesView
+                currentUser={currentUser}
+                projects={projects}
+                deliverables={siteDeliverables}
                 users={users}
               />
             )}

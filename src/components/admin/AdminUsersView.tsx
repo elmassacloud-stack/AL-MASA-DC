@@ -19,7 +19,8 @@ import {
   Loader2,
   ShieldCheck,
   Search,
-  Hammer
+  Hammer,
+  FileUp
 } from 'lucide-react';
 import { UserProfile, Project, UserRole } from '../../types';
 import { dataService } from '../../services/dataService';
@@ -52,6 +53,7 @@ export const AdminUsersView: React.FC<Props> = ({
   const [role, setRole] = useState<UserRole>('site');
   const [allProjects, setAllProjects] = useState<boolean>(false);
   const [canAccessExecutedWorks, setCanAccessExecutedWorks] = useState<boolean>(true);
+  const [canAccessSiteDeliverables, setCanAccessSiteDeliverables] = useState<boolean>(true);
   const [assignedProjects, setAssignedProjects] = useState<string[]>(
     projects[0]?.id ? [projects[0].id] : []
   );
@@ -77,6 +79,7 @@ export const AdminUsersView: React.FC<Props> = ({
     setRole('site');
     setAllProjects(false);
     setCanAccessExecutedWorks(true);
+    setCanAccessSiteDeliverables(true);
     setAssignedProjects(projects[0]?.id ? [projects[0].id] : []);
     setPhone('');
     setCreateError(null);
@@ -116,6 +119,7 @@ export const AdminUsersView: React.FC<Props> = ({
         role,
         allProjects: role === 'admin' ? true : allProjects,
         canAccessExecutedWorks: role === 'admin' ? true : canAccessExecutedWorks,
+        canAccessSiteDeliverables: role === 'admin' ? true : canAccessSiteDeliverables,
         assignedProjects: role === 'admin' || allProjects ? projects.map((p) => p.id) : assignedProjects,
         phone: phone.trim()
       });
@@ -155,6 +159,8 @@ export const AdminUsersView: React.FC<Props> = ({
         allProjects: isAll,
         canAccessExecutedWorks:
           editingUser.role === 'admin' ? true : editingUser.canAccessExecutedWorks !== false,
+        canAccessSiteDeliverables:
+          editingUser.role === 'admin' ? true : editingUser.canAccessSiteDeliverables !== false,
         assignedProjects: isAll ? projects.map((p) => p.id) : editingUser.assignedProjects,
         phone: (editingUser.phone || '').trim() || undefined
       });
@@ -383,20 +389,38 @@ export const AdminUsersView: React.FC<Props> = ({
                 </div>
 
                 {/* Tab Permissions Indicator */}
-                <div className="flex items-center justify-between text-xs pt-1">
-                  <span className="text-slate-600 dark:text-slate-400 font-medium flex items-center gap-1">
-                    <Hammer className="w-3.5 h-3.5 text-amber-600" />
-                    <span>تبويب الأعمال المنفذة:</span>
-                  </span>
-                  {user.role === 'admin' || isSuper || user.canAccessExecutedWorks !== false ? (
-                    <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                      مصرح بالوصول
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-600 dark:text-slate-400 font-medium flex items-center gap-1">
+                      <Hammer className="w-3.5 h-3.5 text-amber-600" />
+                      <span>تبويب الأعمال المنفذة:</span>
                     </span>
-                  ) : (
-                    <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
-                      محجوب
+                    {user.role === 'admin' || isSuper || user.canAccessExecutedWorks !== false ? (
+                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        مصرح بالوصول
+                      </span>
+                    ) : (
+                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                        محجوب
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-600 dark:text-slate-400 font-medium flex items-center gap-1">
+                      <FileUp className="w-3.5 h-3.5 text-blue-600" />
+                      <span>تبويب تسليمات PDF:</span>
                     </span>
-                  )}
+                    {user.role === 'admin' || isSuper || user.canAccessSiteDeliverables !== false ? (
+                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        مصرح بالوصول
+                      </span>
+                    ) : (
+                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                        محجوب
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -597,6 +621,29 @@ export const AdminUsersView: React.FC<Props> = ({
                       </span>
                       <span className="text-[11px] text-amber-700 dark:text-amber-400">
                         يتيح للمستخدم عرض وتسجيل بنود الأعمال المنفذة للمشاريع المسندة إليه
+                      </span>
+                    </div>
+                  </label>
+
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editingUser.canAccessSiteDeliverables !== false}
+                      onChange={(e) =>
+                        setEditingUser({
+                          ...editingUser,
+                          canAccessSiteDeliverables: e.target.checked
+                        })
+                      }
+                      className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                    <div>
+                      <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
+                        <FileUp className="w-3.5 h-3.5" />
+                        <span>صلاحية الوصول إلى تبويب «تسليمات واستلامات PDF»</span>
+                      </span>
+                      <span className="text-[11px] text-blue-700 dark:text-blue-400">
+                        يتيح للمستخدم إرسال ملفات PDF للمستندات المستلمة بالموقع (تُحذف بعد 48 ساعة)
                       </span>
                     </div>
                   </label>
@@ -827,6 +874,19 @@ export const AdminUsersView: React.FC<Props> = ({
                     <span className="font-bold text-amber-900 dark:text-amber-200 text-xs flex items-center gap-1.5">
                       <Hammer className="w-3.5 h-3.5" />
                       <span>السماح بالوصول إلى تبويب «الأعمال المنفذة بالموقع»</span>
+                    </span>
+                  </label>
+
+                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={canAccessSiteDeliverables}
+                      onChange={(e) => setCanAccessSiteDeliverables(e.target.checked)}
+                      className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
+                      <FileUp className="w-3.5 h-3.5" />
+                      <span>السماح بالوصول إلى تبويب «تسليمات واستلامات PDF»</span>
                     </span>
                   </label>
 

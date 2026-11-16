@@ -10,7 +10,8 @@ import {
   Download,
   FolderGit2,
   Building2,
-  Hammer
+  Hammer,
+  FileUp
 } from 'lucide-react';
 import { UserRole } from '../../types';
 
@@ -27,7 +28,9 @@ interface Props {
   onTabChange: (tabId: string) => void;
   urgentIssuesCount?: number;
   openTasksCount?: number;
+  pendingDeliverablesCount?: number;
   canAccessExecutedWorks?: boolean;
+  canAccessSiteDeliverables?: boolean;
 }
 
 export const Navigation: React.FC<Props> = ({
@@ -36,11 +39,16 @@ export const Navigation: React.FC<Props> = ({
   onTabChange,
   urgentIssuesCount = 0,
   openTasksCount = 0,
-  canAccessExecutedWorks = true
+  pendingDeliverablesCount = 0,
+  canAccessExecutedWorks = true,
+  canAccessSiteDeliverables = true
 }) => {
   // Navigation tabs for Site user
   const siteNavItems: NavItem[] = [
     { id: 'daily-report', label: 'تقرير اليوم', icon: FileText },
+    ...(canAccessSiteDeliverables
+      ? [{ id: 'site-deliverables', label: 'تسليمات PDF', icon: FileUp }]
+      : []),
     ...(canAccessExecutedWorks
       ? [{ id: 'executed-works', label: 'الأعمال المنفذة', icon: Hammer }]
       : []),
@@ -53,6 +61,12 @@ export const Navigation: React.FC<Props> = ({
   const adminNavItems: NavItem[] = [
     { id: 'dashboard', label: 'المؤشرات', icon: LayoutDashboard },
     { id: 'reports', label: 'التقارير', icon: FileText },
+    {
+      id: 'site-deliverables',
+      label: 'تسليمات PDF',
+      icon: FileUp,
+      badge: pendingDeliverablesCount
+    },
     { id: 'executed-works', label: 'الأعمال المنفذة', icon: Hammer },
     { id: 'submittal-tracker', label: 'تتبع التقديمات', icon: Search },
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
@@ -64,7 +78,7 @@ export const Navigation: React.FC<Props> = ({
   ];
 
   const items = role === 'admin' ? adminNavItems : siteNavItems;
-  const mobilePrimaryCount = role === 'admin' ? 5 : 5;
+  const mobilePrimaryCount = role === 'admin' ? 5 : 4;
   const mobileMoreItems = items.slice(mobilePrimaryCount);
   const isMoreTabActive = mobileMoreItems.some((m) => m.id === activeTab);
 
