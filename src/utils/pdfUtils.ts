@@ -1,4 +1,5 @@
 import { PDFDocument } from 'pdf-lib';
+import * as XLSX from 'xlsx';
 import { MAX_PDF_FILE_SIZE_BYTES, PDF_CHUNK_SIZE_CHARS } from '../config';
 
 export interface PreparedPdfPayload {
@@ -6,6 +7,75 @@ export interface PreparedPdfPayload {
   fileName: string;
   fileSizeBytes: number;
   pageCount: number;
+  fileFormat: 'pdf' | 'excel';
+  mimeType: string;
+}
+
+export interface ExcelPreviewSheet {
+  name: string;
+  rows: string[][];
+  totalRows: number;
+  truncated: boolean;
+}
+
+export function isExcelFileName(fileName?: string): boolean {
+  if (!fileName) return false;
+  return /\.(xlsx|xls|xlsm|xlsb|csv)$/i.test(fileName.trim());
+}
+
+export function isExcelFile(file: File): boolean {
+  if (isExcelFileName(file.name)) return true;
+  const excelMimes = [
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel',
+    'application/vnd.ms-excel.sheet.macroEnabled.12',
+    'application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet',
+    'text/csv',
+    'application/csv'
+  ];
+  return excelMimes.includes(file.type);
+}
+
+export function getExcelMimeType(fileName: string): string {
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
+  if (lower.endsWith('.xlsm')) return 'application/vnd.ms-excel.sheet.macroEnabled.12';
+  if (lower.endsWith('.xlsb')) return 'application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet';
+  if (lower.endsWith('.csv')) return 'text/csv;charset=utf-8';
+  return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
+export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<ExcelPreviewSheet[]> {
+  const response = await fetch(blobUrl);
+  const buffer = await response.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  const MAX_PREVIEW_ROWS = 250;
+
+  return workbook.SheetNames.map((name) => {
+    const sheet = workbook.Sheets[name];
+    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' });
+    const truncated = rawRows.length > MAX_PREVIEW_ROWS;
+    const sliced = rawRows.slice(0, MAX_PREVIEW_ROWS);
+    const maxCols = Math.min(
+      30,
+      sliced.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0)
+    );
+    const normalizedRows = sliced.map((row) => {
+      const arr = Array.isArray(row) ? row : [];
+      const out: string[] = [];
+      for (let c = 0; c < maxCols; c++) {
+        const val = arr[c];
+        out.push(val === null || val === undefined ? '' : String(val));
+      }
+      return out;
+    });
+    return {
+      name,
+      rows: normalizedRows,
+      totalRows: rawRows.length,
+      truncated
+    };
+  });
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
@@ -85,12 +155,16 @@ async function imageFileToJpegBytes(file: File): Promise<{ bytes: Uint8Array; wi
 }
 
 /**
- * Prepares either a single PDF file OR 1+ image files (converted into a single PDF)
- * ready for chunked Firestore storage within the 4MB limit.
+ * Prepares a single PDF, a single Excel workbook (.xlsx/.xls/.xlsm/.xlsb/.csv),
+ * OR 1+ image files (converted into a single PDF) ready for chunked Firestore storage within 25MB.
  */
-export async function preparePdfFromFiles(files: File[], customTitle?: string): Promise<PreparedPdfPayload> {
+export async function preparePdfFromFiles(
+  files: File[],
+  customTitle?: string,
+  onProgress?: (percent: number, stageLabel?: string) => void
+): Promise<PreparedPdfPayload> {
   if (!files || files.length === 0) {
-    throw new Error('يرجى اختيار ملف PDF أو صورة مستند واحد على الأقل.');
+    throw new Error('يرجى اختيار ملف PDF أو Excel أو صورة مستند واحدة على الأقل.');
   }
 
   const first = files[0];
@@ -104,8 +178,10 @@ export async function preparePdfFromFiles(files: File[], customTitle?: string): 
         `حجم ملف الـ PDF (${formatFileSize(first.size)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(MAX_PDF_FILE_SIZE_BYTES)}).`
       );
     }
+    onProgress?.(20, 'جاري قراءة ملف الـ PDF...');
     const buffer = await first.arrayBuffer();
     const bytes = new Uint8Array(buffer);
+    onProgress?.(55, 'جاري فحص صفحات المستند...');
     let pageCount = 1;
     try {
       const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
@@ -113,23 +189,62 @@ export async function preparePdfFromFiles(files: File[], customTitle?: string): 
     } catch {
       pageCount = 1;
     }
+    onProgress?.(80, 'جاري ترميز الملف تمهيداً للرفع...');
     const base64 = uint8ArrayToBase64(bytes);
+    onProgress?.(100, 'تم تجهيز الملف بنجاح');
     return {
       base64,
       fileName: first.name.toLowerCase().endsWith('.pdf') ? first.name : `${first.name}.pdf`,
       fileSizeBytes: bytes.byteLength,
-      pageCount
+      pageCount,
+      fileFormat: 'pdf',
+      mimeType: 'application/pdf'
     };
   }
 
-  // Validate that all selected files are images if not a single PDF
+  const isSingleExcel = files.length === 1 && isExcelFile(first);
+  if (isSingleExcel) {
+    if (first.size > MAX_PDF_FILE_SIZE_BYTES) {
+      throw new Error(
+        `حجم ملف الـ Excel (${formatFileSize(first.size)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(MAX_PDF_FILE_SIZE_BYTES)}).`
+      );
+    }
+    onProgress?.(20, 'جاري قراءة ملف الـ Excel...');
+    const buffer = await first.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    onProgress?.(55, 'جاري فحص أوراق العمل في الملف...');
+    let sheetCount = 1;
+    try {
+      const workbook = XLSX.read(bytes, { type: 'array', bookSheets: true });
+      sheetCount = Math.max(1, workbook.SheetNames.length || 1);
+    } catch {
+      sheetCount = 1;
+    }
+    onProgress?.(80, 'جاري ترميز ملف الـ Excel تمهيداً للرفع...');
+    const base64 = uint8ArrayToBase64(bytes);
+    onProgress?.(100, 'تم تجهيز ملف الـ Excel بنجاح');
+    return {
+      base64,
+      fileName: first.name,
+      fileSizeBytes: bytes.byteLength,
+      pageCount: sheetCount,
+      fileFormat: 'excel',
+      mimeType: getExcelMimeType(first.name)
+    };
+  }
+
+  // Validate that all selected files are images if not a single PDF or Excel file
   const imageFiles = files.filter((f) => f.type.startsWith('image/'));
   if (imageFiles.length !== files.length) {
-    throw new Error('يرجى رفع ملف PDF واحد فقط، أو اختيار صور (JPG / PNG) ليتم دمجها تلقائياً في ملف PDF.');
+    throw new Error('يرجى رفع ملف PDF أو Excel واحد فقط، أو اختيار صور (JPG / PNG) ليتم دمجها تلقائياً في ملف PDF.');
   }
 
   const pdfDoc = await PDFDocument.create();
-  for (const imgFile of imageFiles) {
+  for (let i = 0; i < imageFiles.length; i++) {
+    const imgFile = imageFiles[i];
+    const stepPct = Math.max(10, Math.round(((i + 0.4) / imageFiles.length) * 80));
+    onProgress?.(stepPct, `جاري معالجة ودمج الصورة ${i + 1} من ${imageFiles.length}...`);
+
     const { bytes, width, height } = await imageFileToJpegBytes(imgFile);
     const embedded = await pdfDoc.embedJpg(bytes);
 
@@ -154,6 +269,7 @@ export async function preparePdfFromFiles(files: File[], customTitle?: string): 
     });
   }
 
+  onProgress?.(88, 'جاري إنشاء وضغط ملف الـ PDF...');
   const pdfBytes = await pdfDoc.save();
   if (pdfBytes.byteLength > MAX_PDF_FILE_SIZE_BYTES) {
     throw new Error(
@@ -161,16 +277,22 @@ export async function preparePdfFromFiles(files: File[], customTitle?: string): 
     );
   }
 
+  onProgress?.(95, 'جاري ترميز الملف تمهيداً للرفع...');
   const sanitizedBase = (customTitle || first.name.replace(/\.[^.]+$/, '') || 'site-deliverable')
     .replace(/[\\/:*?"<>|]+/g, '_')
     .trim()
     .slice(0, 80);
 
+  const base64 = uint8ArrayToBase64(pdfBytes);
+  onProgress?.(100, 'تم تجهيز الملف بنجاح');
+
   return {
-    base64: uint8ArrayToBase64(pdfBytes),
+    base64,
     fileName: `${sanitizedBase || 'site-deliverable'}.pdf`,
     fileSizeBytes: pdfBytes.byteLength,
-    pageCount: pdfDoc.getPageCount()
+    pageCount: pdfDoc.getPageCount(),
+    fileFormat: 'pdf',
+    mimeType: 'application/pdf'
   };
 }
 

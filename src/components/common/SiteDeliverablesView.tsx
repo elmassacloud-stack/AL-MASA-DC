@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   FileUp,
   FileText,
+  FileSpreadsheet,
   Clock,
   CheckCircle2,
   AlertCircle,
@@ -31,13 +32,16 @@ import {
   DELIVERABLE_STATUS_CONFIG,
   MAX_PDF_FILE_SIZE_BYTES
 } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, DeliverableUploadProgress } from '../../services/dataService';
 import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 import {
   preparePdfFromFiles,
   formatFileSize,
   getRemainingRetentionInfo,
-  PreparedPdfPayload
+  isExcelFileName,
+  parseExcelPreviewFromBlobUrl,
+  PreparedPdfPayload,
+  ExcelPreviewSheet
 } from '../../utils/pdfUtils';
 
 interface Props {
@@ -78,7 +82,10 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   const [notes, setNotes] = useState<string>('');
   const [preparedPdf, setPreparedPdf] = useState<PreparedPdfPayload | null>(null);
   const [isPreparingFile, setIsPreparingFile] = useState<boolean>(false);
+  const [prepareProgress, setPrepareProgress] = useState<number>(0);
+  const [prepareStage, setPrepareStage] = useState<string>('');
   const [uploadProgress, setUploadProgress] = useState<number>(0);
+  const [uploadInfo, setUploadInfo] = useState<DeliverableUploadProgress | null>(null);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [successBanner, setSuccessBanner] = useState<string | null>(null);
@@ -90,9 +97,11 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   const [filterType, setFilterType] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  // PDF Preview / Loading / Review / Delete modals
+  // Preview / Loading / Review / Delete modals
   const [previewTarget, setPreviewTarget] = useState<SiteDeliverable | null>(null);
   const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+  const [excelSheets, setExcelSheets] = useState<ExcelPreviewSheet[] | null>(null);
+  const [activeSheetIdx, setActiveSheetIdx] = useState<number>(0);
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -130,15 +139,22 @@ export const SiteDeliverablesView: React.FC<Props> = ({
 
     setFormError(null);
     setIsPreparingFile(true);
+    setPrepareProgress(10);
+    setPrepareStage('جاري قراءة الملفات المختارة...');
     try {
       const files = Array.from(fileList);
-      const prepared = await preparePdfFromFiles(files, title.trim() || undefined);
+      const prepared = await preparePdfFromFiles(files, title.trim() || undefined, (pct, label) => {
+        setPrepareProgress(pct);
+        if (label) setPrepareStage(label);
+      });
       setPreparedPdf(prepared);
     } catch (err) {
       setPreparedPdf(null);
       setFormError(err instanceof Error ? err.message : 'تعذر تجهيز ملف الـ PDF.');
     } finally {
       setIsPreparingFile(false);
+      setPrepareProgress(0);
+      setPrepareStage('');
       e.target.value = '';
     }
   };
@@ -163,6 +179,14 @@ export const SiteDeliverablesView: React.FC<Props> = ({
 
     setIsUploading(true);
     setUploadProgress(5);
+    setUploadInfo({
+      percent: 5,
+      uploadedChunks: 0,
+      totalChunks: 1,
+      uploadedBytes: 0,
+      totalBytes: preparedPdf.fileSizeBytes,
+      stage: 'metadata'
+    });
     try {
       await dataService.createSiteDeliverable(
         {
@@ -174,6 +198,8 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           rev: Number.isFinite(rev) && rev >= 0 ? rev : undefined,
           notes: notes.trim() || undefined,
           fileName: preparedPdf.fileName,
+          fileFormat: preparedPdf.fileFormat,
+          mimeType: preparedPdf.mimeType,
           fileSizeBytes: preparedPdf.fileSizeBytes,
           pageCount: preparedPdf.pageCount,
           senderId: currentUser.id,
@@ -181,7 +207,10 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           senderEmail: currentUser.email
         },
         preparedPdf.base64,
-        (pct) => setUploadProgress(pct)
+        (pct, info) => {
+          setUploadProgress(pct);
+          if (info) setUploadInfo(info);
+        }
       );
 
       setTitle('');
@@ -190,17 +219,27 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       setNotes('');
       setPreparedPdf(null);
       setUploadProgress(0);
+      setUploadInfo(null);
       if (isAdmin) setShowUploadForm(false);
-      showSuccess('تم إرسال ملف الـ PDF بنجاح، وسيظل متاحاً في Firebase لمدة 48 ساعة ثم يُحذف تلقائياً.');
+      showSuccess('تم إرسال الملف بنجاح، وسيظل متاحاً في Firebase لمدة 48 ساعة ثم يُحذف تلقائياً.');
     } catch (err) {
       setFormError(
         err instanceof Error
           ? err.message
-          : 'حدث خطأ أثناء رفع ملف الـ PDF. يرجى التحقق من الاتصال والمحاولة مجدداً.'
+          : 'حدث خطأ أثناء رفع الملف. يرجى التحقق من الاتصال والمحاولة مجدداً.'
       );
     } finally {
       setIsUploading(false);
+      setUploadInfo(null);
     }
+  };
+
+  const isDeliverableExcel = (item: Pick<SiteDeliverable, 'fileFormat' | 'fileName'>) =>
+    item.fileFormat === 'excel' || isExcelFileName(item.fileName);
+
+  const getDownloadFileName = (item: Pick<SiteDeliverable, 'fileFormat' | 'fileName'>) => {
+    if (isDeliverableExcel(item)) return item.fileName;
+    return item.fileName.toLowerCase().endsWith('.pdf') ? item.fileName : `${item.fileName}.pdf`;
   };
 
   const handleOpenPreview = async (item: SiteDeliverable) => {
@@ -208,10 +247,18 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     setPreviewLoadingId(item.id);
     try {
       const url = await dataService.fetchSiteDeliverablePdfUrl(item);
+      if (isDeliverableExcel(item)) {
+        const sheets = await parseExcelPreviewFromBlobUrl(url);
+        setExcelSheets(sheets);
+        setActiveSheetIdx(0);
+      } else {
+        setExcelSheets(null);
+      }
       setPreviewTarget(item);
       setPreviewBlobUrl(url);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'تعذر تحميل ملف الـ PDF للمعاينة.');
+      setExcelSheets(null);
+      setActionError(err instanceof Error ? err.message : 'تعذر تحميل الملف للمعاينة.');
     } finally {
       setPreviewLoadingId(null);
     }
@@ -224,12 +271,12 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       const url = await dataService.fetchSiteDeliverablePdfUrl(item);
       const a = document.createElement('a');
       a.href = url;
-      a.download = item.fileName.toLowerCase().endsWith('.pdf') ? item.fileName : `${item.fileName}.pdf`;
+      a.download = getDownloadFileName(item);
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'تعذر تحميل ملف الـ PDF.');
+      setActionError(err instanceof Error ? err.message : 'تعذر تحميل الملف.');
     } finally {
       setDownloadingId(null);
     }
@@ -351,12 +398,12 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           </div>
           <div>
             <h2 className="text-lg sm:text-xl font-bold text-slate-900 dark:text-white">
-              تسليمات الموقع (ملفات PDF)
+              تسليمات الموقع (ملفات PDF و Excel)
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5">
               {isAdmin
-                ? 'استلام ومعاينة وتحميل ملفات الـ PDF المرسلة من المواقع فور استلامها'
-                : 'إرسال مستندات وأعمال الاستلام الميدانية إلى الإدارة بصيغة PDF'}
+                ? 'استلام ومعاينة وتحميل ملفات الـ PDF و Excel المرسلة من المواقع فور استلامها'
+                : 'إرسال مستندات وأعمال الاستلام وجداول الكميات الميدانية إلى الإدارة بصيغة PDF أو Excel'}
             </p>
           </div>
         </div>
@@ -405,7 +452,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
             className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors whitespace-nowrap"
           >
             {showUploadForm ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-            <span>{showUploadForm ? 'إخفاء نموذج الإرسال' : 'إرسال ملف PDF جديد'}</span>
+            <span>{showUploadForm ? 'إخفاء نموذج الإرسال' : 'إرسال ملف جديد'}</span>
           </button>
         </div>
       </div>
@@ -433,13 +480,13 @@ export const SiteDeliverablesView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Upload / Send PDF Form */}
+      {/* Upload / Send File Form */}
       {showUploadForm && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
             <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <Upload className="w-4 h-4 text-blue-600" />
-              <span>إرسال شغل / مستند مستلم بصيغة PDF للإدارة</span>
+              <span>إرسال شغل / مستند مستلم (PDF أو Excel) للإدارة</span>
             </h3>
             <span className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold">
               الحد الأقصى: {formatFileSize(MAX_PDF_FILE_SIZE_BYTES)}
@@ -557,27 +604,59 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                 />
               </div>
 
-              {/* PDF / Image-to-PDF Picker */}
+              {/* PDF / Excel / Image-to-PDF Picker */}
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-                  ملف الـ PDF (أو اختر صوراً ليتم دمجها تلقائياً في ملف PDF واحد) <span className="text-red-500">*</span>
+                  ملف PDF أو Excel (أو اختر صوراً ليتم دمجها تلقائياً في ملف PDF واحد){' '}
+                  <span className="text-red-500">*</span>
                 </label>
 
-                <label className="flex flex-col items-center justify-center gap-2 p-5 border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-blue-500 dark:hover:border-blue-500 rounded-2xl bg-slate-50/70 dark:bg-slate-800/40 cursor-pointer transition-colors text-center">
+                <label
+                  className={`flex flex-col items-center justify-center gap-2 p-5 border-2 border-dashed rounded-2xl transition-colors text-center ${
+                    isUploading
+                      ? 'border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/20 opacity-75 cursor-not-allowed'
+                      : 'border-slate-300 dark:border-slate-700 hover:border-blue-500 dark:hover:border-blue-500 bg-slate-50/70 dark:bg-slate-800/40 cursor-pointer'
+                  }`}
+                >
                   {isPreparingFile ? (
-                    <div className="flex items-center gap-2 text-blue-600 dark:text-blue-400 font-bold text-xs sm:text-sm">
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                      <span>جاري تجهيز ملف الـ PDF...</span>
+                    <div className="w-full max-w-md space-y-2">
+                      <div className="flex items-center justify-between gap-2 text-blue-600 dark:text-blue-400 font-bold text-xs sm:text-sm">
+                        <span className="flex items-center gap-2">
+                          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                          <span>{prepareStage || 'جاري تجهيز الملف...'}</span>
+                        </span>
+                        <span className="font-mono">{prepareProgress}%</span>
+                      </div>
+                      <div
+                        role="progressbar"
+                        aria-valuenow={prepareProgress}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        className="w-full h-2.5 bg-blue-100 dark:bg-slate-800 rounded-full overflow-hidden"
+                      >
+                        <div
+                          className="h-full bg-blue-600 transition-all duration-200 rounded-full"
+                          style={{ width: `${prepareProgress}%` }}
+                        />
+                      </div>
                     </div>
                   ) : preparedPdf ? (
                     <div className="flex flex-col sm:flex-row items-center gap-3 text-emerald-700 dark:text-emerald-300">
-                      <FileText className="w-8 h-8 text-emerald-600 shrink-0" />
+                      {preparedPdf.fileFormat === 'excel' ? (
+                        <FileSpreadsheet className="w-8 h-8 text-emerald-600 shrink-0" />
+                      ) : (
+                        <FileText className="w-8 h-8 text-emerald-600 shrink-0" />
+                      )}
                       <div className="text-center sm:text-right">
                         <p className="font-bold text-sm" dir="ltr">
                           {preparedPdf.fileName}
                         </p>
                         <p className="text-xs text-slate-600 dark:text-slate-400">
-                          الحجم: {formatFileSize(preparedPdf.fileSizeBytes)} • عدد الصفحات: {preparedPdf.pageCount} • جاهز للإرسال (اضغط لاختيار ملف آخر)
+                          الحجم: {formatFileSize(preparedPdf.fileSizeBytes)} •{' '}
+                          {preparedPdf.fileFormat === 'excel'
+                            ? `${preparedPdf.pageCount} ورقة عمل (Excel)`
+                            : `${preparedPdf.pageCount} صفحة (PDF)`}{' '}
+                          • جاهز للإرسال (اضغط لاختيار ملف آخر)
                         </p>
                       </div>
                     </div>
@@ -586,18 +665,19 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                       <FileUp className="w-8 h-8 text-blue-600 dark:text-blue-400" />
                       <div>
                         <p className="font-bold text-slate-800 dark:text-slate-200 text-xs sm:text-sm">
-                          اضغط لاختيار ملف PDF جاهز أو التقاط/اختيار صور مستند
+                          اضغط لاختيار ملف PDF أو Excel (.xlsx / .xls / .csv) أو التقاط صور مستند
                         </p>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                          يدعم PDF مباشرة أو صور (JPG / PNG / WebP) وتُحوّل تلقائياً إلى PDF — بحد أقصى 4 ميجابايت
+                          يدعم PDF و Excel مباشرة أو صور (JPG / PNG / WebP) وتُحوّل الصور تلقائياً إلى PDF — بحد أقصى 25 ميجابايت
                         </p>
                       </div>
                     </>
                   )}
                   <input
                     type="file"
-                    accept="application/pdf,.pdf,image/jpeg,image/png,image/webp"
+                    accept="application/pdf,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet,text/csv,image/jpeg,image/png,image/webp"
                     multiple
+                    disabled={isUploading || isPreparingFile}
                     onChange={handleFileSelection}
                     className="hidden"
                   />
@@ -605,17 +685,50 @@ export const SiteDeliverablesView: React.FC<Props> = ({
               </div>
 
               {isUploading && (
-                <div className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs font-bold text-blue-700 dark:text-blue-300">
-                    <span>جاري رفع ملف الـ PDF إلى Firebase...</span>
-                    <span className="font-mono">{uploadProgress}%</span>
+                <div className="p-4 rounded-2xl bg-blue-50/90 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 space-y-2.5 shadow-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-blue-800 dark:text-blue-200">
+                      <Loader2 className="w-4 h-4 animate-spin text-blue-600 dark:text-blue-400 shrink-0" />
+                      <span>
+                        {uploadInfo?.stage === 'metadata'
+                          ? 'جاري تسجيل بيانات المستند...'
+                          : uploadInfo?.stage === 'finalizing'
+                            ? 'جاري تأكيد الحفظ وإرسال الإشعار للإدارة...'
+                            : 'جاري رفع الملف إلى Firebase...'}
+                      </span>
+                    </div>
+                    <span className="px-2.5 py-0.5 rounded-lg bg-blue-600 text-white text-xs font-extrabold font-mono shrink-0">
+                      {uploadProgress}%
+                    </span>
                   </div>
-                  <div className="w-full h-2.5 bg-slate-200 dark:bg-slate-800 rounded-full overflow-hidden">
+
+                  <div
+                    role="progressbar"
+                    aria-label="نسبة التقدم في رفع الملف"
+                    aria-valuenow={uploadProgress}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    className="w-full h-3.5 bg-blue-100 dark:bg-slate-800 rounded-full overflow-hidden border border-blue-200/80 dark:border-slate-700"
+                  >
                     <div
-                      className="h-full bg-blue-600 transition-all duration-200"
+                      className="h-full bg-gradient-to-l from-blue-600 via-blue-500 to-cyan-500 transition-all duration-300 rounded-full"
                       style={{ width: `${uploadProgress}%` }}
                     />
                   </div>
+
+                  {uploadInfo && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                      <span className="font-mono" dir="ltr">
+                        {formatFileSize(uploadInfo.uploadedBytes)} / {formatFileSize(uploadInfo.totalBytes)}
+                      </span>
+                      {uploadInfo.totalChunks > 1 && (
+                        <span>
+                          الأجزاء المرفوعة: <strong className="font-mono">{uploadInfo.uploadedChunks}</strong> من{' '}
+                          <strong className="font-mono">{uploadInfo.totalChunks}</strong>
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -630,7 +743,9 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                   ) : (
                     <FileUp className="w-4 h-4" />
                   )}
-                  <span>{isUploading ? 'جاري الإرسال...' : 'إرسال الـ PDF للإدارة الآن'}</span>
+                  <span>
+                    {isUploading ? `جاري الرفع (${uploadProgress}%)...` : 'إرسال الملف للإدارة الآن'}
+                  </span>
                 </button>
               </div>
             </form>
@@ -838,11 +953,21 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                     </div>
                   </div>
 
-                  {/* PDF File Info Box */}
+                  {/* File Info Box */}
                   <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-9 h-9 rounded-lg bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
-                        <FileText className="w-5 h-5" />
+                      <div
+                        className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                          isDeliverableExcel(item)
+                            ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400'
+                            : 'bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400'
+                        }`}
+                      >
+                        {isDeliverableExcel(item) ? (
+                          <FileSpreadsheet className="w-5 h-5" />
+                        ) : (
+                          <FileText className="w-5 h-5" />
+                        )}
                       </div>
                       <div className="min-w-0">
                         <p
@@ -853,7 +978,12 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                         </p>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
                           {formatFileSize(item.fileSizeBytes)}
-                          {item.pageCount ? ` • ${item.pageCount} صفحة` : ''} • أُرسل{' '}
+                          {item.pageCount
+                            ? isDeliverableExcel(item)
+                              ? ` • ${item.pageCount} ورقة عمل`
+                              : ` • ${item.pageCount} صفحة`
+                            : ''}{' '}
+                          • أُرسل{' '}
                           {new Date(item.createdAt).toLocaleString('ar-EG', {
                             month: 'short',
                             day: 'numeric',
@@ -863,6 +993,15 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                         </p>
                       </div>
                     </div>
+                    <span
+                      className={`text-[10px] font-extrabold px-2 py-0.5 rounded-md border shrink-0 ${
+                        isDeliverableExcel(item)
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800'
+                          : 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800'
+                      }`}
+                    >
+                      {isDeliverableExcel(item) ? 'EXCEL' : 'PDF'}
+                    </span>
                   </div>
 
                   {item.notes && (
@@ -884,7 +1023,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                   {isConfirmingDel ? (
                     <div className="flex items-center justify-between gap-2 p-2 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-xs">
                       <span className="font-bold text-rose-800 dark:text-rose-200">
-                        تأكيد حذف ملف الـ PDF من Firebase؟
+                        تأكيد حذف الملف من Firebase؟
                       </span>
                       <div className="flex items-center gap-1.5">
                         <button
@@ -918,7 +1057,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                           ) : (
                             <Eye className="w-3.5 h-3.5" />
                           )}
-                          <span>معاينة PDF</span>
+                          <span>{isDeliverableExcel(item) ? 'معاينة Excel' : 'معاينة PDF'}</span>
                         </button>
 
                         <button
@@ -971,7 +1110,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Inline PDF Preview Modal */}
+      {/* Inline PDF / Excel Preview Modal */}
       {previewTarget && previewBlobUrl && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
           <div className="bg-white dark:bg-slate-900 w-full max-w-5xl h-[90vh] rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden">
@@ -987,21 +1126,18 @@ export const SiteDeliverablesView: React.FC<Props> = ({
               <div className="flex items-center gap-2">
                 <a
                   href={previewBlobUrl}
-                  download={
-                    previewTarget.fileName.toLowerCase().endsWith('.pdf')
-                      ? previewTarget.fileName
-                      : `${previewTarget.fileName}.pdf`
-                  }
+                  download={getDownloadFileName(previewTarget)}
                   className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center gap-1.5"
                 >
                   <Download className="w-4 h-4" />
-                  <span>تحميل PDF</span>
+                  <span>{isDeliverableExcel(previewTarget) ? 'تحميل Excel' : 'تحميل PDF'}</span>
                 </a>
                 <button
                   type="button"
                   onClick={() => {
                     setPreviewTarget(null);
                     setPreviewBlobUrl(null);
+                    setExcelSheets(null);
                   }}
                   className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 cursor-pointer"
                 >
@@ -1010,13 +1146,87 @@ export const SiteDeliverablesView: React.FC<Props> = ({
               </div>
             </div>
 
-            <div className="flex-1 bg-slate-100 dark:bg-slate-950">
-              <iframe
-                src={previewBlobUrl}
-                title={previewTarget.fileName}
-                className="w-full h-full border-0"
-              />
-            </div>
+            {excelSheets ? (
+              <div className="flex-1 flex flex-col min-h-0 bg-slate-50 dark:bg-slate-950">
+                {/* Sheet tabs */}
+                <div className="px-3 py-2 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 flex items-center gap-2 overflow-x-auto">
+                  {excelSheets.map((sheet, idx) => (
+                    <button
+                      key={`${sheet.name}-${idx}`}
+                      type="button"
+                      onClick={() => setActiveSheetIdx(idx)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                        activeSheetIdx === idx
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                      }`}
+                    >
+                      {sheet.name} ({sheet.totalRows})
+                    </button>
+                  ))}
+                </div>
+
+                {/* Sheet table */}
+                <div className="flex-1 overflow-auto p-3">
+                  {(() => {
+                    const currentSheet = excelSheets[activeSheetIdx];
+                    if (!currentSheet || currentSheet.rows.length === 0) {
+                      return (
+                        <div className="p-8 text-center text-xs font-semibold text-slate-500">
+                          ورقة العمل هذه فارغة.
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="space-y-2">
+                        {currentSheet.truncated && (
+                          <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 text-xs font-semibold text-amber-800 dark:text-amber-200">
+                            يتم عرض أول 250 صفاً فقط في المعاينة السريعة من أصل {currentSheet.totalRows} صف. لتحميل الملف كاملاً اضغط «تحميل Excel».
+                          </div>
+                        )}
+                        <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900">
+                          <table className="w-full text-xs text-right border-collapse">
+                            <tbody>
+                              {currentSheet.rows.map((row, rIdx) => (
+                                <tr
+                                  key={rIdx}
+                                  className={
+                                    rIdx === 0
+                                      ? 'bg-slate-100 dark:bg-slate-800 font-bold text-slate-900 dark:text-white'
+                                      : 'border-t border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/40'
+                                  }
+                                >
+                                  <td className="px-2 py-1.5 text-[10px] font-mono text-slate-400 border-l border-slate-200 dark:border-slate-800 select-none">
+                                    {rIdx + 1}
+                                  </td>
+                                  {row.map((cell, cIdx) => (
+                                    <td
+                                      key={cIdx}
+                                      className="px-2.5 py-1.5 border-l border-slate-100 dark:border-slate-800 whitespace-nowrap max-w-[260px] truncate text-slate-700 dark:text-slate-200"
+                                      title={cell}
+                                    >
+                                      {cell}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 bg-slate-100 dark:bg-slate-950">
+                <iframe
+                  src={previewBlobUrl}
+                  title={previewTarget.fileName}
+                  className="w-full h-full border-0"
+                />
+              </div>
+            )}
           </div>
         </div>
       )}

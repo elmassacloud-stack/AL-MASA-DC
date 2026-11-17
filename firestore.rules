@@ -67,9 +67,23 @@ service cloud.firestore {
       );
     }
 
+    function isValidNotificationPreferences(prefs) {
+      return prefs is map
+        && prefs.keys().hasAll(['dailyReports', 'tasks', 'urgentTasksOnly', 'issues', 'urgentIssuesOnly', 'deliverables', 'executedWorks', 'announcements'])
+        && prefs.keys().hasOnly(['dailyReports', 'tasks', 'urgentTasksOnly', 'issues', 'urgentIssuesOnly', 'deliverables', 'executedWorks', 'announcements'])
+        && prefs.dailyReports is bool
+        && prefs.tasks is bool
+        && prefs.urgentTasksOnly is bool
+        && prefs.issues is bool
+        && prefs.urgentIssuesOnly is bool
+        && prefs.deliverables is bool
+        && prefs.executedWorks is bool
+        && prefs.announcements is bool;
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll(['id', 'email', 'displayName', 'role', 'assignedProjects', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'email', 'displayName', 'jobTitle', 'role', 'allProjects', 'canAccessExecutedWorks', 'canAccessSiteDeliverables', 'assignedProjects', 'status', 'phone', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'email', 'displayName', 'jobTitle', 'role', 'allProjects', 'canAccessExecutedWorks', 'canAccessSiteDeliverables', 'assignedProjects', 'status', 'phone', 'notificationPreferences', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 150
@@ -81,6 +95,7 @@ service cloud.firestore {
         && data.assignedProjects is list && data.assignedProjects.size() <= 100
         && (data.status == 'active' || data.status == 'disabled')
         && (!('phone' in data) || (data.phone is string && data.phone.size() <= 40))
+        && (!('notificationPreferences' in data) || isValidNotificationPreferences(data.notificationPreferences))
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
@@ -196,7 +211,7 @@ service cloud.firestore {
 
     function isValidSiteDeliverable(data) {
       return data.keys().hasAll(['id', 'projectId', 'projectName', 'title', 'deliverableType', 'fileName', 'fileSizeBytes', 'chunkCount', 'senderId', 'senderName', 'senderEmail', 'status', 'createdAt', 'updatedAt', 'expiresAt', 'expiresAtMs'])
-        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'title', 'deliverableType', 'submittalNumber', 'rev', 'notes', 'fileName', 'fileSizeBytes', 'chunkCount', 'pageCount', 'senderId', 'senderName', 'senderEmail', 'status', 'adminNote', 'receivedAt', 'createdAt', 'updatedAt', 'expiresAt', 'expiresAtMs'])
+        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'title', 'deliverableType', 'submittalNumber', 'rev', 'notes', 'fileName', 'fileFormat', 'mimeType', 'fileSizeBytes', 'chunkCount', 'pageCount', 'senderId', 'senderName', 'senderEmail', 'status', 'adminNote', 'receivedAt', 'createdAt', 'updatedAt', 'expiresAt', 'expiresAtMs'])
         && isValidId(data.id)
         && isValidId(data.projectId)
         && data.projectName is string && data.projectName.size() <= 200
@@ -206,8 +221,10 @@ service cloud.firestore {
         && (!('rev' in data) || (data.rev is number && data.rev >= 0 && data.rev <= 999))
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
         && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 260
-        && data.fileSizeBytes is int && data.fileSizeBytes >= 1 && data.fileSizeBytes <= 4500000
-        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 20
+        && (!('fileFormat' in data) || data.fileFormat in ['pdf', 'excel'])
+        && (!('mimeType' in data) || (data.mimeType is string && data.mimeType.size() <= 150))
+        && data.fileSizeBytes is int && data.fileSizeBytes >= 1 && data.fileSizeBytes <= 26500000
+        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 60
         && (!('pageCount' in data) || (data.pageCount is int && data.pageCount >= 1 && data.pageCount <= 500))
         && data.senderId is string && data.senderId.size() <= 128
         && data.senderName is string && data.senderName.size() <= 150
@@ -224,18 +241,19 @@ service cloud.firestore {
     function isValidSiteDeliverableChunk(data) {
       return data.keys().hasAll(['index', 'data', 'expiresAtMs'])
         && data.keys().hasOnly(['index', 'data', 'expiresAtMs'])
-        && data.index is int && data.index >= 0 && data.index < 20
-        && data.data is string && data.data.size() >= 1 && data.data.size() <= 700000
+        && data.index is int && data.index >= 0 && data.index < 60
+        && data.data is string && data.data.size() >= 1 && data.data.size() <= 800000
         && data.expiresAtMs is int && data.expiresAtMs > 0;
     }
 
     function isValidAppNotification(data) {
       return data.keys().hasAll(['id', 'title', 'message', 'type', 'isRead', 'createdAt'])
-        && data.keys().hasOnly(['id', 'title', 'message', 'type', 'linkTab', 'targetRole', 'targetUserId', 'projectId', 'senderId', 'senderName', 'readBy', 'isRead', 'createdAt'])
+        && data.keys().hasOnly(['id', 'title', 'message', 'type', 'priority', 'linkTab', 'targetRole', 'targetUserId', 'projectId', 'senderId', 'senderName', 'readBy', 'isRead', 'createdAt'])
         && isValidId(data.id)
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
         && data.message is string && data.message.size() >= 1 && data.message.size() <= 1500
         && data.type in ['urgent_issue', 'issue_reported', 'missing_report', 'task_assigned', 'announcement', 'status_alert', 'report_submitted', 'report_reviewed', 'issue_status', 'task_done', 'work_logged', 'deliverable_sent', 'deliverable_reviewed']
+        && (!('priority' in data) || (data.priority == 'normal' || data.priority == 'urgent'))
         && (!('linkTab' in data) || (data.linkTab is string && data.linkTab.size() <= 64))
         && (!('targetRole' in data) || data.targetRole in ['admin', 'site', 'all'])
         && (!('targetUserId' in data) || (data.targetUserId is string && data.targetUserId.size() <= 128))
@@ -252,8 +270,18 @@ service cloud.firestore {
       allow get: if isValidId(userId) && (isAdmin() || (isSignedIn() && request.auth.uid == userId));
       allow list: if isAdmin();
       allow create: if isValidId(userId) && isAdmin() && isValidUserProfile(incoming());
-      allow update: if isValidId(userId) && isAdmin() && isValidUserProfile(incoming())
-        && incoming().createdAt == existing().createdAt;
+      allow update: if isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == existing().createdAt
+        && (
+          isAdmin() ||
+          (
+            isSignedIn()
+            && request.auth.uid == userId
+            && isActiveUser()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['notificationPreferences', 'updatedAt'])
+          )
+        );
       allow delete: if isValidId(userId) && isAdmin() && existing().email != 'elmassacloud@gmail.com';
     }
 

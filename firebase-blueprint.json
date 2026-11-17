@@ -16,6 +16,29 @@
         "assignedProjects": { "type": "array" },
         "status": { "type": "string", "enum": ["active", "disabled"] },
         "phone": { "type": "string", "maxLength": 40 },
+        "notificationPreferences": {
+          "type": "object",
+          "properties": {
+            "dailyReports": { "type": "boolean" },
+            "tasks": { "type": "boolean" },
+            "urgentTasksOnly": { "type": "boolean" },
+            "issues": { "type": "boolean" },
+            "urgentIssuesOnly": { "type": "boolean" },
+            "deliverables": { "type": "boolean" },
+            "executedWorks": { "type": "boolean" },
+            "announcements": { "type": "boolean" }
+          },
+          "required": [
+            "dailyReports",
+            "tasks",
+            "urgentTasksOnly",
+            "issues",
+            "urgentIssuesOnly",
+            "deliverables",
+            "executedWorks",
+            "announcements"
+          ]
+        },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
@@ -162,6 +185,8 @@
         "rev": { "type": "number" },
         "notes": { "type": "string", "maxLength": 2000 },
         "fileName": { "type": "string", "minLength": 1, "maxLength": 260 },
+        "fileFormat": { "type": "string", "enum": ["pdf", "excel"] },
+        "mimeType": { "type": "string", "maxLength": 150 },
         "fileSizeBytes": { "type": "number" },
         "chunkCount": { "type": "number" },
         "pageCount": { "type": "number" },
@@ -184,7 +209,7 @@
       "type": "object",
       "properties": {
         "index": { "type": "number" },
-        "data": { "type": "string", "minLength": 1, "maxLength": 700000 },
+        "data": { "type": "string", "minLength": 1, "maxLength": 800000 },
         "expiresAtMs": { "type": "number" }
       },
       "required": ["index", "data", "expiresAtMs"]
@@ -215,6 +240,7 @@
             "deliverable_reviewed"
           ]
         },
+        "priority": { "type": "string", "enum": ["normal", "urgent"] },
         "linkTab": { "type": "string", "maxLength": 64 },
         "targetRole": { "type": "string", "enum": ["admin", "site", "all"] },
         "targetUserId": { "type": "string", "maxLength": 128 },

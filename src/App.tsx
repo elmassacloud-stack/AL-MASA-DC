@@ -39,6 +39,7 @@ import {
 } from './utils/browserNotifications';
 import {
   UserProfile,
+  NotificationPreferences,
   Project,
   DailyReport,
   IssueReport,
@@ -250,6 +251,12 @@ export default function App() {
 
   const handleResetSeedData = async () => {
     await dataService.resetToSeed();
+  };
+
+  const handleUpdateNotificationPreferences = async (
+    prefs: NotificationPreferences
+  ): Promise<boolean> => {
+    return dataService.updateMyNotificationPreferences(prefs);
   };
 
   // Loading Screen while resolving Firebase Auth session
@@ -483,19 +490,20 @@ export default function App() {
         onClose={() => setIsNotificationsOpen(false)}
         notifications={notifications}
         onNavigateTab={(tabId) => setActiveTab(tabId)}
+        onOpenPreferences={() => setIsSettingsOpen(true)}
       />
 
-      {currentUser.role === 'admin' && (
-        <SettingsModal
-          isOpen={isSettingsOpen}
-          onClose={() => setIsSettingsOpen(false)}
-          stalledDays={stalledDays}
-          onUpdateStalledDays={handleUpdateStalledDays}
-          cutoffHour={cutoffHour}
-          onUpdateCutoffHour={handleUpdateCutoffHour}
-          onResetSeedData={handleResetSeedData}
-        />
-      )}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        currentUser={currentUser}
+        onUpdateNotificationPreferences={handleUpdateNotificationPreferences}
+        stalledDays={stalledDays}
+        onUpdateStalledDays={handleUpdateStalledDays}
+        cutoffHour={cutoffHour}
+        onUpdateCutoffHour={handleUpdateCutoffHour}
+        onResetSeedData={handleResetSeedData}
+      />
 
       <ShareAppModal
         isOpen={isShareOpen}

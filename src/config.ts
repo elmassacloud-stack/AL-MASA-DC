@@ -174,8 +174,8 @@ export const WORK_DISCIPLINE_CONFIG: Record<WorkDiscipline, { labelAr: string; b
 // 7. SITE PDF DELIVERABLES CONFIGURATION (إعدادات مرسلات واستلامات PDF المؤقتة - 48 ساعة)
 export const SITE_DELIVERABLE_RETENTION_HOURS = 48;
 export const SITE_DELIVERABLE_RETENTION_MS = SITE_DELIVERABLE_RETENTION_HOURS * 60 * 60 * 1000;
-export const MAX_PDF_FILE_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB max PDF
-export const PDF_CHUNK_SIZE_CHARS = 600000; // <= 600KB per Firestore chunk document
+export const MAX_PDF_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB max PDF
+export const PDF_CHUNK_SIZE_CHARS = 750000; // <= 750KB chars per Firestore chunk document
 
 export const DELIVERABLE_TYPE_CONFIG: Record<
   SiteDeliverableType,

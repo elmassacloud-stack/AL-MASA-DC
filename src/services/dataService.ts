@@ -20,6 +20,7 @@ import {
   Announcement,
   UserProfile,
   UserRole,
+  NotificationPreferences,
   AppNotification,
   ExecutedWork,
   SiteDeliverable,
@@ -40,6 +41,7 @@ import {
 import {
   DEFAULT_DAILY_REPORT_CUTOFF_HOUR,
   SITE_DELIVERABLE_RETENTION_MS,
+  MAX_PDF_FILE_SIZE_BYTES,
   PDF_CHUNK_SIZE_CHARS,
   isSuperAdminEmail,
   SUPER_ADMIN_EMAIL
@@ -64,7 +66,16 @@ import {
   canAccessExecutedWorksTab,
   canAccessSiteDeliverablesTab
 } from '../utils/accessControl';
-import { base64ToBlob, splitBase64IntoChunks } from '../utils/pdfUtils';
+import {
+  base64ToBlob,
+  splitBase64IntoChunks,
+  isExcelFileName,
+  getExcelMimeType
+} from '../utils/pdfUtils';
+import {
+  normalizeNotificationPreferences,
+  isNotificationAllowedForUser
+} from '../utils/notificationPreferences';
 
 const STORAGE_KEYS = {
   PROJECTS: 'dc_projects_v2',
@@ -95,6 +106,15 @@ export interface CreateUserPayload {
   phone?: string;
 }
 
+export interface DeliverableUploadProgress {
+  percent: number;
+  uploadedChunks: number;
+  totalChunks: number;
+  uploadedBytes: number;
+  totalBytes: number;
+  stage: 'metadata' | 'uploading' | 'finalizing';
+}
+
 export interface CreateSiteDeliverablePayload {
   projectId: string;
   projectName: string;
@@ -104,6 +124,8 @@ export interface CreateSiteDeliverablePayload {
   rev?: number;
   notes?: string;
   fileName: string;
+  fileFormat?: 'pdf' | 'excel';
+  mimeType?: string;
   fileSizeBytes: number;
   pageCount?: number;
   senderId: string;
@@ -239,6 +261,7 @@ class DataService {
         assignedProjects: profile?.assignedProjects?.length ? profile.assignedProjects : allProjectIds,
         status: 'active',
         phone: profile?.phone || '',
+        notificationPreferences: profile?.notificationPreferences,
         createdAt: profile?.createdAt || now,
         updatedAt: now
       };
@@ -628,11 +651,25 @@ class DataService {
         normalized.forEach((n) => {
           if (!this.seenNotificationIds.has(n.id)) {
             this.seenNotificationIds.add(n.id);
-            const isFromSelf = n.senderId && n.senderId === user.id;
-            const visibleToUser = isAdmin
+            const latestUser = this.getCurrentUser() || user;
+            const latestIsAdmin =
+              latestUser.role === 'admin' || isSuperAdminEmail(latestUser.email);
+            const isFromSelf = n.senderId && n.senderId === latestUser.id;
+            const visibleToUser = latestIsAdmin
               ? !n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all'
-              : n.targetUserId === user.id || n.targetRole === 'site' || n.targetRole === 'all';
-            if (!n.isRead && !isFromSelf && visibleToUser) {
+              : n.targetUserId === latestUser.id ||
+                n.targetRole === 'site' ||
+                n.targetRole === 'all';
+            const projectAllowed =
+              latestIsAdmin ||
+              !n.projectId ||
+              hasAllProjectsAccess(latestUser) ||
+              (latestUser.assignedProjects || []).includes(n.projectId);
+            const allowedByPrefs = isNotificationAllowedForUser(
+              n,
+              latestUser.notificationPreferences
+            );
+            if (!n.isRead && !isFromSelf && visibleToUser && projectAllowed && allowedByPrefs) {
               this.emitLiveNotification(n);
             }
           }
@@ -999,11 +1036,16 @@ class DataService {
   public async createSiteDeliverable(
     payload: CreateSiteDeliverablePayload,
     base64Pdf: string,
-    onProgress?: (percent: number) => void
+    onProgress?: (percent: number, info?: DeliverableUploadProgress) => void
   ): Promise<SiteDeliverable> {
     const chunks = splitBase64IntoChunks(base64Pdf, PDF_CHUNK_SIZE_CHARS);
-    if (chunks.length === 0 || chunks.length > 20) {
-      throw new Error('حجم ملف الـ PDF غير صالح أو يتجاوز الحد المسموح (4 ميجابايت).');
+    if (
+      payload.fileSizeBytes <= 0 ||
+      payload.fileSizeBytes > MAX_PDF_FILE_SIZE_BYTES ||
+      chunks.length === 0 ||
+      chunks.length > 60
+    ) {
+      throw new Error('حجم ملف الـ PDF غير صالح أو يتجاوز الحد المسموح (25 ميجابايت).');
     }
 
     const nowMs = Date.now();
@@ -1011,6 +1053,7 @@ class DataService {
     const nowIso = new Date(nowMs).toISOString();
     const expiresIso = new Date(expiresAtMs).toISOString();
     const id = 'deliv-' + nowMs.toString(36) + '-' + Math.random().toString(36).substring(2, 6);
+    const totalBytes = Math.max(1, Math.round(payload.fileSizeBytes));
 
     const deliverable: SiteDeliverable = stripUndefined({
       id,
@@ -1022,7 +1065,11 @@ class DataService {
       rev: typeof payload.rev === 'number' && Number.isFinite(payload.rev) ? payload.rev : undefined,
       notes: payload.notes?.trim().slice(0, 2000) || undefined,
       fileName: payload.fileName.trim().slice(0, 260),
-      fileSizeBytes: Math.max(1, Math.round(payload.fileSizeBytes)),
+      fileFormat: payload.fileFormat || (isExcelFileName(payload.fileName) ? 'excel' : 'pdf'),
+      mimeType:
+        payload.mimeType?.trim().slice(0, 150) ||
+        (isExcelFileName(payload.fileName) ? getExcelMimeType(payload.fileName) : 'application/pdf'),
+      fileSizeBytes: totalBytes,
       chunkCount: chunks.length,
       pageCount: payload.pageCount,
       senderId: payload.senderId,
@@ -1035,7 +1082,14 @@ class DataService {
       expiresAtMs
     });
 
-    onProgress?.(10);
+    onProgress?.(8, {
+      percent: 8,
+      uploadedChunks: 0,
+      totalChunks: chunks.length,
+      uploadedBytes: 0,
+      totalBytes,
+      stage: 'metadata'
+    });
 
     try {
       await setDoc(doc(db, 'siteDeliverables', id), stripUndefined(deliverable));
@@ -1043,20 +1097,55 @@ class DataService {
       handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}`);
     }
 
+    onProgress?.(15, {
+      percent: 15,
+      uploadedChunks: 0,
+      totalChunks: chunks.length,
+      uploadedBytes: 0,
+      totalBytes,
+      stage: 'uploading'
+    });
+
     try {
-      for (let idx = 0; idx < chunks.length; idx++) {
-        const chunkDoc: SiteDeliverableChunk = {
-          index: idx,
-          data: chunks[idx],
-          expiresAtMs
-        };
-        await setDoc(doc(db, 'siteDeliverables', id, 'chunks', `chunk-${idx}`), chunkDoc);
-        const pct = Math.round(15 + ((idx + 1) / chunks.length) * 85);
-        onProgress?.(pct);
+      const BATCH_CONCURRENCY = 5;
+      let uploadedChunks = 0;
+      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
+        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
+        const batchPromises: Promise<void>[] = [];
+        for (let idx = start; idx < end; idx++) {
+          const chunkDoc: SiteDeliverableChunk = {
+            index: idx,
+            data: chunks[idx],
+            expiresAtMs
+          };
+          batchPromises.push(
+            setDoc(doc(db, 'siteDeliverables', id, 'chunks', `chunk-${idx}`), chunkDoc).then(() => {
+              uploadedChunks += 1;
+              const isAllChunksDone = uploadedChunks === chunks.length;
+              const pct = isAllChunksDone
+                ? 98
+                : Math.min(97, Math.round(15 + (uploadedChunks / chunks.length) * 82));
+              const uploadedBytes = Math.min(
+                totalBytes,
+                Math.round((uploadedChunks / chunks.length) * totalBytes)
+              );
+              onProgress?.(pct, {
+                percent: pct,
+                uploadedChunks,
+                totalChunks: chunks.length,
+                uploadedBytes,
+                totalBytes,
+                stage: isAllChunksDone ? 'finalizing' : 'uploading'
+              });
+            })
+          );
+        }
+        await Promise.all(batchPromises);
       }
     } catch (error) {
-      // Roll back parent doc if chunk upload fails
-      await deleteDoc(doc(db, 'siteDeliverables', id)).catch(() => undefined);
+      // Roll back parent doc and any already-uploaded chunks if upload fails
+      await deleteDeliverableFromFirebase(id)
+        .catch(() => deleteDoc(doc(db, 'siteDeliverables', id)).catch(() => undefined));
       handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}/chunks`);
     }
 
@@ -1064,8 +1153,11 @@ class DataService {
     list.unshift(deliverable);
     localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(list));
 
+    const isExcel =
+      deliverable.fileFormat === 'excel' || isExcelFileName(deliverable.fileName);
+
     this.addNotification({
-      title: `ملف PDF مستلم جديد: ${deliverable.projectName}`,
+      title: `${isExcel ? 'ملف Excel مستلم جديد' : 'ملف PDF مستلم جديد'}: ${deliverable.projectName}`,
       message: `أرسل ${deliverable.senderName} ملف "${deliverable.title}" (${deliverable.fileName}) — متاح لمدة 48 ساعة.`,
       type: 'deliverable_sent',
       targetRole: 'admin',
@@ -1073,6 +1165,15 @@ class DataService {
       senderId: deliverable.senderId,
       senderName: deliverable.senderName,
       linkTab: 'site-deliverables'
+    });
+
+    onProgress?.(100, {
+      percent: 100,
+      uploadedChunks: chunks.length,
+      totalChunks: chunks.length,
+      uploadedBytes: totalBytes,
+      totalBytes,
+      stage: 'finalizing'
     });
 
     this.notify();
@@ -1099,12 +1200,17 @@ class DataService {
     }
 
     if (chunkDocs.length === 0) {
-      throw new Error('تعذر العثور على بيانات ملف الـ PDF في قاعدة البيانات (ربما تم حذفه).');
+      throw new Error('تعذر العثور على بيانات الملف في قاعدة البيانات (ربما تم حذفه).');
     }
 
     chunkDocs.sort((a, b) => a.index - b.index);
     const fullBase64 = chunkDocs.map((c) => c.data).join('');
-    const blob = base64ToBlob(fullBase64, 'application/pdf');
+    const resolvedMime =
+      deliverable.mimeType ||
+      (deliverable.fileFormat === 'excel' || isExcelFileName(deliverable.fileName)
+        ? getExcelMimeType(deliverable.fileName)
+        : 'application/pdf');
+    const blob = base64ToBlob(fullBase64, resolvedMime);
     const url = URL.createObjectURL(blob);
     cachePdfBlobUrl(deliverable.id, url);
     return url;
@@ -1368,6 +1474,7 @@ class DataService {
         : `بلاغ مشكلة جديدة: ${newIssue.issueNumber} — ${newIssue.projectName}`,
       message: `أبلغ ${newIssue.authorName} عن ${isUrgent ? 'مشكلة عاجلة' : 'مشكلة بالموقع'}: ${newIssue.description.slice(0, 80)}${newIssue.description.length > 80 ? '...' : ''}`,
       type: isUrgent ? 'urgent_issue' : 'issue_reported',
+      priority: newIssue.priority,
       targetRole: 'admin',
       projectId: newIssue.projectId,
       senderId: newIssue.authorId,
@@ -1438,9 +1545,13 @@ class DataService {
 
     const adminUser = this.getCurrentUser();
     this.addNotification({
-      title: `مهمة جديدة: ${newTask.title}`,
-      message: `تم إسناد مهمة جديدة لمشروع ${newTask.projectName}، موعد التسليم: ${newTask.deadline}`,
+      title:
+        newTask.priority === 'urgent'
+          ? `مهمة عاجلة: ${newTask.title}`
+          : `مهمة جديدة: ${newTask.title}`,
+      message: `تم إسناد مهمة ${newTask.priority === 'urgent' ? 'عاجلة ' : 'جديدة '}لمشروع ${newTask.projectName}، موعد التسليم: ${newTask.deadline}`,
       type: 'task_assigned',
+      priority: newTask.priority,
       targetRole: 'site',
       projectId: newTask.projectId,
       senderId: adminUser?.id || newTask.createdBy,
@@ -1482,6 +1593,7 @@ class DataService {
       title: `تم إنجاز مهمة: ${tasks[idx].title}`,
       message: `أنهى ${activeUser?.displayName || 'مهندس الموقع'} المهمة في مشروع ${tasks[idx].projectName}.`,
       type: 'task_done',
+      priority: tasks[idx].priority,
       targetRole: 'admin',
       projectId: tasks[idx].projectId,
       senderId: userId,
@@ -1519,9 +1631,12 @@ class DataService {
     );
 
     this.addNotification({
-      title: `تعميم إداري: ${newAnn.title}`,
+      title: newAnn.isUrgent
+        ? `تعميم إداري عاجل: ${newAnn.title}`
+        : `تعميم إداري: ${newAnn.title}`,
       message: newAnn.content.slice(0, 90) + '...',
       type: 'announcement',
+      priority: newAnn.isUrgent ? 'urgent' : 'normal',
       targetRole: 'all',
       senderId: newAnn.createdBy,
       senderName: newAnn.authorName,
@@ -1663,6 +1778,35 @@ class DataService {
     return true;
   }
 
+  public async updateMyNotificationPreferences(
+    prefs: NotificationPreferences
+  ): Promise<boolean> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser) return false;
+
+    const normalizedPrefs = normalizeNotificationPreferences(prefs);
+    const updatedAt = new Date().toISOString();
+    const updatedUser: UserProfile = stripUndefined({
+      ...activeUser,
+      notificationPreferences: normalizedPrefs,
+      updatedAt
+    });
+
+    try {
+      await updateDoc(doc(db, 'users', activeUser.id), {
+        notificationPreferences: normalizedPrefs,
+        updatedAt
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${activeUser.id}`);
+    }
+
+    this.upsertLocalUser(updatedUser);
+    this.setCurrentUser(updatedUser);
+    this.notify();
+    return true;
+  }
+
   // --- In-App Notifications ---
   public getNotifications(user?: UserProfile | null): AppNotification[] {
     try {
@@ -1671,9 +1815,11 @@ class DataService {
 
       const activeUser = user ?? this.getCurrentUser();
       const isAdmin = activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
+      const userPrefs = activeUser?.notificationPreferences;
+      const allowDailyReports = normalizeNotificationPreferences(userPrefs).dailyReports;
 
-      // Evaluate missing reports past cutoff time only for admin (or accessible projects)
-      if (activeUser && isAdmin) {
+      // Evaluate missing reports past cutoff time only for admin (when dailyReports preference is enabled)
+      if (activeUser && isAdmin && allowDailyReports) {
         const projects = this.getProjects().filter((p) => p.status === 'active');
         const today = getTodayDateStr();
         const reports = this.getReports();
@@ -1702,10 +1848,14 @@ class DataService {
       }
 
       if (!activeUser || isAdmin) {
-        return list.filter((n) => !n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all');
+        return list.filter(
+          (n) =>
+            (!n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all') &&
+            isNotificationAllowedForUser(n, userPrefs)
+        );
       }
 
-      // Filter notifications for site users so admin-only alerts don't leak and project scope is respected
+      // Filter notifications for site users so admin-only alerts don't leak, project scope and user preferences are respected
       return list.filter((n) => {
         if (
           n.targetRole === 'admin' ||
@@ -1727,7 +1877,7 @@ class DataService {
         ) {
           return false;
         }
-        return true;
+        return isNotificationAllowedForUser(n, userPrefs);
       });
     } catch {
       return [];

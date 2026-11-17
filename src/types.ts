@@ -111,6 +111,17 @@ export interface Announcement {
   createdAt: string;
 }
 
+export interface NotificationPreferences {
+  dailyReports: boolean;
+  tasks: boolean;
+  urgentTasksOnly: boolean;
+  issues: boolean;
+  urgentIssuesOnly: boolean;
+  deliverables: boolean;
+  executedWorks: boolean;
+  announcements: boolean;
+}
+
 export interface UserProfile {
   id: string;
   email: string;
@@ -123,6 +134,7 @@ export interface UserProfile {
   assignedProjects: string[]; // array of project IDs
   status: 'active' | 'disabled';
   phone?: string;
+  notificationPreferences?: NotificationPreferences;
   createdAt: string;
   updatedAt: string;
 }
@@ -173,6 +185,8 @@ export interface SiteDeliverable {
   rev?: number;
   notes?: string;
   fileName: string;
+  fileFormat?: 'pdf' | 'excel';
+  mimeType?: string;
   fileSizeBytes: number;
   chunkCount: number;
   pageCount?: number;
@@ -212,6 +226,7 @@ export interface AppNotification {
     | 'work_logged'
     | 'deliverable_sent'
     | 'deliverable_reviewed';
+  priority?: 'normal' | 'urgent';
   linkTab?: string;
   targetRole?: 'admin' | 'site' | 'all';
   targetUserId?: string; // empty means role-based / all

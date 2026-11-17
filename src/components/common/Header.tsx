@@ -109,18 +109,16 @@ export const Header: React.FC<Props> = ({
             {darkMode ? <Sun className="w-5 h-5 text-amber-400" /> : <Moon className="w-5 h-5" />}
           </button>
 
-          {/* Settings Trigger (Admin only) */}
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors touch-manipulation shrink-0 cursor-pointer"
-              aria-label="الإعدادات"
-              title="إعدادات النظام والمدد الزمنية"
-            >
-              <SlidersHorizontal className="w-5 h-5" />
-            </button>
-          )}
+          {/* Settings Trigger (Notification Preferences for all users + System Settings for Admin) */}
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            className="p-2 rounded-lg text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors touch-manipulation shrink-0 cursor-pointer"
+            aria-label="الإعدادات وتفضيلات الإشعارات"
+            title={isAdmin ? 'الإعدادات وتفضيلات الإشعارات' : 'تفضيلات الإشعارات'}
+          >
+            <SlidersHorizontal className="w-5 h-5" />
+          </button>
 
           {/* Share App URL Trigger */}
           {onOpenShare && (

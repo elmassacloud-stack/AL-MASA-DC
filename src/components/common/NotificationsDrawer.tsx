@@ -13,7 +13,8 @@ import {
   Clock,
   CheckCheck,
   Volume2,
-  ShieldAlert
+  ShieldAlert,
+  SlidersHorizontal
 } from 'lucide-react';
 import { AppNotification } from '../../types';
 import { dataService } from '../../services/dataService';
@@ -27,13 +28,15 @@ interface Props {
   onClose: () => void;
   notifications: AppNotification[];
   onNavigateTab: (tabId: string) => void;
+  onOpenPreferences?: () => void;
 }
 
 export const NotificationsDrawer: React.FC<Props> = ({
   isOpen,
   onClose,
   notifications,
-  onNavigateTab
+  onNavigateTab,
+  onOpenPreferences
 }) => {
   const [browserPermission, setBrowserPermission] = useState<
     NotificationPermission | 'unsupported'
@@ -123,6 +126,20 @@ export const NotificationsDrawer: React.FC<Props> = ({
               >
                 <CheckCheck className="w-3.5 h-3.5" />
                 <span>قراءة الكل</span>
+              </button>
+            )}
+            {onOpenPreferences && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenPreferences();
+                }}
+                className="p-1.5 text-slate-500 hover:text-blue-600 dark:text-slate-300 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+                title="تخصيص أنواع الإشعارات"
+                aria-label="تخصيص أنواع الإشعارات"
+              >
+                <SlidersHorizontal className="w-4 h-4" />
               </button>
             )}
             <button
