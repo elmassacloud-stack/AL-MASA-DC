@@ -9,7 +9,6 @@ import {
   Sparkles,
   FileSpreadsheet,
   AlertCircle,
-  Pencil,
   Loader2,
   FileText,
   Image as ImageIcon
@@ -34,7 +33,6 @@ import {
   PreparedReportAttachment,
   formatFileSize
 } from '../../utils/pdfUtils';
-import { EditDailyReportModal } from './EditDailyReportModal';
 
 interface Props {
   currentUser: UserProfile;
@@ -101,17 +99,10 @@ export const DailyReportForm: React.FC<Props> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<ReportUploadProgress | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [editingExistingReport, setEditingExistingReport] = useState<DailyReport | null>(null);
 
   const allReports = reports ?? dataService.getReports();
   const existingReportForDate = allReports.find(
     (r) => r.projectId === selectedProjectId && r.reportDate === reportDate
-  );
-  const canEditExistingReport = Boolean(
-    existingReportForDate &&
-      (currentUser.role === 'admin' ||
-        existingReportForDate.senderId === currentUser.id ||
-        existingReportForDate.senderEmail.toLowerCase() === currentUser.email.toLowerCase())
   );
 
   // Load existing draft if present for this project
@@ -510,50 +501,6 @@ export const DailyReportForm: React.FC<Props> = ({
         </div>
       )}
 
-      {/* Existing Daily Report Banner (1 report per project per day, editable) */}
-      {existingReportForDate && (
-        <div className="p-4 sm:p-5 bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 rounded-2xl text-amber-900 dark:text-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div className="flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-            <div className="space-y-1 text-xs sm:text-sm">
-              <div className="font-bold">
-                تم إرسال التقرير اليومي لمشروع «{existingReportForDate.projectName}» بتاريخ{' '}
-                <span className="font-mono">{existingReportForDate.reportDate}</span> بالفعل.
-              </div>
-              <p className="text-amber-800/90 dark:text-amber-200/90 leading-relaxed">
-                يُسمح بإرسال تقرير يومي واحد فقط للمشروع خلال اليوم الواحد، ويمكنك تعديل التقرير المرسل بدلاً من إنشاء تقرير جديد.
-                {!canEditExistingReport && (
-                  <span className="block mt-1 font-semibold">
-                    المرسل الحالي: {existingReportForDate.senderName}
-                  </span>
-                )}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {canEditExistingReport && (
-              <button
-                type="button"
-                onClick={() => setEditingExistingReport(existingReportForDate)}
-                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-              >
-                <Pencil className="w-4 h-4" />
-                <span>تعديل التقرير المرسل</span>
-              </button>
-            )}
-            {onReportSubmitted && (
-              <button
-                type="button"
-                onClick={onReportSubmitted}
-                className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs sm:text-sm font-semibold hover:bg-amber-100/70 dark:hover:bg-slate-800 cursor-pointer transition-colors"
-              >
-                الانتقال إلى تقديماتي
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Validation or Success Banner */}
       {validationError && (
@@ -1005,22 +952,6 @@ export const DailyReportForm: React.FC<Props> = ({
           </button>
         </div>
       </form>
-
-      {/* Inline Edit Modal for Today's Existing Report */}
-      {editingExistingReport && (
-        <EditDailyReportModal
-          report={editingExistingReport}
-          currentUser={currentUser}
-          projects={projects}
-          onClose={() => setEditingExistingReport(null)}
-          onSaved={() => {
-            setEditingExistingReport(null);
-            if (onReportSubmitted) {
-              onReportSubmitted();
-            }
-          }}
-        />
-      )}
     </div>
   );
 };
