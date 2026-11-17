@@ -308,13 +308,13 @@ service cloud.firestore {
         && isValidDailyReport(incoming())
         && incoming().createdAt == existing().createdAt
         && (
-          (
-            isAdmin()
-            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminFeedback', 'updatedAt'])
-          ) ||
+          isAdmin() ||
           (
             isActiveUser()
-            && existing().senderId == request.auth.uid
+            && (
+              existing().senderId == request.auth.uid ||
+              (userDocExists() && existing().senderEmail.lower() == currentUserData().email.lower())
+            )
             && hasProjectAccess(existing().projectId)
             && hasProjectAccess(incoming().projectId)
             && incoming().senderId == existing().senderId

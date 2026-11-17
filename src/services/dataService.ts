@@ -1383,11 +1383,32 @@ class DataService {
     const nextProjectId = updates.projectId ?? existing.projectId;
     const nextProjectName = (updates.projectName ?? existing.projectName).trim().slice(0, 200);
     const nextReportDate = (updates.reportDate ?? existing.reportDate).trim().slice(0, 20);
-    const nextSubmittedWorks = (updates.submittedWorks ?? existing.submittedWorks).slice(0, 200);
-    const nextReceivedWorks = (updates.receivedWorks ?? existing.receivedWorks).slice(0, 200);
+    const sanitizeRows = (rows: DailyReport['submittedWorks']) =>
+      rows.slice(0, 200).map((item, idx) =>
+        stripUndefined({
+          id: item.id || `row-${idx + 1}`,
+          rowNumber: idx + 1,
+          itemDescription: (item.itemDescription || '').trim(),
+          submittalNumber: (item.submittalNumber || '').trim(),
+          rev: Number.isFinite(Number(item.rev)) ? Number(item.rev) : 0,
+          status: item.status
+        })
+      );
+
+    const nextSubmittedWorks = sanitizeRows(updates.submittedWorks ?? existing.submittedWorks);
+    const nextReceivedWorks = sanitizeRows(updates.receivedWorks ?? existing.receivedWorks);
     const nextNotes =
       updates.notes !== undefined ? updates.notes.trim().slice(0, 4000) : existing.notes;
-    const nextAttachments = (updates.attachments ?? existing.attachments)?.slice(0, 20);
+    const nextAttachments = (updates.attachments ?? existing.attachments)
+      ?.slice(0, 20)
+      .map((att) =>
+        stripUndefined({
+          name: att.name,
+          url: att.url,
+          size: att.size,
+          type: att.type
+        })
+      );
 
     const updatedReport: DailyReport = stripUndefined({
       ...existing,
