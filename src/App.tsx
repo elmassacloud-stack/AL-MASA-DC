@@ -370,6 +370,7 @@ export default function App() {
             {activeTab === 'my-submissions' && (
               <MySubmissionsView
                 currentUser={currentUser}
+                projects={projects}
                 reports={reports}
                 issues={issues}
               />

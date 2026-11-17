@@ -10,28 +10,37 @@ import {
   Eye,
   FileSpreadsheet,
   X,
-  ExternalLink
+  Pencil
 } from 'lucide-react';
-import { UserProfile, DailyReport, IssueReport } from '../../types';
+import { UserProfile, DailyReport, IssueReport, Project } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ISSUE_TYPES_CONFIG, ISSUE_PRIORITY_CONFIG } from '../../config';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
 import { canAccessProject } from '../../utils/accessControl';
+import { EditDailyReportModal } from './EditDailyReportModal';
 
 interface Props {
   currentUser: UserProfile;
+  projects: Project[];
   reports: DailyReport[];
   issues: IssueReport[];
 }
 
 export const MySubmissionsView: React.FC<Props> = ({
   currentUser,
+  projects,
   reports,
   issues
 }) => {
   const [activeTab, setActiveTab] = useState<'reports' | 'issues'>('reports');
   const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
+  const [editingReport, setEditingReport] = useState<DailyReport | null>(null);
+  const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
+
+  const canEditReport = (report: DailyReport) =>
+    report.senderId === currentUser.id ||
+    report.senderEmail.toLowerCase() === currentUser.email.toLowerCase();
 
   // Filter strictly to user's assigned projects (or all if admin)
   const myReports =
@@ -142,6 +151,24 @@ export const MySubmissionsView: React.FC<Props> = ({
         </div>
       </div>
 
+      {/* Edit Success Banner */}
+      {editSuccessMsg && (
+        <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-xs sm:text-sm font-bold flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{editSuccessMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setEditSuccessMsg(null)}
+            className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+            aria-label="إغلاق الرسالة"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* =========================================================================
           REPORTS TAB
           ========================================================================= */}
@@ -220,7 +247,18 @@ export const MySubmissionsView: React.FC<Props> = ({
                 )}
 
                 {/* Card Actions */}
-                <div className="flex items-center justify-end gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                <div className="flex flex-wrap items-center justify-end gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                  {canEditReport(report) && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingReport(report)}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:hover:bg-amber-900/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title="تعديل بيانات التقرير اليومي"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>تعديل التقرير</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => exportDailyReportToExcel(report)}
                     className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 hover:bg-emerald-100 transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -459,14 +497,30 @@ export const MySubmissionsView: React.FC<Props> = ({
             </div>
 
             {/* Modal Footer */}
-            <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
-              <button
-                onClick={() => exportDailyReportToExcel(selectedReport)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>تصدير نموذج إكسل (.xlsx)</span>
-              </button>
+            <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => exportDailyReportToExcel(selectedReport)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>تصدير نموذج إكسل (.xlsx)</span>
+                </button>
+                {canEditReport(selectedReport) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = selectedReport;
+                      setSelectedReport(null);
+                      setEditingReport(target);
+                    }}
+                    className="px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:hover:bg-amber-900/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <Pencil className="w-4 h-4" />
+                    <span>تعديل التقرير</span>
+                  </button>
+                )}
+              </div>
               <button
                 onClick={() => setSelectedReport(null)}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs sm:text-sm font-semibold cursor-pointer transition-colors"
@@ -476,6 +530,21 @@ export const MySubmissionsView: React.FC<Props> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Edit Daily Report Modal */}
+      {editingReport && (
+        <EditDailyReportModal
+          report={editingReport}
+          currentUser={currentUser}
+          projects={projects}
+          onClose={() => setEditingReport(null)}
+          onSaved={(updatedTitle) => {
+            setEditingReport(null);
+            setEditSuccessMsg(`تم تعديل وحفظ التقرير اليومي (${updatedTitle}) وإرساله للمراجعة بنجاح.`);
+            setTimeout(() => setEditSuccessMsg(null), 4000);
+          }}
+        />
       )}
 
       {/* Photo Preview Modal */}

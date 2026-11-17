@@ -305,10 +305,34 @@ service cloud.firestore {
         && (isAdmin() || incoming().senderId == request.auth.uid)
         && incoming().status == 'submitted';
       allow update: if isValidId(reportId)
-        && isAdmin()
         && isValidDailyReport(incoming())
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminFeedback', 'updatedAt']);
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminFeedback', 'updatedAt'])
+          ) ||
+          (
+            isActiveUser()
+            && existing().senderId == request.auth.uid
+            && hasProjectAccess(existing().projectId)
+            && hasProjectAccess(incoming().projectId)
+            && incoming().senderId == existing().senderId
+            && incoming().senderEmail == existing().senderEmail
+            && incoming().status == 'submitted'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'projectId',
+              'projectName',
+              'reportDate',
+              'submittedWorks',
+              'receivedWorks',
+              'notes',
+              'attachments',
+              'status',
+              'updatedAt'
+            ])
+          )
+        );
       allow delete: if isValidId(reportId) && isAdmin();
     }
 

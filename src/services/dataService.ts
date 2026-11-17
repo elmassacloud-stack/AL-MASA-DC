@@ -1359,6 +1359,87 @@ class DataService {
     return newReport;
   }
 
+  public async updateDailyReport(
+    reportId: string,
+    updates: Partial<
+      Pick<
+        DailyReport,
+        | 'projectId'
+        | 'projectName'
+        | 'reportDate'
+        | 'submittedWorks'
+        | 'receivedWorks'
+        | 'notes'
+        | 'attachments'
+      >
+    >
+  ): Promise<boolean> {
+    const reports = this.getReports();
+    const idx = reports.findIndex((r) => r.id === reportId);
+    if (idx === -1) return false;
+
+    const existing = reports[idx];
+    const updatedAt = new Date().toISOString();
+    const nextProjectId = updates.projectId ?? existing.projectId;
+    const nextProjectName = (updates.projectName ?? existing.projectName).trim().slice(0, 200);
+    const nextReportDate = (updates.reportDate ?? existing.reportDate).trim().slice(0, 20);
+    const nextSubmittedWorks = (updates.submittedWorks ?? existing.submittedWorks).slice(0, 200);
+    const nextReceivedWorks = (updates.receivedWorks ?? existing.receivedWorks).slice(0, 200);
+    const nextNotes =
+      updates.notes !== undefined ? updates.notes.trim().slice(0, 4000) : existing.notes;
+    const nextAttachments = (updates.attachments ?? existing.attachments)?.slice(0, 20);
+
+    const updatedReport: DailyReport = stripUndefined({
+      ...existing,
+      projectId: nextProjectId,
+      projectName: nextProjectName,
+      reportDate: nextReportDate,
+      submittedWorks: nextSubmittedWorks,
+      receivedWorks: nextReceivedWorks,
+      notes: nextNotes || undefined,
+      attachments: nextAttachments,
+      status: 'submitted',
+      updatedAt
+    });
+
+    try {
+      await updateDoc(
+        doc(db, 'reports', reportId),
+        stripUndefined({
+          projectId: nextProjectId,
+          projectName: nextProjectName,
+          reportDate: nextReportDate,
+          submittedWorks: nextSubmittedWorks,
+          receivedWorks: nextReceivedWorks,
+          notes: nextNotes ?? '',
+          attachments: nextAttachments ?? [],
+          status: 'submitted',
+          updatedAt
+        })
+      );
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
+    }
+
+    reports[idx] = updatedReport;
+    localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
+
+    const activeUser = this.getCurrentUser();
+    this.addNotification({
+      title: `تعديل تقرير يومي: ${updatedReport.projectName}`,
+      message: `قام ${activeUser?.displayName || updatedReport.senderName} بتعديل التقرير اليومي (${updatedReport.reportDate}) — ${updatedReport.submittedWorks.length} تقديمات و ${updatedReport.receivedWorks.length} استلامات.`,
+      type: 'report_submitted',
+      targetRole: 'admin',
+      projectId: updatedReport.projectId,
+      senderId: activeUser?.id || updatedReport.senderId,
+      senderName: activeUser?.displayName || updatedReport.senderName,
+      linkTab: 'reports'
+    });
+
+    this.notify();
+    return true;
+  }
+
   public updateReportStatus(reportId: string, status: DailyReport['status'], adminFeedback?: string): boolean {
     const reports = this.getReports();
     const index = reports.findIndex((r) => r.id === reportId);
