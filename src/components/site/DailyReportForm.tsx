@@ -8,29 +8,45 @@ import {
   Clock,
   Sparkles,
   FileSpreadsheet,
-  AlertCircle
+  AlertCircle,
+  Pencil,
+  Loader2,
+  FileText,
+  Image as ImageIcon
 } from 'lucide-react';
 import {
   UserProfile,
   Project,
+  DailyReport,
   SubmittalItem,
-  SubmittalStatusCode,
-  ReportAttachment
+  SubmittalStatusCode
 } from '../../types';
-import { SUBMITTAL_STATUS_CONFIG } from '../../config';
-import { dataService } from '../../services/dataService';
+import {
+  SUBMITTAL_STATUS_CONFIG,
+  MAX_REPORT_ATTACHMENTS,
+  MAX_REPORT_ATTACHMENT_SIZE_BYTES
+} from '../../config';
+import { dataService, ReportUploadProgress } from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
 import { getAccessibleProjects } from '../../utils/accessControl';
+import {
+  prepareReportAttachmentFile,
+  PreparedReportAttachment,
+  formatFileSize
+} from '../../utils/pdfUtils';
+import { EditDailyReportModal } from './EditDailyReportModal';
 
 interface Props {
   currentUser: UserProfile;
   projects: Project[];
+  reports?: DailyReport[];
   onReportSubmitted?: () => void;
 }
 
 export const DailyReportForm: React.FC<Props> = ({
   currentUser,
   projects,
+  reports,
   onReportSubmitted
 }) => {
   // Strictly filter projects assigned to this user (or all if admin / allProjects)
@@ -53,7 +69,9 @@ export const DailyReportForm: React.FC<Props> = ({
   }, [accessibleProjects, selectedProjectId]);
   const [reportDate, setReportDate] = useState<string>(getTodayDateStr());
   const [notes, setNotes] = useState<string>('');
-  const [attachments, setAttachments] = useState<ReportAttachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PreparedReportAttachment[]>([]);
+  const [isPreparingAttachments, setIsPreparingAttachments] = useState<boolean>(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   // Tables state
   const [submittedWorks, setSubmittedWorks] = useState<SubmittalItem[]>([
@@ -80,7 +98,21 @@ export const DailyReportForm: React.FC<Props> = ({
 
   const [lastAutosave, setLastAutosave] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [uploadProgress, setUploadProgress] = useState<ReportUploadProgress | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [editingExistingReport, setEditingExistingReport] = useState<DailyReport | null>(null);
+
+  const allReports = reports ?? dataService.getReports();
+  const existingReportForDate = allReports.find(
+    (r) => r.projectId === selectedProjectId && r.reportDate === reportDate
+  );
+  const canEditExistingReport = Boolean(
+    existingReportForDate &&
+      (currentUser.role === 'admin' ||
+        existingReportForDate.senderId === currentUser.id ||
+        existingReportForDate.senderEmail.toLowerCase() === currentUser.email.toLowerCase())
+  );
 
   // Load existing draft if present for this project
   useEffect(() => {
@@ -192,23 +224,56 @@ export const DailyReportForm: React.FC<Props> = ({
     });
   };
 
-  // File attachment handler (simulated or real file reader)
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  // Real attachment handler (validates <= 5 files & <= 5MB each, compresses images)
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
 
-    Array.from(files).forEach((file) => {
-      const fakeUrl = URL.createObjectURL(file);
-      setAttachments((prev) => [
-        ...prev,
-        {
-          name: file.name,
-          url: fakeUrl,
-          size: file.size,
-          type: file.type
+    setAttachmentError(null);
+    const files = Array.from(fileList);
+    const remainingSlots = MAX_REPORT_ATTACHMENTS - pendingAttachments.length;
+
+    if (remainingSlots <= 0) {
+      setAttachmentError(`الحد الأقصى للمرفقات هو ${MAX_REPORT_ATTACHMENTS} ملفات في التقرير الواحد.`);
+      e.target.value = '';
+      return;
+    }
+
+    const toProcess = files.slice(0, remainingSlots);
+    const skippedCount = files.length - toProcess.length;
+
+    setIsPreparingAttachments(true);
+    try {
+      const preparedItems: PreparedReportAttachment[] = [];
+      const errors: string[] = [];
+
+      for (const file of toProcess) {
+        try {
+          const prepared = await prepareReportAttachmentFile(file);
+          preparedItems.push(prepared);
+        } catch (err) {
+          errors.push(err instanceof Error ? err.message : `تعذر تجهيز الملف «${file.name}».`);
         }
-      ]);
-    });
+      }
+
+      if (preparedItems.length > 0) {
+        setPendingAttachments((prev) =>
+          [...prev, ...preparedItems].slice(0, MAX_REPORT_ATTACHMENTS)
+        );
+      }
+
+      if (skippedCount > 0) {
+        errors.push(
+          `تم تجاهل ${skippedCount} ملف إضافي لأن الحد الأقصى هو ${MAX_REPORT_ATTACHMENTS} مرفقات للتقرير الواحد.`
+        );
+      }
+      if (errors.length > 0) {
+        setAttachmentError(errors.join(' '));
+      }
+    } finally {
+      setIsPreparingAttachments(false);
+      e.target.value = '';
+    }
   };
 
   // Quick fill sample data button for demonstration testing
@@ -240,7 +305,7 @@ export const DailyReportForm: React.FC<Props> = ({
   };
 
   // Submit Handler
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setValidationError(null);
 
@@ -272,21 +337,68 @@ export const DailyReportForm: React.FC<Props> = ({
       return;
     }
 
-    // Save report
-    dataService.saveReport({
-      projectId: project.id,
-      projectName: project.name,
-      reportDate,
-      senderId: currentUser.id,
-      senderName: currentUser.displayName,
-      senderEmail: currentUser.email,
-      submittedWorks: validSubmitted,
-      receivedWorks: validReceived,
-      notes: notes.trim(),
-      attachments,
-      status: 'submitted'
-    });
+    if (existingReportForDate) {
+      setValidationError(
+        'تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل. يُسمح بتقرير واحد يومياً فقط، ويمكنك تعديل التقرير الحالي بدلاً من إرسال تقرير جديد.'
+      );
+      return;
+    }
 
+    setIsSubmitting(true);
+    setUploadProgress(
+      pendingAttachments.length > 0
+        ? {
+            percent: 5,
+            currentFileIndex: 1,
+            totalFiles: pendingAttachments.length,
+            currentFileName: pendingAttachments[0].name,
+            uploadedChunks: 0,
+            totalChunks: pendingAttachments.length,
+            uploadedBytes: 0,
+            totalBytes: pendingAttachments.reduce((sum, a) => sum + a.size, 0),
+            stage: 'metadata'
+          }
+        : null
+    );
+
+    try {
+      await dataService.saveReport(
+        {
+          projectId: project.id,
+          projectName: project.name,
+          reportDate,
+          senderId: currentUser.id,
+          senderName: currentUser.displayName,
+          senderEmail: currentUser.email,
+          submittedWorks: validSubmitted,
+          receivedWorks: validReceived,
+          notes: notes.trim(),
+          attachments: [],
+          status: 'submitted'
+        },
+        pendingAttachments,
+        (progress) => setUploadProgress(progress)
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === 'DAILY_REPORT_ALREADY_EXISTS') {
+        setValidationError(
+          'تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل. يمكنك تعديله مباشرة من تبويب «تقديماتي» أو عبر زر التعديل أعلاه.'
+        );
+      } else {
+        setValidationError(
+          err instanceof Error
+            ? err.message
+            : 'حدث خطأ أثناء إرسال التقرير اليومي. يرجى المحاولة مرة أخرى.'
+        );
+      }
+      setIsSubmitting(false);
+      setUploadProgress(null);
+      return;
+    }
+
+    setIsSubmitting(false);
+    setUploadProgress(null);
+    setPendingAttachments([]);
     setSubmitSuccess(true);
     setTimeout(() => {
       setSubmitSuccess(false);
@@ -395,6 +507,51 @@ export const DailyReportForm: React.FC<Props> = ({
         <div className="p-4 bg-amber-50 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-800 rounded-xl text-amber-800 dark:text-amber-300 text-sm flex items-center gap-2.5">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <span>لم يتم تعيين أي مشاريع أو مواقع لحسابك حتى الآن. يرجى التواصل مع مسؤول النظام لإسناد المشاريع المصرح بها.</span>
+        </div>
+      )}
+
+      {/* Existing Daily Report Banner (1 report per project per day, editable) */}
+      {existingReportForDate && (
+        <div className="p-4 sm:p-5 bg-amber-50 dark:bg-amber-950/50 border border-amber-300 dark:border-amber-800 rounded-2xl text-amber-900 dark:text-amber-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1 text-xs sm:text-sm">
+              <div className="font-bold">
+                تم إرسال التقرير اليومي لمشروع «{existingReportForDate.projectName}» بتاريخ{' '}
+                <span className="font-mono">{existingReportForDate.reportDate}</span> بالفعل.
+              </div>
+              <p className="text-amber-800/90 dark:text-amber-200/90 leading-relaxed">
+                يُسمح بإرسال تقرير يومي واحد فقط للمشروع خلال اليوم الواحد، ويمكنك تعديل التقرير المرسل بدلاً من إنشاء تقرير جديد.
+                {!canEditExistingReport && (
+                  <span className="block mt-1 font-semibold">
+                    المرسل الحالي: {existingReportForDate.senderName}
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {canEditExistingReport && (
+              <button
+                type="button"
+                onClick={() => setEditingExistingReport(existingReportForDate)}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+              >
+                <Pencil className="w-4 h-4" />
+                <span>تعديل التقرير المرسل</span>
+              </button>
+            )}
+            {onReportSubmitted && (
+              <button
+                type="button"
+                onClick={onReportSubmitted}
+                className="px-3.5 py-2 rounded-xl bg-white dark:bg-slate-900 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs sm:text-sm font-semibold hover:bg-amber-100/70 dark:hover:bg-slate-800 cursor-pointer transition-colors"
+              >
+                الانتقال إلى تقديماتي
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -690,33 +847,79 @@ export const DailyReportForm: React.FC<Props> = ({
           </div>
 
           {/* File Attachments */}
-          <div>
-            <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-              مرفقات أو صور إثبات (ملفات Transmittal أو صور الموقع)
-            </label>
+          <div className="space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                مرفقات التقرير (PDF أو صور الموقع أو Excel)
+              </label>
+              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                بحد أقصى {formatFileSize(MAX_REPORT_ATTACHMENT_SIZE_BYTES)} للملف • حتى {MAX_REPORT_ATTACHMENTS} مرفقات ({pendingAttachments.length}/{MAX_REPORT_ATTACHMENTS})
+              </span>
+            </div>
+
+            {attachmentError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/70 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{attachmentError}</span>
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-3">
-              <label className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs sm:text-sm font-semibold rounded-xl cursor-pointer border border-slate-200 dark:border-slate-700 transition-colors">
-                <Paperclip className="w-4 h-4" />
-                <span>إرفاق ملف أو صورة</span>
+              <label
+                className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-xl border transition-colors ${
+                  isPreparingAttachments || isSubmitting || pendingAttachments.length >= MAX_REPORT_ATTACHMENTS
+                    ? 'bg-slate-100 dark:bg-slate-800/50 text-slate-400 border-slate-200 dark:border-slate-800 cursor-not-allowed'
+                    : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 cursor-pointer'
+                }`}
+              >
+                {isPreparingAttachments ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+                ) : (
+                  <Paperclip className="w-4 h-4" />
+                )}
+                <span>
+                  {isPreparingAttachments ? 'جاري تجهيز الملف...' : 'إرفاق PDF أو صورة أو Excel'}
+                </span>
                 <input
                   type="file"
+                  accept="application/pdf,.pdf,image/jpeg,image/png,image/webp,.xlsx,.xls,.xlsm,.xlsb,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                   multiple
+                  disabled={
+                    isPreparingAttachments ||
+                    isSubmitting ||
+                    pendingAttachments.length >= MAX_REPORT_ATTACHMENTS
+                  }
                   onChange={handleFileUpload}
                   className="hidden"
                 />
               </label>
 
-              {attachments.map((att, idx) => (
+              {pendingAttachments.map((att, idx) => (
                 <div
-                  key={idx}
-                  className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 rounded-lg text-xs text-blue-800 dark:text-blue-300"
+                  key={att.attachmentId}
+                  className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 dark:bg-blue-950/60 border border-blue-200 dark:border-blue-800 rounded-xl text-xs text-blue-900 dark:text-blue-200"
                 >
-                  <Paperclip className="w-3.5 h-3.5" />
-                  <span className="max-w-[140px] truncate">{att.name}</span>
+                  {att.kind === 'pdf' ? (
+                    <FileText className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                  ) : att.kind === 'excel' ? (
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  ) : (
+                    <ImageIcon className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  )}
+                  <span className="max-w-[150px] truncate font-semibold" dir="ltr">
+                    {att.name}
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                    ({formatFileSize(att.size)})
+                  </span>
                   <button
                     type="button"
-                    onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                    className="text-slate-400 hover:text-red-500 cursor-pointer mr-1"
+                    disabled={isSubmitting}
+                    onClick={() =>
+                      setPendingAttachments((prev) => prev.filter((_, i) => i !== idx))
+                    }
+                    className="text-slate-400 hover:text-red-500 cursor-pointer mr-1 disabled:opacity-40"
+                    title="إزالة المرفق"
                   >
                     ×
                   </button>
@@ -726,18 +929,98 @@ export const DailyReportForm: React.FC<Props> = ({
           </div>
         </div>
 
+        {/* Upload Progress Bar (when sending attachments to Firebase) */}
+        {isSubmitting && uploadProgress && (
+          <div className="p-4 rounded-2xl bg-blue-50/90 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 space-y-2.5 shadow-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-blue-800 dark:text-blue-200 min-w-0">
+                <Loader2 className="w-4 h-4 animate-spin text-blue-600 dark:text-blue-400 shrink-0" />
+                <span className="truncate">
+                  {uploadProgress.stage === 'metadata'
+                    ? 'جاري تسجيل بيانات التقرير اليومي...'
+                    : uploadProgress.stage === 'finalizing'
+                      ? 'جاري تأكيد الحفظ وإشعار الإدارة...'
+                      : `جاري رفع المرفق ${uploadProgress.currentFileIndex} من ${uploadProgress.totalFiles}: ${uploadProgress.currentFileName}`}
+                </span>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-lg bg-blue-600 text-white text-xs font-extrabold font-mono shrink-0">
+                {uploadProgress.percent}%
+              </span>
+            </div>
+
+            <div
+              role="progressbar"
+              aria-label="نسبة التقدم في رفع مرفقات التقرير"
+              aria-valuenow={uploadProgress.percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              className="w-full h-3.5 bg-blue-100 dark:bg-slate-800 rounded-full overflow-hidden border border-blue-200/80 dark:border-slate-700"
+            >
+              <div
+                className="h-full bg-gradient-to-l from-blue-600 via-blue-500 to-cyan-500 transition-all duration-300 rounded-full"
+                style={{ width: `${uploadProgress.percent}%` }}
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+              <span className="font-mono" dir="ltr">
+                {formatFileSize(uploadProgress.uploadedBytes)} / {formatFileSize(uploadProgress.totalBytes)}
+              </span>
+              {uploadProgress.totalChunks > 1 && (
+                <span>
+                  الأجزاء المرفوعة: <strong className="font-mono">{uploadProgress.uploadedChunks}</strong> من{' '}
+                  <strong className="font-mono">{uploadProgress.totalChunks}</strong>
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Submit Actions Button Bar */}
         <div className="flex items-center justify-end gap-3 pt-2">
           <button
             type="submit"
-            disabled={accessibleProjects.length === 0}
+            disabled={
+              accessibleProjects.length === 0 ||
+              Boolean(existingReportForDate) ||
+              isSubmitting ||
+              isPreparingAttachments
+            }
             className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <Save className="w-5 h-5" />
-            <span>إرسال التقرير اليومي للإدارة</span>
+            {isSubmitting ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <Save className="w-5 h-5" />
+            )}
+            <span>
+              {existingReportForDate
+                ? 'تم إرسال تقرير هذا اليوم بالفعل (يمكنك التعديل فقط)'
+                : isSubmitting
+                  ? uploadProgress
+                    ? `جاري رفع المرفقات (${uploadProgress.percent}%)...`
+                    : 'جاري إرسال التقرير...'
+                  : 'إرسال التقرير اليومي للإدارة'}
+            </span>
           </button>
         </div>
       </form>
+
+      {/* Inline Edit Modal for Today's Existing Report */}
+      {editingExistingReport && (
+        <EditDailyReportModal
+          report={editingExistingReport}
+          currentUser={currentUser}
+          projects={projects}
+          onClose={() => setEditingExistingReport(null)}
+          onSaved={() => {
+            setEditingExistingReport(null);
+            if (onReportSubmitted) {
+              onReportSubmitted();
+            }
+          }}
+        />
+      )}
     </div>
   );
 };

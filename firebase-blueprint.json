@@ -214,6 +214,17 @@
       },
       "required": ["index", "data", "expiresAtMs"]
     },
+    "ReportAttachmentChunk": {
+      "title": "ReportAttachmentChunk",
+      "description": "Chunked Base64 file payload stored under a DailyReport document for persistent attachments up to 5MB.",
+      "type": "object",
+      "properties": {
+        "attachmentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "index": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 800000 }
+      },
+      "required": ["attachmentId", "index", "data"]
+    },
     "AppNotification": {
       "title": "AppNotification",
       "description": "Real-time notification for reports, issues, PDF uploads, tasks, and reviews.",
@@ -266,6 +277,10 @@
     "/reports/{reportId}": {
       "schema": { "$ref": "#/entities/DailyReport" },
       "description": "Daily work reports submitted by site engineers."
+    },
+    "/reports/{reportId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/ReportAttachmentChunk" },
+      "description": "Chunked Base64 file attachment payload belonging to a DailyReport."
     },
     "/issues/{issueId}": {
       "schema": { "$ref": "#/entities/IssueReport" },

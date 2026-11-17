@@ -177,6 +177,11 @@ export const SITE_DELIVERABLE_RETENTION_MS = SITE_DELIVERABLE_RETENTION_HOURS * 
 export const MAX_PDF_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB max PDF
 export const PDF_CHUNK_SIZE_CHARS = 750000; // <= 750KB chars per Firestore chunk document
 
+// 8. DAILY REPORT ATTACHMENTS CONFIGURATION (إعدادات مرفقات التقرير اليومي الدائمة)
+export const MAX_REPORT_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB max per attachment
+export const MAX_REPORT_ATTACHMENTS = 5; // Max 5 attachments per daily report
+export const REPORT_ATTACHMENT_CHUNK_SIZE_CHARS = 700000; // <= 700KB chars per Firestore chunk document
+
 export const DELIVERABLE_TYPE_CONFIG: Record<
   SiteDeliverableType,
   { labelAr: string; badgeClass: string }

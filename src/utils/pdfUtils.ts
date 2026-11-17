@@ -1,6 +1,11 @@
 import { PDFDocument } from 'pdf-lib';
 import * as XLSX from 'xlsx';
-import { MAX_PDF_FILE_SIZE_BYTES, PDF_CHUNK_SIZE_CHARS } from '../config';
+import {
+  MAX_PDF_FILE_SIZE_BYTES,
+  PDF_CHUNK_SIZE_CHARS,
+  MAX_REPORT_ATTACHMENT_SIZE_BYTES
+} from '../config';
+import { ReportAttachment } from '../types';
 
 export interface PreparedPdfPayload {
   base64: string;
@@ -328,5 +333,103 @@ export function getRemainingRetentionInfo(expiresAtMs: number, nowMs = Date.now(
     isExpired: false,
     label: `متبقي ${Math.max(1, minutes)} دقيقة فقط`,
     isUrgent: true
+  };
+}
+
+export interface PreparedReportAttachment {
+  attachmentId: string;
+  name: string;
+  size: number;
+  type: string;
+  base64: string;
+  kind: 'pdf' | 'image' | 'excel';
+}
+
+export function getReportAttachmentKind(
+  att: Pick<ReportAttachment, 'name' | 'type'>
+): 'pdf' | 'image' | 'excel' | 'other' {
+  const mime = (att.type || '').toLowerCase();
+  const name = (att.name || '').toLowerCase();
+  if (mime === 'application/pdf' || name.endsWith('.pdf')) return 'pdf';
+  if (mime.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif)$/i.test(name)) return 'image';
+  if (isExcelFileName(name) || mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('csv')) {
+    return 'excel';
+  }
+  return 'other';
+}
+
+export async function prepareReportAttachmentFile(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<PreparedReportAttachment> {
+  const attachmentId =
+    'att-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7);
+
+  const lowerName = file.name.toLowerCase();
+  const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
+  const isExcel = isExcelFile(file);
+  const isImage =
+    file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp)$/i.test(lowerName);
+
+  if (!isPdf && !isExcel && !isImage) {
+    throw new Error(
+      `صيغة الملف «${file.name}» غير مدعومة في مرفقات التقرير. الصيغ المدعومة: PDF أو صور (JPG / PNG / WebP) أو Excel.`
+    );
+  }
+
+  if (isImage) {
+    const MAX_RAW_IMAGE_BYTES = 15 * 1024 * 1024;
+    if (file.size > MAX_RAW_IMAGE_BYTES) {
+      throw new Error(
+        `حجم الصورة «${file.name}» (${formatFileSize(file.size)}) كبير جداً للمعالجة. يرجى اختيار صورة أصغر من 15 ميجابايت.`
+      );
+    }
+    onProgress?.(25);
+    const { bytes } = await imageFileToJpegBytes(file);
+    if (bytes.byteLength > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+      throw new Error(
+        `حجم الصورة «${file.name}» بعد الضغط (${formatFileSize(bytes.byteLength)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(MAX_REPORT_ATTACHMENT_SIZE_BYTES)}).`
+      );
+    }
+    onProgress?.(70);
+    const base64 = uint8ArrayToBase64(bytes);
+    onProgress?.(100);
+    const safeName = /\.(jpg|jpeg|png|webp)$/i.test(file.name)
+      ? file.name.replace(/\.[^.]+$/, '.jpg')
+      : `${file.name}.jpg`;
+    return {
+      attachmentId,
+      name: safeName.slice(0, 200),
+      size: bytes.byteLength,
+      type: 'image/jpeg',
+      base64,
+      kind: 'image'
+    };
+  }
+
+  if (file.size <= 0) {
+    throw new Error(`الملف «${file.name}» فارغ ولا يمكن إرفاقه.`);
+  }
+
+  if (file.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+    throw new Error(
+      `حجم الملف «${file.name}» (${formatFileSize(file.size)}) يتجاوز الحد المسموح في التقرير اليومي (${formatFileSize(MAX_REPORT_ATTACHMENT_SIZE_BYTES)}). للملفات الكبيرة حتى 25 ميجابايت يرجى استخدام تبويب «تسليمات الموقع».`
+    );
+  }
+
+  onProgress?.(30);
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  onProgress?.(75);
+  const base64 = uint8ArrayToBase64(bytes);
+  onProgress?.(100);
+
+  return {
+    attachmentId,
+    name: file.name.slice(0, 200),
+    size: bytes.byteLength,
+    type: isPdf ? 'application/pdf' : getExcelMimeType(file.name),
+    base64,
+    kind: isPdf ? 'pdf' : 'excel'
   };
 }

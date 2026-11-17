@@ -23,10 +23,20 @@ export interface SubmittalItem {
 }
 
 export interface ReportAttachment {
+  id?: string;
   name: string;
   url: string;
   size?: number;
   type?: string;
+  chunkCount?: number;
+  storageMode?: 'firestore_chunks' | 'external' | 'local';
+  uploadedAt?: string;
+}
+
+export interface ReportAttachmentChunk {
+  attachmentId: string;
+  index: number;
+  data: string;
 }
 
 export interface DailyReport {

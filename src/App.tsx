@@ -339,6 +339,7 @@ export default function App() {
               <DailyReportForm
                 currentUser={currentUser}
                 projects={projects}
+                reports={reports}
                 onReportSubmitted={() => setActiveTab('my-submissions')}
               />
             )}

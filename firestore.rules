@@ -125,7 +125,7 @@ service cloud.firestore {
         && data.submittedWorks is list && data.submittedWorks.size() <= 200
         && data.receivedWorks is list && data.receivedWorks.size() <= 200
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 4000))
-        && (!('attachments' in data) || (data.attachments is list && data.attachments.size() <= 20))
+        && (!('attachments' in data) || (data.attachments is list && data.attachments.size() <= 5))
         && (data.status == 'submitted' || data.status == 'reviewed' || data.status == 'needs_revision')
         && (!('adminFeedback' in data) || (data.adminFeedback is string && data.adminFeedback.size() <= 2000))
         && data.createdAt is string && data.createdAt.size() <= 64
@@ -246,6 +246,14 @@ service cloud.firestore {
         && data.expiresAtMs is int && data.expiresAtMs > 0;
     }
 
+    function isValidReportAttachmentChunk(data) {
+      return data.keys().hasAll(['attachmentId', 'index', 'data'])
+        && data.keys().hasOnly(['attachmentId', 'index', 'data'])
+        && isValidId(data.attachmentId)
+        && data.index is int && data.index >= 0 && data.index < 20
+        && data.data is string && data.data.size() >= 1 && data.data.size() <= 800000;
+    }
+
     function isValidAppNotification(data) {
       return data.keys().hasAll(['id', 'title', 'message', 'type', 'isRead', 'createdAt'])
         && data.keys().hasOnly(['id', 'title', 'message', 'type', 'priority', 'linkTab', 'targetRole', 'targetUserId', 'projectId', 'senderId', 'senderName', 'readBy', 'isRead', 'createdAt'])
@@ -303,7 +311,8 @@ service cloud.firestore {
         && isValidDailyReport(incoming())
         && hasProjectAccess(incoming().projectId)
         && (isAdmin() || incoming().senderId == request.auth.uid)
-        && incoming().status == 'submitted';
+        && incoming().status == 'submitted'
+        && (isAdmin() || reportId == 'rep-' + incoming().projectId + '-' + incoming().reportDate);
       allow update: if isValidId(reportId)
         && isValidDailyReport(incoming())
         && incoming().createdAt == existing().createdAt
@@ -334,6 +343,45 @@ service cloud.firestore {
           )
         );
       allow delete: if isValidId(reportId) && isAdmin();
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(reportId)
+          && isValidId(chunkId)
+          && exists(/databases/$(database)/documents/reports/$(reportId))
+          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId);
+        allow list: if isValidId(reportId)
+          && exists(/databases/$(database)/documents/reports/$(reportId))
+          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId);
+        allow create: if isValidId(reportId)
+          && isValidId(chunkId)
+          && isValidReportAttachmentChunk(incoming())
+          && exists(/databases/$(database)/documents/reports/$(reportId))
+          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId)
+          && (
+            isAdmin() ||
+            get(/databases/$(database)/documents/reports/$(reportId)).data.senderId == request.auth.uid ||
+            (
+              userDocExists() &&
+              get(/databases/$(database)/documents/reports/$(reportId)).data.senderEmail.lower() == currentUserData().email.lower()
+            )
+          );
+        allow delete: if isValidId(reportId)
+          && isValidId(chunkId)
+          && (
+            isAdmin() ||
+            (
+              exists(/databases/$(database)/documents/reports/$(reportId))
+              && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId)
+              && (
+                get(/databases/$(database)/documents/reports/$(reportId)).data.senderId == request.auth.uid ||
+                (
+                  userDocExists() &&
+                  get(/databases/$(database)/documents/reports/$(reportId)).data.senderEmail.lower() == currentUserData().email.lower()
+                )
+              )
+            )
+          );
+      }
     }
 
     // Issue Reports collection

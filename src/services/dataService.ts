@@ -15,6 +15,8 @@ import { User as FirebaseUser } from 'firebase/auth';
 import {
   Project,
   DailyReport,
+  ReportAttachment,
+  ReportAttachmentChunk,
   IssueReport,
   ProjectTask,
   Announcement,
@@ -43,6 +45,9 @@ import {
   SITE_DELIVERABLE_RETENTION_MS,
   MAX_PDF_FILE_SIZE_BYTES,
   PDF_CHUNK_SIZE_CHARS,
+  MAX_REPORT_ATTACHMENT_SIZE_BYTES,
+  MAX_REPORT_ATTACHMENTS,
+  REPORT_ATTACHMENT_CHUNK_SIZE_CHARS,
   isSuperAdminEmail,
   SUPER_ADMIN_EMAIL
 } from '../config';
@@ -59,6 +64,7 @@ import {
   stopFirebaseDeliverablesAutoCleanupScheduler,
   cachePdfBlobUrl,
   getCachedPdfBlobUrl,
+  revokePdfBlobUrl,
   revokeAllPdfBlobUrls
 } from './firebase';
 import {
@@ -70,7 +76,8 @@ import {
   base64ToBlob,
   splitBase64IntoChunks,
   isExcelFileName,
-  getExcelMimeType
+  getExcelMimeType,
+  PreparedReportAttachment
 } from '../utils/pdfUtils';
 import {
   normalizeNotificationPreferences,
@@ -108,6 +115,18 @@ export interface CreateUserPayload {
 
 export interface DeliverableUploadProgress {
   percent: number;
+  uploadedChunks: number;
+  totalChunks: number;
+  uploadedBytes: number;
+  totalBytes: number;
+  stage: 'metadata' | 'uploading' | 'finalizing';
+}
+
+export interface ReportUploadProgress {
+  percent: number;
+  currentFileIndex: number;
+  totalFiles: number;
+  currentFileName: string;
   uploadedChunks: number;
   totalChunks: number;
   uploadedBytes: number;
@@ -1326,21 +1345,207 @@ class DataService {
     return this.getReports().find((r) => r.id === id);
   }
 
-  public saveReport(reportData: Omit<DailyReport, 'id' | 'createdAt' | 'updatedAt'>): DailyReport {
+  public getReportForProjectDate(projectId: string, reportDate: string): DailyReport | undefined {
+    return this.getReports().find(
+      (r) => r.projectId === projectId && r.reportDate === reportDate
+    );
+  }
+
+  private async uploadReportAttachmentChunks(
+    reportId: string,
+    preparedFiles: { item: PreparedReportAttachment; chunks: string[] }[],
+    onProgress?: (progress: ReportUploadProgress) => void
+  ): Promise<string[]> {
+    const writtenChunkIds: string[] = [];
+    const totalFiles = preparedFiles.length;
+    const totalChunks = preparedFiles.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    const totalBytes = Math.max(
+      1,
+      preparedFiles.reduce((sum, entry) => sum + entry.item.size, 0)
+    );
+    let uploadedChunks = 0;
+    const BATCH_CONCURRENCY = 5;
+
+    for (let fileIdx = 0; fileIdx < preparedFiles.length; fileIdx++) {
+      const { item, chunks } = preparedFiles[fileIdx];
+      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
+        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
+        const batchPromises: Promise<void>[] = [];
+
+        for (let chunkIdx = start; chunkIdx < end; chunkIdx++) {
+          const chunkId = `${item.attachmentId}_${chunkIdx}`;
+          const chunkDoc: ReportAttachmentChunk = {
+            attachmentId: item.attachmentId,
+            index: chunkIdx,
+            data: chunks[chunkIdx]
+          };
+
+          batchPromises.push(
+            setDoc(doc(db, 'reports', reportId, 'chunks', chunkId), chunkDoc).then(() => {
+              writtenChunkIds.push(chunkId);
+              uploadedChunks += 1;
+              const isAllDone = uploadedChunks === totalChunks;
+              const percent = isAllDone
+                ? 96
+                : Math.min(95, Math.round(12 + (uploadedChunks / Math.max(1, totalChunks)) * 83));
+              const uploadedBytes = Math.min(
+                totalBytes,
+                Math.round((uploadedChunks / Math.max(1, totalChunks)) * totalBytes)
+              );
+              onProgress?.({
+                percent,
+                currentFileIndex: fileIdx + 1,
+                totalFiles,
+                currentFileName: item.name,
+                uploadedChunks,
+                totalChunks,
+                uploadedBytes,
+                totalBytes,
+                stage: isAllDone ? 'finalizing' : 'uploading'
+              });
+            })
+          );
+        }
+
+        await Promise.all(batchPromises);
+      }
+    }
+
+    return writtenChunkIds;
+  }
+
+  private async deleteChunksByIds(reportId: string, chunkIds: string[]) {
+    for (const chunkId of chunkIds) {
+      await deleteDoc(doc(db, 'reports', reportId, 'chunks', chunkId)).catch(() => undefined);
+    }
+  }
+
+  private async deleteReportAttachmentChunks(reportId: string, attachmentId: string) {
+    if (!attachmentId) return;
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'reports', reportId, 'chunks'), where('attachmentId', '==', attachmentId))
+      );
+      await Promise.allSettled(
+        snap.docs.map((d) => deleteDoc(doc(db, 'reports', reportId, 'chunks', d.id)))
+      );
+      revokePdfBlobUrl(`rep-${reportId}-${attachmentId}`);
+    } catch {
+      // Ignore background cleanup errors
+    }
+  }
+
+  public async saveReport(
+    reportData: Omit<DailyReport, 'id' | 'createdAt' | 'updatedAt'>,
+    pendingAttachments: PreparedReportAttachment[] = [],
+    onProgress?: (progress: ReportUploadProgress) => void
+  ): Promise<DailyReport> {
     const reports = this.getReports();
+    const duplicate = reports.find(
+      (r) => r.projectId === reportData.projectId && r.reportDate === reportData.reportDate
+    );
+    if (duplicate) {
+      throw new Error('DAILY_REPORT_ALREADY_EXISTS');
+    }
+
+    const existingStaticAttachments = (reportData.attachments || []).filter(
+      (att) => att.storageMode !== 'firestore_chunks' && att.url && !att.url.startsWith('blob:')
+    );
+    if (existingStaticAttachments.length + pendingAttachments.length > MAX_REPORT_ATTACHMENTS) {
+      throw new Error(`الحد الأقصى للمرفقات في التقرير الواحد هو ${MAX_REPORT_ATTACHMENTS} ملفات.`);
+    }
+
     const now = new Date().toISOString();
+    const preparedChunked = pendingAttachments.map((item) => {
+      if (item.size <= 0 || item.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(`حجم المرفق «${item.name}» يتجاوز الحد الأقصى المسموح (5 ميجابايت).`);
+      }
+      const chunks = splitBase64IntoChunks(item.base64, REPORT_ATTACHMENT_CHUNK_SIZE_CHARS);
+      if (chunks.length === 0 || chunks.length >= 20) {
+        throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+      }
+      return { item, chunks };
+    });
+
+    const chunkedMeta: ReportAttachment[] = preparedChunked.map(({ item, chunks }) => ({
+      id: item.attachmentId,
+      name: item.name,
+      url: 'firestore://chunked',
+      size: item.size,
+      type: item.type,
+      chunkCount: chunks.length,
+      storageMode: 'firestore_chunks',
+      uploadedAt: now
+    }));
+
+    const finalAttachments = [...existingStaticAttachments, ...chunkedMeta].slice(
+      0,
+      MAX_REPORT_ATTACHMENTS
+    );
+
+    const candidateId = `rep-${reportData.projectId}-${reportData.reportDate}`;
+    const reportId =
+      candidateId.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(candidateId)
+        ? candidateId
+        : 'rep-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6);
+
     const newReport: DailyReport = stripUndefined({
       ...reportData,
-      id: 'rep-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6),
+      id: reportId,
+      attachments: finalAttachments,
       createdAt: now,
       updatedAt: now
     });
+
+    const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.size, 0);
+    const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    if (preparedChunked.length > 0) {
+      onProgress?.({
+        percent: 8,
+        currentFileIndex: 1,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[0].item.name,
+        uploadedChunks: 0,
+        totalChunks,
+        uploadedBytes: 0,
+        totalBytes,
+        stage: 'metadata'
+      });
+    }
+
+    try {
+      await setDoc(doc(db, 'reports', newReport.id), stripUndefined(newReport));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}`);
+    }
+
+    if (preparedChunked.length > 0) {
+      try {
+        await this.uploadReportAttachmentChunks(newReport.id, preparedChunked, onProgress);
+      } catch (error) {
+        // Roll back report and any partial chunks so today's report is not stuck in half-saved state
+        for (const entry of preparedChunked) {
+          await this.deleteReportAttachmentChunks(newReport.id, entry.item.attachmentId);
+        }
+        await deleteDoc(doc(db, 'reports', newReport.id)).catch(() => undefined);
+        handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}/chunks`);
+      }
+
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: preparedChunked.length,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[preparedChunked.length - 1].item.name,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
+    }
+
     reports.unshift(newReport);
     localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
-
-    setDoc(doc(db, 'reports', newReport.id), stripUndefined(newReport)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}`)
-    );
 
     this.clearReportDraft(reportData.projectId);
 
@@ -1372,7 +1577,9 @@ class DataService {
         | 'notes'
         | 'attachments'
       >
-    >
+    >,
+    pendingNewAttachments: PreparedReportAttachment[] = [],
+    onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<boolean> {
     const reports = this.getReports();
     const idx = reports.findIndex((r) => r.id === reportId);
@@ -1383,11 +1590,86 @@ class DataService {
     const nextProjectId = updates.projectId ?? existing.projectId;
     const nextProjectName = (updates.projectName ?? existing.projectName).trim().slice(0, 200);
     const nextReportDate = (updates.reportDate ?? existing.reportDate).trim().slice(0, 20);
+
+    const conflictingReport = reports.find(
+      (r) => r.id !== reportId && r.projectId === nextProjectId && r.reportDate === nextReportDate
+    );
+    if (conflictingReport) {
+      throw new Error('DAILY_REPORT_ALREADY_EXISTS');
+    }
+
+    const baseKeptAttachments = (updates.attachments ?? existing.attachments ?? []).map((att) =>
+      stripUndefined({
+        id: att.id,
+        name: att.name,
+        url: att.url,
+        size: att.size,
+        type: att.type,
+        chunkCount: att.chunkCount,
+        storageMode: att.storageMode,
+        uploadedAt: att.uploadedAt
+      })
+    );
+
+    if (baseKeptAttachments.length + pendingNewAttachments.length > MAX_REPORT_ATTACHMENTS) {
+      throw new Error(`الحد الأقصى للمرفقات في التقرير الواحد هو ${MAX_REPORT_ATTACHMENTS} ملفات.`);
+    }
+
+    const preparedChunked = pendingNewAttachments.map((item) => {
+      if (item.size <= 0 || item.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(`حجم المرفق «${item.name}» يتجاوز الحد الأقصى المسموح (5 ميجابايت).`);
+      }
+      const chunks = splitBase64IntoChunks(item.base64, REPORT_ATTACHMENT_CHUNK_SIZE_CHARS);
+      if (chunks.length === 0 || chunks.length >= 20) {
+        throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+      }
+      return { item, chunks };
+    });
+
+    let writtenChunkIds: string[] = [];
+    if (preparedChunked.length > 0) {
+      const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.size, 0);
+      const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+      onProgress?.({
+        percent: 10,
+        currentFileIndex: 1,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[0].item.name,
+        uploadedChunks: 0,
+        totalChunks,
+        uploadedBytes: 0,
+        totalBytes,
+        stage: 'uploading'
+      });
+
+      try {
+        writtenChunkIds = await this.uploadReportAttachmentChunks(
+          reportId,
+          preparedChunked,
+          onProgress
+        );
+      } catch (error) {
+        await this.deleteChunksByIds(reportId, writtenChunkIds);
+        handleFirestoreError(error, OperationType.CREATE, `reports/${reportId}/chunks`);
+      }
+    }
+
+    const newlyUploadedMeta: ReportAttachment[] = preparedChunked.map(({ item, chunks }) => ({
+      id: item.attachmentId,
+      name: item.name,
+      url: 'firestore://chunked',
+      size: item.size,
+      type: item.type,
+      chunkCount: chunks.length,
+      storageMode: 'firestore_chunks',
+      uploadedAt: updatedAt
+    }));
+
     const sanitizeRows = (rows: DailyReport['submittedWorks']) =>
-      rows.slice(0, 200).map((item, idx) =>
+      rows.slice(0, 200).map((item, rIdx) =>
         stripUndefined({
-          id: item.id || `row-${idx + 1}`,
-          rowNumber: idx + 1,
+          id: item.id || `row-${rIdx + 1}`,
+          rowNumber: rIdx + 1,
           itemDescription: (item.itemDescription || '').trim(),
           submittalNumber: (item.submittalNumber || '').trim(),
           rev: Number.isFinite(Number(item.rev)) ? Number(item.rev) : 0,
@@ -1399,16 +1681,10 @@ class DataService {
     const nextReceivedWorks = sanitizeRows(updates.receivedWorks ?? existing.receivedWorks);
     const nextNotes =
       updates.notes !== undefined ? updates.notes.trim().slice(0, 4000) : existing.notes;
-    const nextAttachments = (updates.attachments ?? existing.attachments)
-      ?.slice(0, 20)
-      .map((att) =>
-        stripUndefined({
-          name: att.name,
-          url: att.url,
-          size: att.size,
-          type: att.type
-        })
-      );
+    const nextAttachments = [...baseKeptAttachments, ...newlyUploadedMeta].slice(
+      0,
+      MAX_REPORT_ATTACHMENTS
+    );
 
     const updatedReport: DailyReport = stripUndefined({
       ...existing,
@@ -1433,13 +1709,43 @@ class DataService {
           submittedWorks: nextSubmittedWorks,
           receivedWorks: nextReceivedWorks,
           notes: nextNotes ?? '',
-          attachments: nextAttachments ?? [],
+          attachments: nextAttachments,
           status: 'submitted',
           updatedAt
         })
       );
     } catch (error) {
+      if (writtenChunkIds.length > 0) {
+        await this.deleteChunksByIds(reportId, writtenChunkIds);
+      }
       handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
+    }
+
+    // Delete orphaned chunks for any chunked attachment removed by the user
+    const keptIds = new Set(nextAttachments.map((a) => a.id).filter(Boolean));
+    const removedChunkedIds = (existing.attachments || [])
+      .filter((a) => a.storageMode === 'firestore_chunks' && a.id && !keptIds.has(a.id))
+      .map((a) => a.id!);
+    if (removedChunkedIds.length > 0) {
+      Promise.allSettled(
+        removedChunkedIds.map((attId) => this.deleteReportAttachmentChunks(reportId, attId))
+      ).catch(() => undefined);
+    }
+
+    if (preparedChunked.length > 0) {
+      const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.size, 0);
+      const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: preparedChunked.length,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[preparedChunked.length - 1].item.name,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
     }
 
     reports[idx] = updatedReport;
@@ -1459,6 +1765,65 @@ class DataService {
 
     this.notify();
     return true;
+  }
+
+  public async fetchReportAttachmentUrl(
+    reportId: string,
+    attachment: ReportAttachment
+  ): Promise<string> {
+    if (
+      attachment.storageMode === 'firestore_chunks' ||
+      (attachment.id && attachment.chunkCount && attachment.chunkCount > 0)
+    ) {
+      const cacheKey = `rep-${reportId}-${attachment.id}`;
+      const cached = getCachedPdfBlobUrl(cacheKey);
+      if (cached) return cached;
+
+      let chunkDocs: ReportAttachmentChunk[] = [];
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, 'reports', reportId, 'chunks'),
+            where('attachmentId', '==', attachment.id)
+          )
+        );
+        chunkDocs = snap.docs.map((d) => d.data() as ReportAttachmentChunk);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.LIST, `reports/${reportId}/chunks`);
+      }
+
+      if (chunkDocs.length === 0) {
+        throw new Error('تعذر العثور على بيانات المرفق في قاعدة البيانات.');
+      }
+
+      chunkDocs.sort((a, b) => a.index - b.index);
+      const fullBase64 = chunkDocs.map((c) => c.data).join('');
+      const resolvedMime =
+        attachment.type ||
+        (isExcelFileName(attachment.name)
+          ? getExcelMimeType(attachment.name)
+          : attachment.name.toLowerCase().endsWith('.pdf')
+            ? 'application/pdf'
+            : 'application/octet-stream');
+
+      const blob = base64ToBlob(fullBase64, resolvedMime);
+      const url = URL.createObjectURL(blob);
+      cachePdfBlobUrl(cacheKey, url);
+      return url;
+    }
+
+    if (
+      attachment.url &&
+      (attachment.url.startsWith('http://') ||
+        attachment.url.startsWith('https://') ||
+        attachment.url.startsWith('data:'))
+    ) {
+      return attachment.url;
+    }
+
+    throw new Error(
+      'هذا المرفق محفوظ كرابط محلي قديم من متصفح المرسل قبل تفعيل الرفع السحابي.'
+    );
   }
 
   public updateReportStatus(reportId: string, status: DailyReport['status'], adminFeedback?: string): boolean {

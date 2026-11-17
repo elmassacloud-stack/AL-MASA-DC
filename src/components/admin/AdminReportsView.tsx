@@ -14,10 +14,11 @@ import {
   Search,
   Check,
   Copy,
-  Share2
+  Paperclip
 } from 'lucide-react';
 import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
+import { ReportAttachmentList } from '../common/ReportAttachmentList';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
 import { dataService } from '../../services/dataService';
 
@@ -264,6 +265,12 @@ export const AdminReportsView: React.FC<Props> = ({
                 <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2.5 py-1 rounded-lg">
                   الأعمال المستلمة: <strong className="text-emerald-600 dark:text-emerald-400 font-mono">{report.receivedWorks.length}</strong>
                 </span>
+                {(report.attachments?.length || 0) > 0 && (
+                  <span className="bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 px-2.5 py-1 rounded-lg border border-blue-200 dark:border-blue-800 inline-flex items-center gap-1">
+                    <Paperclip className="w-3.5 h-3.5" />
+                    <span>المرفقات: <strong className="font-mono">{report.attachments!.length}</strong></span>
+                  </span>
+                )}
                 {report.notes && (
                   <span className="text-slate-700 dark:text-slate-300 font-medium truncate max-w-md">
                     ملاحظات: {report.notes}
@@ -456,6 +463,11 @@ export const AdminReportsView: React.FC<Props> = ({
                   </p>
                 </div>
               )}
+
+              <ReportAttachmentList
+                reportId={selectedReport.id}
+                attachments={selectedReport.attachments}
+              />
 
               {/* Admin Feedback Box */}
               <div className="p-4 bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 rounded-2xl space-y-3">

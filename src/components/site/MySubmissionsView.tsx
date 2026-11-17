@@ -10,10 +10,12 @@ import {
   Eye,
   FileSpreadsheet,
   X,
-  Pencil
+  Pencil,
+  Paperclip
 } from 'lucide-react';
 import { UserProfile, DailyReport, IssueReport, Project } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
+import { ReportAttachmentList } from '../common/ReportAttachmentList';
 import { ISSUE_TYPES_CONFIG, ISSUE_PRIORITY_CONFIG } from '../../config';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
 import { canAccessProject } from '../../utils/accessControl';
@@ -228,8 +230,16 @@ export const MySubmissionsView: React.FC<Props> = ({
                     </span>
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-100 dark:border-slate-800 col-span-2">
-                    <span className="text-slate-700 dark:text-slate-300 block font-medium">الملاحظات</span>
-                    <span className="text-xs text-slate-700 dark:text-slate-300 truncate block">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-700 dark:text-slate-300 font-medium">الملاحظات</span>
+                      {(report.attachments?.length || 0) > 0 && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-bold text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-950/70 px-2 py-0.5 rounded-md border border-blue-200 dark:border-blue-800">
+                          <Paperclip className="w-3 h-3" />
+                          <span>{report.attachments!.length} مرفق</span>
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-700 dark:text-slate-300 truncate block mt-0.5">
                       {report.notes || 'لا توجد ملاحظات عامة'}
                     </span>
                   </div>
@@ -494,6 +504,11 @@ export const MySubmissionsView: React.FC<Props> = ({
                   </p>
                 </div>
               )}
+
+              <ReportAttachmentList
+                reportId={selectedReport.id}
+                attachments={selectedReport.attachments}
+              />
             </div>
 
             {/* Modal Footer */}
