@@ -1563,6 +1563,100 @@ class DataService {
     return newTask;
   }
 
+  public async updateTask(
+    taskId: string,
+    updates: Partial<
+      Pick<
+        ProjectTask,
+        'projectId' | 'projectName' | 'title' | 'description' | 'deadline' | 'priority' | 'status'
+      >
+    >
+  ): Promise<boolean> {
+    const tasks = this.getTasks();
+    const idx = tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) return false;
+
+    const existing = tasks[idx];
+    const updatedAt = new Date().toISOString();
+    const nextProjectId = updates.projectId ?? existing.projectId;
+    const nextProjectName = (updates.projectName ?? existing.projectName).trim().slice(0, 200);
+    const nextTitle = (updates.title ?? existing.title).trim().slice(0, 300);
+    const nextDescription = (updates.description ?? existing.description).trim().slice(0, 4000);
+    const nextDeadline = (updates.deadline ?? existing.deadline).trim().slice(0, 20);
+    const nextPriority = updates.priority ?? existing.priority;
+    const nextStatus = updates.status ?? existing.status;
+
+    if (!nextTitle) return false;
+
+    const updatedTask: ProjectTask = stripUndefined({
+      ...existing,
+      projectId: nextProjectId,
+      projectName: nextProjectName,
+      title: nextTitle,
+      description: nextDescription,
+      deadline: nextDeadline,
+      priority: nextPriority,
+      status: nextStatus,
+      updatedAt
+    });
+
+    tasks[idx] = updatedTask;
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
+
+    try {
+      await updateDoc(
+        doc(db, 'tasks', taskId),
+        stripUndefined({
+          projectId: nextProjectId,
+          projectName: nextProjectName,
+          title: nextTitle,
+          description: nextDescription,
+          deadline: nextDeadline,
+          priority: nextPriority,
+          status: nextStatus,
+          updatedAt
+        })
+      );
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`);
+    }
+
+    const adminUser = this.getCurrentUser();
+    this.addNotification({
+      title:
+        nextPriority === 'urgent'
+          ? `تحديث مهمة عاجلة: ${nextTitle}`
+          : `تحديث مهمة: ${nextTitle}`,
+      message: `قام ${adminUser?.displayName || 'مسؤول النظام'} بتحديث تفاصيل المهمة لمشروع ${nextProjectName} (موعد التسليم: ${nextDeadline}).`,
+      type: 'task_assigned',
+      priority: nextPriority,
+      targetRole: 'site',
+      projectId: nextProjectId,
+      senderId: adminUser?.id || existing.createdBy,
+      senderName: adminUser?.displayName,
+      linkTab: 'my-tasks'
+    });
+
+    this.notify();
+    return true;
+  }
+
+  public async deleteTask(taskId: string): Promise<boolean> {
+    const tasks = this.getTasks();
+    if (!tasks.some((t) => t.id === taskId)) return false;
+
+    try {
+      await deleteDoc(doc(db, 'tasks', taskId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `tasks/${taskId}`);
+    }
+
+    const remaining = tasks.filter((t) => t.id !== taskId);
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(remaining));
+    this.notify();
+    return true;
+  }
+
   public completeTask(taskId: string, userId: string, proofNote: string, proofAttachment?: string): boolean {
     const tasks = this.getTasks();
     const idx = tasks.findIndex((t) => t.id === taskId);
