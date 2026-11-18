@@ -223,11 +223,16 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       if (isAdmin) setShowUploadForm(false);
       showSuccess('تم إرسال الملف بنجاح، وسيظل متاحاً في Firebase لمدة 48 ساعة ثم يُحذف تلقائياً.');
     } catch (err) {
-      setFormError(
-        err instanceof Error
-          ? err.message
-          : 'حدث خطأ أثناء رفع الملف. يرجى التحقق من الاتصال والمحاولة مجدداً.'
-      );
+      const rawMsg = err instanceof Error ? err.message : '';
+      if (rawMsg.includes('Missing or insufficient permissions') || rawMsg.includes('PERMISSION_DENIED')) {
+        setFormError(
+          'تعذر إرسال الملف لعدم كفاية الصلاحيات على هذا المشروع أو تبويب تسليمات الموقع. يرجى تحديث الصفحة أو مراجعة مسؤول النظام للتحقق من إسناد المشروع وصلاحية تسليمات الموقع لحسابك.'
+        );
+      } else {
+        setFormError(
+          rawMsg || 'حدث خطأ أثناء رفع الملف. يرجى التحقق من الاتصال والمحاولة مجدداً.'
+        );
+      }
     } finally {
       setIsUploading(false);
       setUploadInfo(null);
@@ -652,10 +657,26 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                           {preparedPdf.fileName}
                         </p>
                         <p className="text-xs text-slate-600 dark:text-slate-400">
-                          الحجم: {formatFileSize(preparedPdf.fileSizeBytes)} •{' '}
-                          {preparedPdf.fileFormat === 'excel'
-                            ? `${preparedPdf.pageCount} ورقة عمل (Excel)`
-                            : `${preparedPdf.pageCount} صفحة (PDF)`}{' '}
+                          الحجم:{' '}
+                          <span dir="ltr" className="inline-block font-mono font-semibold">
+                            {formatFileSize(preparedPdf.fileSizeBytes)}
+                          </span>{' '}
+                          •{' '}
+                          {preparedPdf.fileFormat === 'excel' ? (
+                            <>
+                              <span dir="ltr" className="inline-block font-mono font-semibold">
+                                {preparedPdf.pageCount}
+                              </span>{' '}
+                              ورقة عمل (Excel)
+                            </>
+                          ) : (
+                            <>
+                              <span dir="ltr" className="inline-block font-mono font-semibold">
+                                {preparedPdf.pageCount}
+                              </span>{' '}
+                              صفحة (PDF)
+                            </>
+                          )}{' '}
                           • جاهز للإرسال (اضغط لاختيار ملف آخر)
                         </p>
                       </div>

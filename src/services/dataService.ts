@@ -52,6 +52,7 @@ import {
   SUPER_ADMIN_EMAIL
 } from '../config';
 import {
+  auth,
   db,
   OperationType,
   handleFirestoreError,
@@ -259,7 +260,7 @@ class DataService {
     try {
       const snap = await getDoc(userDocRef);
       if (snap.exists()) {
-        profile = snap.data() as UserProfile;
+        profile = { ...(snap.data() as UserProfile), id: uid };
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, `users/${uid}`);
@@ -1091,7 +1092,7 @@ class DataService {
       fileSizeBytes: totalBytes,
       chunkCount: chunks.length,
       pageCount: payload.pageCount,
-      senderId: payload.senderId,
+      senderId: auth.currentUser?.uid || payload.senderId,
       senderName: payload.senderName.trim().slice(0, 150),
       senderEmail: payload.senderEmail.trim().slice(0, 200),
       status: 'pending_receipt',

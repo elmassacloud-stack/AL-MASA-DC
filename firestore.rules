@@ -56,14 +56,14 @@ service cloud.firestore {
     function hasExecutedWorksAccess() {
       return isAdmin() || (
         isActiveUser() &&
-        (!('canAccessExecutedWorks' in currentUserData()) || currentUserData().canAccessExecutedWorks == true)
+        (!('canAccessExecutedWorks' in currentUserData()) || currentUserData().canAccessExecutedWorks != false)
       );
     }
 
     function hasSiteDeliverablesAccess() {
       return isAdmin() || (
         isActiveUser() &&
-        (!('canAccessSiteDeliverables' in currentUserData()) || currentUserData().canAccessSiteDeliverables == true)
+        (!('canAccessSiteDeliverables' in currentUserData()) || currentUserData().canAccessSiteDeliverables != false)
       );
     }
 
@@ -225,7 +225,7 @@ service cloud.firestore {
         && (!('mimeType' in data) || (data.mimeType is string && data.mimeType.size() <= 150))
         && data.fileSizeBytes is int && data.fileSizeBytes >= 1 && data.fileSizeBytes <= 26500000
         && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 60
-        && (!('pageCount' in data) || (data.pageCount is int && data.pageCount >= 1 && data.pageCount <= 500))
+        && (!('pageCount' in data) || (data.pageCount is int && data.pageCount >= 1 && data.pageCount <= 2000))
         && data.senderId is string && data.senderId.size() <= 128
         && data.senderName is string && data.senderName.size() <= 150
         && data.senderEmail is string && data.senderEmail.size() <= 200
@@ -477,7 +477,6 @@ service cloud.firestore {
         && isValidSiteDeliverable(incoming())
         && hasSiteDeliverablesAccess()
         && hasProjectAccess(incoming().projectId)
-        && exists(/databases/$(database)/documents/projects/$(incoming().projectId))
         && (isAdmin() || incoming().senderId == request.auth.uid)
         && (isAdmin() || incoming().status == 'pending_receipt');
       allow update: if isValidId(deliverableId)
