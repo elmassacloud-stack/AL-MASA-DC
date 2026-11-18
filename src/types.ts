@@ -81,6 +81,27 @@ export interface IssueReport {
 
 export type TaskStatus = 'pending' | 'in_progress' | 'done';
 
+export interface TaskAttachment {
+  id: string;
+  name: string;
+  fileFormat: 'pdf' | 'excel' | 'image' | 'other';
+  mimeType: string;
+  fileSizeBytes: number;
+  chunkCount: number;
+  pageCount?: number;
+  uploadedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  expiresAtMs: number;
+}
+
+export interface TaskAttachmentChunk {
+  attachmentId: string;
+  index: number;
+  data: string;
+  expiresAtMs: number;
+}
+
 export interface ProjectTask {
   id: string;
   projectId: string;
@@ -95,6 +116,7 @@ export interface ProjectTask {
   completedAt?: string;
   proofNote?: string;
   proofAttachment?: string;
+  attachments?: TaskAttachment[];
   createdAt: string;
   updatedAt: string;
 }

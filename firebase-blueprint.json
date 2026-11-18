@@ -123,6 +123,7 @@
         "completedAt": { "type": "string", "maxLength": 64 },
         "proofNote": { "type": "string", "maxLength": 2000 },
         "proofAttachment": { "type": "string", "maxLength": 1000 },
+        "attachments": { "type": "array" },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
@@ -225,6 +226,18 @@
       },
       "required": ["attachmentId", "index", "data"]
     },
+    "TaskAttachmentChunk": {
+      "title": "TaskAttachmentChunk",
+      "description": "Temporary 48-hour chunked Base64 file payload attached by Admin to a ProjectTask (up to 25MB).",
+      "type": "object",
+      "properties": {
+        "attachmentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "index": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 800000 },
+        "expiresAtMs": { "type": "number" }
+      },
+      "required": ["attachmentId", "index", "data", "expiresAtMs"]
+    },
     "AppNotification": {
       "title": "AppNotification",
       "description": "Real-time notification for reports, issues, PDF uploads, tasks, and reviews.",
@@ -289,6 +302,10 @@
     "/tasks/{taskId}": {
       "schema": { "$ref": "#/entities/ProjectTask" },
       "description": "Tasks assigned to project sites."
+    },
+    "/tasks/{taskId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/TaskAttachmentChunk" },
+      "description": "Temporary 48-hour chunked Base64 attachment payloads uploaded by Admin for a ProjectTask."
     },
     "/announcements/{announcementId}": {
       "schema": { "$ref": "#/entities/Announcement" },

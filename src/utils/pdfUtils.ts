@@ -3,7 +3,8 @@ import * as XLSX from 'xlsx';
 import {
   MAX_PDF_FILE_SIZE_BYTES,
   PDF_CHUNK_SIZE_CHARS,
-  MAX_REPORT_ATTACHMENT_SIZE_BYTES
+  MAX_REPORT_ATTACHMENT_SIZE_BYTES,
+  MAX_TASK_ATTACHMENT_SIZE_BYTES
 } from '../config';
 import { ReportAttachment } from '../types';
 
@@ -431,5 +432,87 @@ export async function prepareReportAttachmentFile(
     type: isPdf ? 'application/pdf' : getExcelMimeType(file.name),
     base64,
     kind: isPdf ? 'pdf' : 'excel'
+  };
+}
+
+export interface PreparedTaskAttachment {
+  attachmentId: string;
+  name: string;
+  fileSizeBytes: number;
+  mimeType: string;
+  fileFormat: 'pdf' | 'excel' | 'image' | 'other';
+  pageCount?: number;
+  base64: string;
+}
+
+export async function prepareTaskAttachmentFile(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<PreparedTaskAttachment> {
+  if (file.size <= 0) {
+    throw new Error(`الملف «${file.name}» فارغ ولا يمكن إرفاقه.`);
+  }
+
+  if (file.size > MAX_TASK_ATTACHMENT_SIZE_BYTES) {
+    throw new Error(
+      `حجم الملف «${file.name}» (${formatFileSize(file.size)}) يتجاوز الحد الأقصى المسموح للمرفق (${formatFileSize(MAX_TASK_ATTACHMENT_SIZE_BYTES)}).`
+    );
+  }
+
+  const attachmentId =
+    'tatt-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7);
+  const lowerName = file.name.toLowerCase();
+  const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
+  const isExcel = isExcelFile(file);
+  const isImage =
+    file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(lowerName);
+
+  onProgress?.(25);
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  let pageCount: number | undefined;
+  if (isPdf) {
+    try {
+      const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
+      pageCount = doc.getPageCount() || 1;
+    } catch {
+      pageCount = 1;
+    }
+  } else if (isExcel) {
+    try {
+      const workbook = XLSX.read(bytes, { type: 'array', bookSheets: true });
+      pageCount = Math.max(1, workbook.SheetNames.length || 1);
+    } catch {
+      pageCount = 1;
+    }
+  }
+
+  onProgress?.(70);
+  const base64 = uint8ArrayToBase64(bytes);
+  onProgress?.(100);
+
+  const fileFormat: 'pdf' | 'excel' | 'image' | 'other' = isPdf
+    ? 'pdf'
+    : isExcel
+      ? 'excel'
+      : isImage
+        ? 'image'
+        : 'other';
+
+  const mimeType = isPdf
+    ? 'application/pdf'
+    : isExcel
+      ? getExcelMimeType(file.name)
+      : file.type || 'application/octet-stream';
+
+  return {
+    attachmentId,
+    name: file.name.slice(0, 260),
+    fileSizeBytes: bytes.byteLength,
+    mimeType: mimeType.slice(0, 150),
+    fileFormat,
+    pageCount,
+    base64
   };
 }

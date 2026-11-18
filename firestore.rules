@@ -164,7 +164,7 @@ service cloud.firestore {
 
     function isValidProjectTask(data) {
       return data.keys().hasAll(['id', 'projectId', 'projectName', 'title', 'description', 'deadline', 'priority', 'status', 'createdBy', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'title', 'description', 'deadline', 'priority', 'status', 'createdBy', 'completedBy', 'completedAt', 'proofNote', 'proofAttachment', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'title', 'description', 'deadline', 'priority', 'status', 'createdBy', 'completedBy', 'completedAt', 'proofNote', 'proofAttachment', 'attachments', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && isValidId(data.projectId)
         && data.projectName is string && data.projectName.size() <= 200
@@ -178,8 +178,30 @@ service cloud.firestore {
         && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 64))
         && (!('proofNote' in data) || (data.proofNote is string && data.proofNote.size() <= 2000))
         && (!('proofAttachment' in data) || (data.proofAttachment is string && data.proofAttachment.size() <= 1000))
+        && (!('attachments' in data) || (
+          data.attachments is list
+          && data.attachments.size() <= 5
+          && (
+            data.attachments.size() == 0 ||
+            (
+              data.attachments[0] is map
+              && 'id' in data.attachments[0]
+              && 'expiresAtMs' in data.attachments[0]
+              && data.attachments[0].expiresAtMs is int
+            )
+          )
+        ))
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidTaskAttachmentChunk(data) {
+      return data.keys().hasAll(['attachmentId', 'index', 'data', 'expiresAtMs'])
+        && data.keys().hasOnly(['attachmentId', 'index', 'data', 'expiresAtMs'])
+        && isValidId(data.attachmentId)
+        && data.index is int && data.index >= 0 && data.index < 60
+        && data.data is string && data.data.size() >= 1 && data.data.size() <= 800000
+        && data.expiresAtMs is int && data.expiresAtMs > 0;
     }
 
     function isValidAnnouncement(data) {
@@ -428,6 +450,27 @@ service cloud.firestore {
           )
         );
       allow delete: if isValidId(taskId) && isAdmin();
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(taskId)
+          && isValidId(chunkId)
+          && exists(/databases/$(database)/documents/tasks/$(taskId))
+          && hasProjectAccess(get(/databases/$(database)/documents/tasks/$(taskId)).data.projectId);
+        allow list: if isValidId(taskId)
+          && exists(/databases/$(database)/documents/tasks/$(taskId))
+          && hasProjectAccess(get(/databases/$(database)/documents/tasks/$(taskId)).data.projectId);
+        allow create: if isValidId(taskId)
+          && isValidId(chunkId)
+          && isAdmin()
+          && isValidTaskAttachmentChunk(incoming())
+          && exists(/databases/$(database)/documents/tasks/$(taskId));
+        allow delete: if isValidId(taskId)
+          && isValidId(chunkId)
+          && (
+            isAdmin() ||
+            (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis())
+          );
+      }
     }
 
     // Announcements collection

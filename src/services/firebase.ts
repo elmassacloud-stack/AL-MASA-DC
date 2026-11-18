@@ -16,14 +16,15 @@ import {
   collection,
   getDocFromServer,
   getDocs,
+  updateDoc,
   query,
   where,
   writeBatch,
   Firestore
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { SITE_DELIVERABLE_RETENTION_MS } from '../config';
-import { SiteDeliverable } from '../types';
+import { SITE_DELIVERABLE_RETENTION_MS, TASK_ATTACHMENT_RETENTION_MS } from '../config';
+import { SiteDeliverable, ProjectTask, TaskAttachment } from '../types';
 
 // Primary Firebase Application
 const primaryApp: FirebaseApp =
@@ -202,6 +203,7 @@ const SITE_DELIVERABLES_COLLECTION = 'siteDeliverables';
 const SITE_DELIVERABLES_CLEANUP_INTERVAL_MS = 2 * 60 * 1000; // فحص دوري كل دقيقتين
 
 const inFlightDeliverableDeletions = new Set<string>();
+const inFlightTaskAttachmentCleanups = new Set<string>();
 const pdfBlobUrlMemoryCache = new Map<string, string>();
 let deliverablesCleanupTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -229,6 +231,15 @@ export function revokePdfBlobUrl(deliverableId: string): void {
     URL.revokeObjectURL(cachedUrl);
     pdfBlobUrlMemoryCache.delete(deliverableId);
   }
+}
+
+export function revokeTaskBlobUrls(taskId: string): void {
+  const prefix = `task-${taskId}-`;
+  Array.from(pdfBlobUrlMemoryCache.keys()).forEach((key) => {
+    if (key.startsWith(prefix)) {
+      revokePdfBlobUrl(key);
+    }
+  });
 }
 
 export function revokeAllPdfBlobUrls(): void {
@@ -368,20 +379,25 @@ export async function purgeExpiredSiteDeliverablesFromFirebase(
 
 /**
  * Starts the periodic Firebase auto-cleanup scheduler that sweeps expired PDF deliverables
- * (older than 48 hours) immediately and then periodically to manage database and memory usage.
+ * and expired Admin task attachments (older than 48 hours) immediately and periodically.
  */
 export function startFirebaseDeliverablesAutoCleanupScheduler(
   getScope: () => DeliverableCleanupScope | null,
-  onPurged?: (deletedIds: string[]) => void
+  onPurged?: (deletedIds: string[]) => void,
+  onExtraSweep?: () => Promise<void> | void
 ): void {
   stopFirebaseDeliverablesAutoCleanupScheduler();
 
   const runSweep = async () => {
     const scope = getScope();
-    if (!scope || !scope.canAccessDeliverables) return;
-    const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(scope);
-    if (deletedIds.length > 0 && onPurged) {
-      onPurged(deletedIds);
+    if (scope && scope.canAccessDeliverables) {
+      const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(scope);
+      if (deletedIds.length > 0 && onPurged) {
+        onPurged(deletedIds);
+      }
+    }
+    if (onExtraSweep) {
+      await Promise.resolve(onExtraSweep()).catch(() => undefined);
     }
   };
 
@@ -399,4 +415,119 @@ export function stopFirebaseDeliverablesAutoCleanupScheduler(): void {
     clearInterval(deliverablesCleanupTimer);
     deliverablesCleanupTimer = null;
   }
+}
+
+/**
+ * ============================================================================
+ * 48-HOUR AUTO CLEANUP FOR ADMIN TASK ATTACHMENTS
+ * الحذف التلقائي لمرفقات المهام بعد مرور 48 ساعة من الرفع
+ * ============================================================================
+ */
+export function isTaskAttachmentExpired(
+  attachment: Pick<TaskAttachment, 'createdAt' | 'expiresAtMs'>,
+  nowMs = Date.now()
+): boolean {
+  if (typeof attachment.expiresAtMs === 'number' && Number.isFinite(attachment.expiresAtMs)) {
+    return nowMs >= attachment.expiresAtMs;
+  }
+  const uploadedAtMs = Date.parse(attachment.createdAt);
+  if (Number.isFinite(uploadedAtMs)) {
+    return nowMs - uploadedAtMs >= TASK_ATTACHMENT_RETENTION_MS;
+  }
+  return false;
+}
+
+export async function deleteTaskAttachmentChunksFromFirebase(
+  taskId: string,
+  attachmentId: string
+): Promise<void> {
+  if (!taskId || !attachmentId) return;
+  const chunksSnap = await getDocs(
+    query(collection(db, 'tasks', taskId, 'chunks'), where('attachmentId', '==', attachmentId))
+  );
+  if (!chunksSnap.empty) {
+    const docs = chunksSnap.docs;
+    for (let i = 0; i < docs.length; i += 400) {
+      const batch = writeBatch(db);
+      docs.slice(i, i + 400).forEach((d) => {
+        batch.delete(doc(db, 'tasks', taskId, 'chunks', d.id));
+      });
+      await batch.commit();
+    }
+  }
+  revokePdfBlobUrl(`task-${taskId}-${attachmentId}`);
+}
+
+export async function deleteAllTaskChunksFromFirebase(taskId: string): Promise<void> {
+  if (!taskId) return;
+  try {
+    const chunksSnap = await getDocs(collection(db, 'tasks', taskId, 'chunks'));
+    if (!chunksSnap.empty) {
+      const docs = chunksSnap.docs;
+      for (let i = 0; i < docs.length; i += 400) {
+        const batch = writeBatch(db);
+        docs.slice(i, i + 400).forEach((d) => {
+          batch.delete(doc(db, 'tasks', taskId, 'chunks', d.id));
+        });
+        await batch.commit();
+      }
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `tasks/${taskId}/chunks`);
+  } finally {
+    revokeTaskBlobUrls(taskId);
+  }
+}
+
+/**
+ * Purges expired task attachment chunks (> 48h) from Firestore,
+ * and if the current user is Admin, strips expired attachment entries from the parent Task document.
+ */
+export async function purgeExpiredTaskAttachmentsFromFirebase(
+  tasks: ProjectTask[],
+  isAdmin: boolean
+): Promise<Record<string, TaskAttachment[]>> {
+  if (!auth.currentUser || tasks.length === 0) return {};
+
+  const nowMs = Date.now();
+  const updatedAttachmentsByTaskId: Record<string, TaskAttachment[]> = {};
+
+  for (const task of tasks) {
+    const attachments = task.attachments || [];
+    if (attachments.length === 0) continue;
+
+    const expired = attachments.filter((att) => isTaskAttachmentExpired(att, nowMs));
+    if (expired.length === 0) continue;
+
+    const active = attachments.filter((att) => !isTaskAttachmentExpired(att, nowMs));
+    let anyChunkDeleted = false;
+
+    for (const att of expired) {
+      const lockKey = `${task.id}:${att.id}`;
+      if (inFlightTaskAttachmentCleanups.has(lockKey)) continue;
+      inFlightTaskAttachmentCleanups.add(lockKey);
+      try {
+        await deleteTaskAttachmentChunksFromFirebase(task.id, att.id);
+        anyChunkDeleted = true;
+      } catch {
+        // Ignore transient permission / server-clock skew / concurrent deletion errors
+      } finally {
+        inFlightTaskAttachmentCleanups.delete(lockKey);
+      }
+    }
+
+    if (isAdmin && (anyChunkDeleted || expired.length > 0)) {
+      try {
+        await updateDoc(doc(db, 'tasks', task.id), {
+          attachments: active,
+          updatedAt: new Date().toISOString()
+        });
+        updatedAttachmentsByTaskId[task.id] = active;
+      } catch {
+        // Ignore if task was already deleted or concurrently modified
+      }
+    }
+  }
+
+  return updatedAttachmentsByTaskId;
 }

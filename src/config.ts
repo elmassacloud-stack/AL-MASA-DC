@@ -182,6 +182,13 @@ export const MAX_REPORT_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB max per
 export const MAX_REPORT_ATTACHMENTS = 5; // Max 5 attachments per daily report
 export const REPORT_ATTACHMENT_CHUNK_SIZE_CHARS = 700000; // <= 700KB chars per Firestore chunk document
 
+// 9. ADMIN TASK ATTACHMENTS CONFIGURATION (إعدادات مرفقات المهام من مدير النظام - حذف تلقائي بعد 48 ساعة)
+export const TASK_ATTACHMENT_RETENTION_HOURS = 48;
+export const TASK_ATTACHMENT_RETENTION_MS = TASK_ATTACHMENT_RETENTION_HOURS * 60 * 60 * 1000;
+export const MAX_TASK_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB max per task file
+export const MAX_TASK_ATTACHMENTS = 5; // Max 5 attachments per task
+export const TASK_ATTACHMENT_CHUNK_SIZE_CHARS = 750000; // <= 750KB chars per Firestore chunk document
+
 export const DELIVERABLE_TYPE_CONFIG: Record<
   SiteDeliverableType,
   { labelAr: string; badgeClass: string }

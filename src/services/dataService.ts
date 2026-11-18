@@ -19,6 +19,8 @@ import {
   ReportAttachmentChunk,
   IssueReport,
   ProjectTask,
+  TaskAttachment,
+  TaskAttachmentChunk,
   Announcement,
   UserProfile,
   UserRole,
@@ -48,6 +50,10 @@ import {
   MAX_REPORT_ATTACHMENT_SIZE_BYTES,
   MAX_REPORT_ATTACHMENTS,
   REPORT_ATTACHMENT_CHUNK_SIZE_CHARS,
+  TASK_ATTACHMENT_RETENTION_MS,
+  MAX_TASK_ATTACHMENT_SIZE_BYTES,
+  MAX_TASK_ATTACHMENTS,
+  TASK_ATTACHMENT_CHUNK_SIZE_CHARS,
   isSuperAdminEmail,
   SUPER_ADMIN_EMAIL
 } from '../config';
@@ -61,6 +67,10 @@ import {
   isDeliverableExpired,
   deleteDeliverableFromFirebase,
   purgeExpiredSiteDeliverablesFromFirebase,
+  isTaskAttachmentExpired,
+  deleteTaskAttachmentChunksFromFirebase,
+  deleteAllTaskChunksFromFirebase,
+  purgeExpiredTaskAttachmentsFromFirebase,
   startFirebaseDeliverablesAutoCleanupScheduler,
   stopFirebaseDeliverablesAutoCleanupScheduler,
   cachePdfBlobUrl,
@@ -78,7 +88,8 @@ import {
   splitBase64IntoChunks,
   isExcelFileName,
   getExcelMimeType,
-  PreparedReportAttachment
+  PreparedReportAttachment,
+  PreparedTaskAttachment
 } from '../utils/pdfUtils';
 import {
   normalizeNotificationPreferences,
@@ -178,6 +189,8 @@ export interface ReportUploadProgress {
   totalBytes: number;
   stage: 'metadata' | 'uploading' | 'finalizing';
 }
+
+export type TaskUploadProgress = ReportUploadProgress;
 
 export interface CreateSiteDeliverablePayload {
   projectId: string;
@@ -582,7 +595,7 @@ class DataService {
       (a, b) => b.createdAt.localeCompare(a.createdAt)
     );
 
-    // 5. Tasks sync
+    // 5. Tasks sync (including 48-hour auto-cleanup for expired Admin attachments)
     this.subscribeToScopedCollection<ProjectTask>(
       'tasks',
       'projectId',
@@ -592,6 +605,13 @@ class DataService {
       (list) => {
         localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(list));
         this.notify();
+        const nowMs = Date.now();
+        const hasExpired = list.some((t) =>
+          (t.attachments || []).some((att) => isTaskAttachmentExpired(att, nowMs))
+        );
+        if (hasExpired) {
+          void this.cleanupExpiredTaskAttachments(list);
+        }
       },
       (a, b) => b.createdAt.localeCompare(a.createdAt)
     );
@@ -695,19 +715,18 @@ class DataService {
       }
     }
 
-    // Start Firebase periodic 48-hour auto-cleanup scheduler for memory & storage management
-    if (canDeliverables) {
-      startFirebaseDeliverablesAutoCleanupScheduler(
-        () => ({
-          canAccessDeliverables: canDeliverables,
-          hasAllProjects: allProjAccess,
-          assignedProjectIds: assigned
-        }),
-        (deletedIds) => {
-          this.removeDeliverablesFromLocalState(deletedIds);
-        }
-      );
-    }
+    // Start Firebase periodic 48-hour auto-cleanup scheduler for deliverables & task attachments
+    startFirebaseDeliverablesAutoCleanupScheduler(
+      () => ({
+        canAccessDeliverables: canDeliverables,
+        hasAllProjects: allProjAccess,
+        assignedProjectIds: assigned
+      }),
+      (deletedIds) => {
+        this.removeDeliverablesFromLocalState(deletedIds);
+      },
+      () => this.cleanupExpiredTaskAttachments()
+    );
 
     // 9. Real-time Notifications sync across devices
     this.seenNotificationIds.clear();
@@ -2063,7 +2082,7 @@ class DataService {
   }
 
   // --- Tasks ---
-  public getTasks(): ProjectTask[] {
+  private getTasksRaw(): ProjectTask[] {
     try {
       const data = localStorage.getItem(STORAGE_KEYS.TASKS);
       return data ? JSON.parse(data) : [];
@@ -2072,30 +2091,235 @@ class DataService {
     }
   }
 
-  public addTask(task: Omit<ProjectTask, 'id' | 'createdAt' | 'updatedAt' | 'status'>): ProjectTask {
-    const tasks = this.getTasks();
-    const now = new Date().toISOString();
+  public getTasks(): ProjectTask[] {
+    const nowMs = Date.now();
+    return this.getTasksRaw().map((t) => {
+      if (!t.attachments || t.attachments.length === 0) return t;
+      const activeAttachments = t.attachments.filter((att) => !isTaskAttachmentExpired(att, nowMs));
+      return activeAttachments.length === t.attachments.length
+        ? t
+        : { ...t, attachments: activeAttachments };
+    });
+  }
+
+  public async cleanupExpiredTaskAttachments(candidateTasks?: ProjectTask[]): Promise<void> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser) return;
+    const isAdmin = activeUser.role === 'admin' || isSuperAdminEmail(activeUser.email);
+    const sourceTasks = candidateTasks ?? this.getTasksRaw();
+    const nowMs = Date.now();
+
+    const hasAnyExpired = sourceTasks.some((t) =>
+      (t.attachments || []).some((att) => isTaskAttachmentExpired(att, nowMs))
+    );
+    if (!hasAnyExpired) return;
+
+    const updatedMap = await purgeExpiredTaskAttachmentsFromFirebase(sourceTasks, isAdmin);
+    const currentRaw = this.getTasksRaw();
+    let changed = false;
+    const nextTasks = currentRaw.map((t) => {
+      if (updatedMap[t.id]) {
+        changed = true;
+        return { ...t, attachments: updatedMap[t.id] };
+      }
+      if (t.attachments && t.attachments.some((att) => isTaskAttachmentExpired(att, nowMs))) {
+        changed = true;
+        return {
+          ...t,
+          attachments: t.attachments.filter((att) => !isTaskAttachmentExpired(att, nowMs))
+        };
+      }
+      return t;
+    });
+
+    if (changed) {
+      localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(nextTasks));
+      this.notify();
+    }
+  }
+
+  private async uploadTaskAttachmentChunks(
+    taskId: string,
+    preparedFiles: { item: PreparedTaskAttachment; chunks: string[]; expiresAtMs: number }[],
+    onProgress?: (progress: TaskUploadProgress) => void
+  ): Promise<string[]> {
+    const writtenChunkIds: string[] = [];
+    const totalFiles = preparedFiles.length;
+    const totalChunks = preparedFiles.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    const totalBytes = Math.max(
+      1,
+      preparedFiles.reduce((sum, entry) => sum + entry.item.fileSizeBytes, 0)
+    );
+    let uploadedChunks = 0;
+    const BATCH_CONCURRENCY = 5;
+
+    for (let fileIdx = 0; fileIdx < preparedFiles.length; fileIdx++) {
+      const { item, chunks, expiresAtMs } = preparedFiles[fileIdx];
+      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
+        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
+        const batchPromises: Promise<void>[] = [];
+
+        for (let chunkIdx = start; chunkIdx < end; chunkIdx++) {
+          const chunkId = `${item.attachmentId}_${chunkIdx}`;
+          const chunkDoc: TaskAttachmentChunk = {
+            attachmentId: item.attachmentId,
+            index: chunkIdx,
+            data: chunks[chunkIdx],
+            expiresAtMs
+          };
+
+          batchPromises.push(
+            setDoc(doc(db, 'tasks', taskId, 'chunks', chunkId), chunkDoc).then(() => {
+              writtenChunkIds.push(chunkId);
+              uploadedChunks += 1;
+              const isAllDone = uploadedChunks === totalChunks;
+              const percent = isAllDone
+                ? 96
+                : Math.min(95, Math.round(12 + (uploadedChunks / Math.max(1, totalChunks)) * 83));
+              const uploadedBytes = Math.min(
+                totalBytes,
+                Math.round((uploadedChunks / Math.max(1, totalChunks)) * totalBytes)
+              );
+              onProgress?.({
+                percent,
+                currentFileIndex: fileIdx + 1,
+                totalFiles,
+                currentFileName: item.name,
+                uploadedChunks,
+                totalChunks,
+                uploadedBytes,
+                totalBytes,
+                stage: isAllDone ? 'finalizing' : 'uploading'
+              });
+            })
+          );
+        }
+
+        await Promise.all(batchPromises);
+      }
+    }
+
+    return writtenChunkIds;
+  }
+
+  private async deleteTaskChunksByIds(taskId: string, chunkIds: string[]) {
+    for (const chunkId of chunkIds) {
+      await deleteDoc(doc(db, 'tasks', taskId, 'chunks', chunkId)).catch(() => undefined);
+    }
+  }
+
+  public async addTask(
+    task: Omit<ProjectTask, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'attachments'>,
+    pendingAttachments: PreparedTaskAttachment[] = [],
+    onProgress?: (progress: TaskUploadProgress) => void
+  ): Promise<ProjectTask> {
+    if (pendingAttachments.length > MAX_TASK_ATTACHMENTS) {
+      throw new Error(`الحد الأقصى للمرفقات في المهمة الواحدة هو ${MAX_TASK_ATTACHMENTS} ملفات.`);
+    }
+
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const expiresAtMs = nowMs + TASK_ATTACHMENT_RETENTION_MS;
+    const expiresAt = new Date(expiresAtMs).toISOString();
+    const uploaderId = auth.currentUser?.uid || task.createdBy;
+
+    const preparedChunked = pendingAttachments.map((item) => {
+      if (item.fileSizeBytes <= 0 || item.fileSizeBytes > MAX_TASK_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(`حجم الملف «${item.name}» يتجاوز الحد الأقصى المسموح (25 ميجابايت).`);
+      }
+      const chunks = splitBase64IntoChunks(item.base64, TASK_ATTACHMENT_CHUNK_SIZE_CHARS);
+      if (chunks.length === 0 || chunks.length >= 60) {
+        throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+      }
+      return { item, chunks, expiresAtMs };
+    });
+
+    const attachmentsMeta: TaskAttachment[] = preparedChunked.map(({ item, chunks }) =>
+      stripUndefined({
+        id: item.attachmentId,
+        name: item.name,
+        fileFormat: item.fileFormat,
+        mimeType: item.mimeType,
+        fileSizeBytes: item.fileSizeBytes,
+        chunkCount: chunks.length,
+        pageCount: item.pageCount,
+        uploadedBy: uploaderId,
+        createdAt: now,
+        expiresAt,
+        expiresAtMs
+      })
+    );
+
     const newTask: ProjectTask = stripUndefined({
       ...task,
-      id: 'task-' + Date.now().toString(36),
+      createdBy: uploaderId,
+      id: 'task-' + nowMs.toString(36) + '-' + Math.random().toString(36).substring(2, 5),
       status: 'pending',
+      ...(attachmentsMeta.length > 0 ? { attachments: attachmentsMeta } : {}),
       createdAt: now,
       updatedAt: now
     });
+
+    const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.fileSizeBytes, 0);
+    const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    if (preparedChunked.length > 0) {
+      onProgress?.({
+        percent: 8,
+        currentFileIndex: 1,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[0].item.name,
+        uploadedChunks: 0,
+        totalChunks,
+        uploadedBytes: 0,
+        totalBytes,
+        stage: 'metadata'
+      });
+    }
+
+    try {
+      await setDoc(doc(db, 'tasks', newTask.id), stripUndefined(newTask));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `tasks/${newTask.id}`);
+    }
+
+    if (preparedChunked.length > 0) {
+      let writtenIds: string[] = [];
+      try {
+        writtenIds = await this.uploadTaskAttachmentChunks(newTask.id, preparedChunked, onProgress);
+      } catch (error) {
+        await this.deleteTaskChunksByIds(newTask.id, writtenIds);
+        await deleteDoc(doc(db, 'tasks', newTask.id)).catch(() => undefined);
+        handleFirestoreError(error, OperationType.CREATE, `tasks/${newTask.id}/chunks`);
+      }
+
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: preparedChunked.length,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[preparedChunked.length - 1].item.name,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
+    }
+
+    const tasks = this.getTasksRaw();
     tasks.unshift(newTask);
     localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
 
-    setDoc(doc(db, 'tasks', newTask.id), stripUndefined(newTask)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `tasks/${newTask.id}`)
-    );
-
     const adminUser = this.getCurrentUser();
+    const attachNote =
+      attachmentsMeta.length > 0
+        ? ` مع ${attachmentsMeta.length} مرفق${attachmentsMeta.length > 1 ? 'ات' : ''} (متاحة 48 ساعة)`
+        : '';
     this.addNotification({
       title:
         newTask.priority === 'urgent'
           ? `مهمة عاجلة: ${newTask.title}`
           : `مهمة جديدة: ${newTask.title}`,
-      message: `تم إسناد مهمة ${newTask.priority === 'urgent' ? 'عاجلة ' : 'جديدة '}لمشروع ${newTask.projectName}، موعد التسليم: ${newTask.deadline}`,
+      message: `تم إسناد مهمة ${newTask.priority === 'urgent' ? 'عاجلة ' : 'جديدة '}لمشروع ${newTask.projectName}${attachNote}، موعد التسليم: ${newTask.deadline}`,
       type: 'task_assigned',
       priority: newTask.priority,
       targetRole: 'site',
@@ -2114,16 +2338,29 @@ class DataService {
     updates: Partial<
       Pick<
         ProjectTask,
-        'projectId' | 'projectName' | 'title' | 'description' | 'deadline' | 'priority' | 'status'
+        | 'projectId'
+        | 'projectName'
+        | 'title'
+        | 'description'
+        | 'deadline'
+        | 'priority'
+        | 'status'
+        | 'attachments'
       >
-    >
+    >,
+    pendingNewAttachments: PreparedTaskAttachment[] = [],
+    onProgress?: (progress: TaskUploadProgress) => void
   ): Promise<boolean> {
-    const tasks = this.getTasks();
+    const tasks = this.getTasksRaw();
     const idx = tasks.findIndex((t) => t.id === taskId);
     if (idx === -1) return false;
 
     const existing = tasks[idx];
-    const updatedAt = new Date().toISOString();
+    const nowMs = Date.now();
+    const updatedAt = new Date(nowMs).toISOString();
+    const expiresAtMs = nowMs + TASK_ATTACHMENT_RETENTION_MS;
+    const expiresAt = new Date(expiresAtMs).toISOString();
+
     const nextProjectId = updates.projectId ?? existing.projectId;
     const nextProjectName = (updates.projectName ?? existing.projectName).trim().slice(0, 200);
     const nextTitle = (updates.title ?? existing.title).trim().slice(0, 300);
@@ -2134,6 +2371,71 @@ class DataService {
 
     if (!nextTitle) return false;
 
+    const keptAttachments = (updates.attachments ?? existing.attachments ?? []).filter(
+      (att) => !isTaskAttachmentExpired(att, nowMs)
+    );
+
+    if (keptAttachments.length + pendingNewAttachments.length > MAX_TASK_ATTACHMENTS) {
+      throw new Error(`الحد الأقصى للمرفقات في المهمة الواحدة هو ${MAX_TASK_ATTACHMENTS} ملفات.`);
+    }
+
+    const preparedChunked = pendingNewAttachments.map((item) => {
+      if (item.fileSizeBytes <= 0 || item.fileSizeBytes > MAX_TASK_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(`حجم الملف «${item.name}» يتجاوز الحد الأقصى المسموح (25 ميجابايت).`);
+      }
+      const chunks = splitBase64IntoChunks(item.base64, TASK_ATTACHMENT_CHUNK_SIZE_CHARS);
+      if (chunks.length === 0 || chunks.length >= 60) {
+        throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+      }
+      return { item, chunks, expiresAtMs };
+    });
+
+    let writtenChunkIds: string[] = [];
+    if (preparedChunked.length > 0) {
+      const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.fileSizeBytes, 0);
+      const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+      onProgress?.({
+        percent: 10,
+        currentFileIndex: 1,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[0].item.name,
+        uploadedChunks: 0,
+        totalChunks,
+        uploadedBytes: 0,
+        totalBytes,
+        stage: 'uploading'
+      });
+
+      try {
+        writtenChunkIds = await this.uploadTaskAttachmentChunks(taskId, preparedChunked, onProgress);
+      } catch (error) {
+        await this.deleteTaskChunksByIds(taskId, writtenChunkIds);
+        handleFirestoreError(error, OperationType.CREATE, `tasks/${taskId}/chunks`);
+      }
+    }
+
+    const uploaderId = auth.currentUser?.uid || existing.createdBy;
+    const newlyUploadedMeta: TaskAttachment[] = preparedChunked.map(({ item, chunks }) =>
+      stripUndefined({
+        id: item.attachmentId,
+        name: item.name,
+        fileFormat: item.fileFormat,
+        mimeType: item.mimeType,
+        fileSizeBytes: item.fileSizeBytes,
+        chunkCount: chunks.length,
+        pageCount: item.pageCount,
+        uploadedBy: uploaderId,
+        createdAt: updatedAt,
+        expiresAt,
+        expiresAtMs
+      })
+    );
+
+    const nextAttachments = [...keptAttachments, ...newlyUploadedMeta].slice(
+      0,
+      MAX_TASK_ATTACHMENTS
+    );
+
     const updatedTask: ProjectTask = stripUndefined({
       ...existing,
       projectId: nextProjectId,
@@ -2143,11 +2445,9 @@ class DataService {
       deadline: nextDeadline,
       priority: nextPriority,
       status: nextStatus,
+      attachments: nextAttachments,
       updatedAt
     });
-
-    tasks[idx] = updatedTask;
-    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
 
     try {
       await updateDoc(
@@ -2160,12 +2460,46 @@ class DataService {
           deadline: nextDeadline,
           priority: nextPriority,
           status: nextStatus,
+          attachments: nextAttachments,
           updatedAt
         })
       );
     } catch (error) {
+      if (writtenChunkIds.length > 0) {
+        await this.deleteTaskChunksByIds(taskId, writtenChunkIds);
+      }
       handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`);
     }
+
+    // Delete orphaned chunks for any attachment removed by admin
+    const keptIds = new Set(nextAttachments.map((a) => a.id));
+    const removedAttachmentIds = (existing.attachments || [])
+      .filter((a) => !keptIds.has(a.id))
+      .map((a) => a.id);
+    if (removedAttachmentIds.length > 0) {
+      Promise.allSettled(
+        removedAttachmentIds.map((attId) => deleteTaskAttachmentChunksFromFirebase(taskId, attId))
+      ).catch(() => undefined);
+    }
+
+    if (preparedChunked.length > 0) {
+      const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.fileSizeBytes, 0);
+      const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: preparedChunked.length,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[preparedChunked.length - 1].item.name,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
+    }
+
+    tasks[idx] = updatedTask;
+    localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
 
     const adminUser = this.getCurrentUser();
     this.addNotification({
@@ -2187,9 +2521,54 @@ class DataService {
     return true;
   }
 
+  public async fetchTaskAttachmentUrl(
+    taskId: string,
+    attachment: TaskAttachment
+  ): Promise<string> {
+    if (isTaskAttachmentExpired(attachment)) {
+      void this.cleanupExpiredTaskAttachments();
+      throw new Error('انتهت مدة صلاحية هذا المرفق (48 ساعة) وتم حذفه تلقائياً من قاعدة البيانات.');
+    }
+
+    const cacheKey = `task-${taskId}-${attachment.id}`;
+    const cached = getCachedPdfBlobUrl(cacheKey);
+    if (cached) return cached;
+
+    let chunkDocs: TaskAttachmentChunk[] = [];
+    try {
+      const snap = await getDocs(
+        query(collection(db, 'tasks', taskId, 'chunks'), where('attachmentId', '==', attachment.id))
+      );
+      chunkDocs = snap.docs.map((d) => d.data() as TaskAttachmentChunk);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, `tasks/${taskId}/chunks`);
+    }
+
+    if (chunkDocs.length === 0) {
+      throw new Error('تعذر العثور على بيانات المرفق في قاعدة البيانات (ربما انتهت صلاحيته).');
+    }
+
+    chunkDocs.sort((a, b) => a.index - b.index);
+    const fullBase64 = chunkDocs.map((c) => c.data).join('');
+    const resolvedMime =
+      attachment.mimeType ||
+      (attachment.fileFormat === 'excel' || isExcelFileName(attachment.name)
+        ? getExcelMimeType(attachment.name)
+        : attachment.fileFormat === 'pdf' || attachment.name.toLowerCase().endsWith('.pdf')
+          ? 'application/pdf'
+          : 'application/octet-stream');
+
+    const blob = base64ToBlob(fullBase64, resolvedMime);
+    const url = URL.createObjectURL(blob);
+    cachePdfBlobUrl(cacheKey, url);
+    return url;
+  }
+
   public async deleteTask(taskId: string): Promise<boolean> {
-    const tasks = this.getTasks();
+    const tasks = this.getTasksRaw();
     if (!tasks.some((t) => t.id === taskId)) return false;
+
+    await deleteAllTaskChunksFromFirebase(taskId);
 
     try {
       await deleteDoc(doc(db, 'tasks', taskId));
