@@ -40,6 +40,8 @@ export const AdminReportsView: React.FC<Props> = ({
   const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
   const [adminFeedbackInput, setAdminFeedbackInput] = useState<string>('');
   const [savedFeedbackMsg, setSavedFeedbackMsg] = useState<boolean>(false);
+  const [feedbackErrorMsg, setFeedbackErrorMsg] = useState<string | null>(null);
+  const [isSavingFeedback, setIsSavingFeedback] = useState<boolean>(false);
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
 
   const handleCopyReportSummary = (report: DailyReport) => {
@@ -92,16 +94,31 @@ export const AdminReportsView: React.FC<Props> = ({
     setSelectedReport(report);
     setAdminFeedbackInput(report.adminFeedback || '');
     setSavedFeedbackMsg(false);
+    setFeedbackErrorMsg(null);
   };
 
-  const handleSaveFeedback = (status: DailyReport['status']) => {
-    if (!selectedReport) return;
-    dataService.updateReportStatus(selectedReport.id, status, adminFeedbackInput.trim());
-    setSelectedReport((prev: DailyReport | null) =>
-      prev ? { ...prev, status, adminFeedback: adminFeedbackInput.trim() } : null
-    );
-    setSavedFeedbackMsg(true);
-    setTimeout(() => setSavedFeedbackMsg(false), 2000);
+  const handleSaveFeedback = async (status: DailyReport['status']) => {
+    if (!selectedReport || isSavingFeedback) return;
+    setIsSavingFeedback(true);
+    setSavedFeedbackMsg(false);
+    setFeedbackErrorMsg(null);
+    const trimmedFeedback = adminFeedbackInput.trim().slice(0, 2000);
+    try {
+      await dataService.updateReportStatus(selectedReport.id, status, trimmedFeedback);
+      setSelectedReport((prev: DailyReport | null) =>
+        prev ? { ...prev, status, adminFeedback: trimmedFeedback } : null
+      );
+      setSavedFeedbackMsg(true);
+      setTimeout(() => setSavedFeedbackMsg(false), 2000);
+    } catch (err) {
+      setFeedbackErrorMsg(
+        err instanceof Error
+          ? err.message
+          : 'تعذر حفظ حالة التقرير في قاعدة البيانات. يرجى المحاولة مرة أخرى.'
+      );
+    } finally {
+      setIsSavingFeedback(false);
+    }
   };
 
   return (
@@ -476,11 +493,18 @@ export const AdminReportsView: React.FC<Props> = ({
                 </label>
                 <textarea
                   rows={2}
+                  maxLength={2000}
                   value={adminFeedbackInput}
                   onChange={(e) => setAdminFeedbackInput(e.target.value)}
                   placeholder="اكتب التوجيهات أو الملاحظات التي ستظهر لمهندس الموقع..."
                   className="w-full p-2.5 text-xs bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"
                 />
+
+                {feedbackErrorMsg && (
+                  <div className="text-xs text-red-600 dark:text-red-400 font-bold">
+                    {feedbackErrorMsg}
+                  </div>
+                )}
 
                 {savedFeedbackMsg && (
                   <div className="text-xs text-emerald-600 font-bold flex items-center gap-1">
@@ -491,15 +515,17 @@ export const AdminReportsView: React.FC<Props> = ({
 
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <button
+                    disabled={isSavingFeedback}
                     onClick={() => handleSaveFeedback('reviewed')}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
                   >
                     <CheckCircle2 className="w-4 h-4" />
                     <span>اعتماد التقرير (Reviewed)</span>
                   </button>
                   <button
+                    disabled={isSavingFeedback}
                     onClick={() => handleSaveFeedback('needs_revision')}
-                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
                   >
                     <Clock className="w-4 h-4" />
                     <span>طلب تعديل من الموقع</span>

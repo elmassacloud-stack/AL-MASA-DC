@@ -1571,19 +1571,44 @@ class DataService {
       MAX_REPORT_ATTACHMENTS
     );
 
+    const sanitizeRows = (rows: DailyReport['submittedWorks']) =>
+      (Array.isArray(rows) ? rows : []).slice(0, 200).map((item, rIdx) =>
+        stripUndefined({
+          id: (item.id || `row-${rIdx + 1}`).slice(0, 128),
+          rowNumber: rIdx + 1,
+          itemDescription: (item.itemDescription || '').trim().slice(0, 1000),
+          submittalNumber: (item.submittalNumber || '').trim().slice(0, 120),
+          rev: Number.isFinite(Number(item.rev)) ? Number(item.rev) : 0,
+          status: item.status
+        })
+      );
+
     const candidateId = `rep-${reportData.projectId}-${reportData.reportDate}`;
     const reportId =
       candidateId.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(candidateId)
         ? candidateId
         : 'rep-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6);
 
+    const sanitizedNotes =
+      reportData.notes !== undefined ? String(reportData.notes).trim().slice(0, 4000) : undefined;
+    const sanitizedFeedback =
+      reportData.adminFeedback !== undefined
+        ? String(reportData.adminFeedback).trim().slice(0, 2000)
+        : undefined;
+
     const newReport: DailyReport = stripUndefined({
       ...reportData,
-      senderId: auth.currentUser?.uid || reportData.senderId,
+      projectName: (reportData.projectName || '').trim().slice(0, 200),
+      reportDate: (reportData.reportDate || '').trim().slice(0, 20),
+      senderId: (auth.currentUser?.uid || reportData.senderId || '').trim().slice(0, 128),
       senderEmail: normalizeEmail(reportData.senderEmail || auth.currentUser?.email).slice(0, 200),
       senderName: (reportData.senderName || auth.currentUser?.displayName || 'مستخدم')
         .trim()
         .slice(0, 150),
+      submittedWorks: sanitizeRows(reportData.submittedWorks),
+      receivedWorks: sanitizeRows(reportData.receivedWorks),
+      notes: sanitizedNotes,
+      adminFeedback: sanitizedFeedback,
       id: reportId,
       attachments: finalAttachments,
       createdAt: now,
@@ -1759,12 +1784,12 @@ class DataService {
     }));
 
     const sanitizeRows = (rows: DailyReport['submittedWorks']) =>
-      rows.slice(0, 200).map((item, rIdx) =>
+      (Array.isArray(rows) ? rows : []).slice(0, 200).map((item, rIdx) =>
         stripUndefined({
-          id: item.id || `row-${rIdx + 1}`,
+          id: (item.id || `row-${rIdx + 1}`).slice(0, 128),
           rowNumber: rIdx + 1,
-          itemDescription: (item.itemDescription || '').trim(),
-          submittalNumber: (item.submittalNumber || '').trim(),
+          itemDescription: (item.itemDescription || '').trim().slice(0, 1000),
+          submittalNumber: (item.submittalNumber || '').trim().slice(0, 120),
           rev: Number.isFinite(Number(item.rev)) ? Number(item.rev) : 0,
           status: item.status
         })
@@ -1772,8 +1797,9 @@ class DataService {
 
     const nextSubmittedWorks = sanitizeRows(updates.submittedWorks ?? existing.submittedWorks);
     const nextReceivedWorks = sanitizeRows(updates.receivedWorks ?? existing.receivedWorks);
-    const nextNotes =
-      updates.notes !== undefined ? updates.notes.trim().slice(0, 4000) : existing.notes;
+    const nextNotes = (updates.notes !== undefined ? updates.notes : existing.notes || '')
+      .trim()
+      .slice(0, 4000);
     const nextAttachments = [...baseKeptAttachments, ...newlyUploadedMeta].slice(
       0,
       MAX_REPORT_ATTACHMENTS
@@ -1792,21 +1818,45 @@ class DataService {
       updatedAt
     });
 
+    const reportRef = doc(db, 'reports', reportId);
     try {
-      await updateDoc(
-        doc(db, 'reports', reportId),
-        stripUndefined({
-          projectId: nextProjectId,
-          projectName: nextProjectName,
-          reportDate: nextReportDate,
-          submittedWorks: nextSubmittedWorks,
-          receivedWorks: nextReceivedWorks,
-          notes: nextNotes ?? '',
-          attachments: nextAttachments,
-          status: 'submitted',
-          updatedAt
-        })
-      );
+      const remoteSnap = await getDoc(reportRef);
+      if (remoteSnap.exists()) {
+        await updateDoc(
+          reportRef,
+          stripUndefined({
+            projectId: nextProjectId,
+            projectName: nextProjectName,
+            reportDate: nextReportDate,
+            submittedWorks: nextSubmittedWorks,
+            receivedWorks: nextReceivedWorks,
+            notes: nextNotes,
+            attachments: nextAttachments,
+            status: 'submitted',
+            updatedAt
+          })
+        );
+      } else {
+        const currentUser = this.getCurrentUser();
+        const fallbackSenderId = (auth.currentUser?.uid || existing.senderId || currentUser?.id || '').slice(0, 128);
+        const fallbackSenderEmail = normalizeEmail(
+          existing.senderEmail || currentUser?.email || auth.currentUser?.email
+        ).slice(0, 200);
+        const fallbackSenderName = (existing.senderName || currentUser?.displayName || auth.currentUser?.displayName || 'مستخدم')
+          .trim()
+          .slice(0, 150);
+        await setDoc(
+          reportRef,
+          stripUndefined({
+            ...updatedReport,
+            id: reportId,
+            senderId: fallbackSenderId,
+            senderEmail: fallbackSenderEmail,
+            senderName: fallbackSenderName,
+            createdAt: existing.createdAt || updatedAt
+          })
+        );
+      }
     } catch (error) {
       if (writtenChunkIds.length > 0) {
         await this.deleteChunksByIds(reportId, writtenChunkIds);
@@ -1919,13 +1969,33 @@ class DataService {
     );
   }
 
-  public updateReportStatus(reportId: string, status: DailyReport['status'], adminFeedback?: string): boolean {
+  public async updateReportStatus(
+    reportId: string,
+    status: DailyReport['status'],
+    adminFeedback?: string
+  ): Promise<boolean> {
     const reports = this.getReports();
     const index = reports.findIndex((r) => r.id === reportId);
     if (index === -1) return false;
 
     const updatedAt = new Date().toISOString();
-    const nextFeedback = adminFeedback !== undefined ? adminFeedback : reports[index].adminFeedback;
+    const rawFeedback = adminFeedback !== undefined ? adminFeedback : reports[index].adminFeedback;
+    const nextFeedback =
+      rawFeedback !== undefined ? String(rawFeedback).trim().slice(0, 2000) : undefined;
+
+    try {
+      await updateDoc(
+        doc(db, 'reports', reportId),
+        stripUndefined({
+          status,
+          adminFeedback: nextFeedback,
+          updatedAt
+        })
+      );
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
+    }
+
     reports[index] = stripUndefined({
       ...reports[index],
       status,
@@ -1934,15 +2004,6 @@ class DataService {
     });
     localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
 
-    updateDoc(
-      doc(db, 'reports', reportId),
-      stripUndefined({
-        status,
-        adminFeedback: nextFeedback,
-        updatedAt
-      })
-    ).catch((error) => handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`));
-
     const adminUser = this.getCurrentUser();
     const recipientUserId = this.resolveRecipientUserId(
       reports[index].senderId,
@@ -1950,7 +2011,7 @@ class DataService {
     );
     this.addNotification({
       title: `مراجعة تقرير: ${reports[index].projectName}`,
-      message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${status}"${adminFeedback ? ` مع ملاحظات: ${adminFeedback}` : ''}`,
+      message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${status}"${nextFeedback ? ` مع ملاحظات: ${nextFeedback}` : ''}`,
       type: 'report_reviewed',
       targetRole: 'site',
       targetUserId: recipientUserId,

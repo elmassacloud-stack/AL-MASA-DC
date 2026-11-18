@@ -41,6 +41,7 @@ export const MySubmissionsView: React.FC<Props> = ({
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
   const canEditReport = (report: DailyReport) =>
+    currentUser.role === 'admin' ||
     report.senderId === currentUser.id ||
     report.senderEmail.toLowerCase() === currentUser.email.toLowerCase();
 

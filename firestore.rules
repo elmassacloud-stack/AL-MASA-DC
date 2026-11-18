@@ -23,7 +23,10 @@ service cloud.firestore {
     }
 
     function isSuperAdmin() {
-      return isSignedIn() && request.auth.token.email == 'elmassacloud@gmail.com';
+      return isSignedIn()
+        && ('email' in request.auth.token)
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'elmassacloud@gmail.com';
     }
 
     function userDocPath(uid) {
@@ -75,6 +78,20 @@ service cloud.firestore {
 
     function hasSiteDeliverablesAccess() {
       return isAdmin() || isActiveUser();
+    }
+
+    function isReportOwner(reportData) {
+      return isSignedIn() && (
+        ('senderId' in reportData && reportData.senderId == request.auth.uid) ||
+        (
+          'senderEmail' in reportData &&
+          reportData.senderEmail is string &&
+          (
+            (userDocExists() && 'email' in currentUserData() && currentUserData().email is string && reportData.senderEmail.lower() == currentUserData().email.lower()) ||
+            ('email' in request.auth.token && request.auth.token.email is string && reportData.senderEmail.lower() == request.auth.token.email.lower())
+          )
+        )
+      );
     }
 
     function isValidNotificationPreferences(prefs) {
@@ -322,7 +339,7 @@ service cloud.firestore {
             && incoming().diff(existing()).affectedKeys().hasOnly(['notificationPreferences', 'updatedAt'])
           )
         );
-      allow delete: if isValidId(userId) && isAdmin() && existing().email != 'elmassacloud@gmail.com';
+      allow delete: if isValidId(userId) && isAdmin() && existing().email.lower() != 'elmassacloud@gmail.com';
     }
 
     // Projects collection
@@ -347,17 +364,24 @@ service cloud.firestore {
         && (isAdmin() || reportId == 'rep-' + incoming().projectId + '-' + incoming().reportDate);
       allow update: if isValidId(reportId)
         && isValidDailyReport(incoming())
-        && incoming().createdAt == existing().createdAt
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
         && (
           isAdmin() ||
           (
             isActiveUser()
             && (
-              existing().senderId == request.auth.uid ||
-              (userDocExists() && existing().senderEmail.lower() == currentUserData().email.lower())
+              (
+                isReportOwner(existing())
+                && (
+                  (hasProjectAccess(existing().projectId) && hasProjectAccess(incoming().projectId)) ||
+                  incoming().projectId == existing().projectId
+                )
+              ) ||
+              (
+                hasProjectAccess(existing().projectId)
+                && hasProjectAccess(incoming().projectId)
+              )
             )
-            && hasProjectAccess(existing().projectId)
-            && hasProjectAccess(incoming().projectId)
             && incoming().senderId == existing().senderId
             && incoming().senderEmail == existing().senderEmail
             && incoming().status == 'submitted'
@@ -388,13 +412,13 @@ service cloud.firestore {
           && isValidId(chunkId)
           && isValidReportAttachmentChunk(incoming())
           && exists(/databases/$(database)/documents/reports/$(reportId))
-          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId)
           && (
             isAdmin() ||
-            get(/databases/$(database)/documents/reports/$(reportId)).data.senderId == request.auth.uid ||
             (
-              userDocExists() &&
-              get(/databases/$(database)/documents/reports/$(reportId)).data.senderEmail.lower() == currentUserData().email.lower()
+              isActiveUser() && (
+                hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId) ||
+                isReportOwner(get(/databases/$(database)/documents/reports/$(reportId)).data)
+              )
             )
           );
         allow delete: if isValidId(reportId)
@@ -403,13 +427,10 @@ service cloud.firestore {
             isAdmin() ||
             (
               exists(/databases/$(database)/documents/reports/$(reportId))
-              && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId)
+              && isActiveUser()
               && (
-                get(/databases/$(database)/documents/reports/$(reportId)).data.senderId == request.auth.uid ||
-                (
-                  userDocExists() &&
-                  get(/databases/$(database)/documents/reports/$(reportId)).data.senderEmail.lower() == currentUserData().email.lower()
-                )
+                hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId) ||
+                isReportOwner(get(/databases/$(database)/documents/reports/$(reportId)).data)
               )
             )
           );

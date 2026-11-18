@@ -786,6 +786,7 @@ export const DailyReportForm: React.FC<Props> = ({
             </label>
             <textarea
               rows={3}
+              maxLength={4000}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="اكتب أي ملاحظات تتعلق بظروف العمل، تأخير الاستشاري، أو تفاصيل خاصة ببنود اليوم..."
