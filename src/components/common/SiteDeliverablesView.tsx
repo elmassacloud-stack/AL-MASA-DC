@@ -63,6 +63,16 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     [currentUser, projects]
   );
 
+  // All active user emails can upload to any active project (assigned projects listed first)
+  const uploadProjects = useMemo(() => {
+    if (isAdmin || accessibleProjects.length === 0) {
+      return projects.length > 0 ? projects : accessibleProjects;
+    }
+    const accessibleIds = new Set(accessibleProjects.map((p) => p.id));
+    const remaining = projects.filter((p) => !accessibleIds.has(p.id));
+    return [...accessibleProjects, ...remaining];
+  }, [isAdmin, accessibleProjects, projects]);
+
   // Live tick every 30 seconds so 48h countdown badges stay accurate
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   useEffect(() => {
@@ -74,7 +84,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   const [showUploadForm, setShowUploadForm] = useState<boolean>(!isAdmin);
 
   // Upload form state
-  const [projectId, setProjectId] = useState<string>(accessibleProjects[0]?.id || '');
+  const [projectId, setProjectId] = useState<string>(uploadProjects[0]?.id || '');
   const [deliverableType, setDeliverableType] = useState<SiteDeliverableType>('ir');
   const [title, setTitle] = useState<string>('');
   const [submittalNumber, setSubmittalNumber] = useState<string>('');
@@ -114,19 +124,19 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   const [isDeletingId, setIsDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!projectId && accessibleProjects[0]?.id) {
-      setProjectId(accessibleProjects[0].id);
-    } else if (projectId && !accessibleProjects.some((p) => p.id === projectId)) {
-      setProjectId(accessibleProjects[0]?.id || '');
+    if (!projectId && uploadProjects[0]?.id) {
+      setProjectId(uploadProjects[0].id);
+    } else if (projectId && !uploadProjects.some((p) => p.id === projectId)) {
+      setProjectId(uploadProjects[0]?.id || '');
     }
     if (
       filterProjectId !== 'all' &&
-      accessibleProjects.length > 0 &&
-      !accessibleProjects.some((p) => p.id === filterProjectId)
+      uploadProjects.length > 0 &&
+      !uploadProjects.some((p) => p.id === filterProjectId)
     ) {
       setFilterProjectId('all');
     }
-  }, [accessibleProjects, projectId, filterProjectId]);
+  }, [uploadProjects, projectId, filterProjectId]);
 
   const showSuccess = (msg: string) => {
     setSuccessBanner(msg);
@@ -163,9 +173,9 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     e.preventDefault();
     setFormError(null);
 
-    const project = accessibleProjects.find((p) => p.id === projectId);
+    const project = uploadProjects.find((p) => p.id === projectId);
     if (!project) {
-      setFormError('يرجى اختيار المشروع المصرح به أولاً.');
+      setFormError('يرجى اختيار المشروع أولاً.');
       return;
     }
     if (!title.trim()) {
@@ -225,8 +235,22 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     } catch (err) {
       const rawMsg = err instanceof Error ? err.message : '';
       if (rawMsg.includes('Missing or insufficient permissions') || rawMsg.includes('PERMISSION_DENIED')) {
+        let failedPath = 'siteDeliverables';
+        try {
+          const parsed = JSON.parse(rawMsg) as { path?: string };
+          if (parsed?.path) failedPath = parsed.path;
+        } catch {
+          // ignore non-JSON errors
+        }
+        const hasAssigned =
+          Boolean(currentUser.allProjects) ||
+          (Array.isArray(currentUser.assignedProjects) &&
+            currentUser.assignedProjects.includes(project.id));
+        const delivAccess = currentUser.canAccessSiteDeliverables !== false;
         setFormError(
-          'تعذر إرسال الملف لعدم كفاية الصلاحيات على هذا المشروع أو تبويب تسليمات الموقع. يرجى تحديث الصفحة أو مراجعة مسؤول النظام للتحقق من إسناد المشروع وصلاحية تسليمات الموقع لحسابك.'
+          `تعذر إرسال الملف لعدم كفاية الصلاحيات (${failedPath} | مشروع: ${project.id} | إسناد: ${
+            hasAssigned ? 'نعم' : 'لا'
+          } | تبويب: ${delivAccess ? 'مفعل' : 'معطل'}). يرجى تسجيل الخروج ثم إعادة الدخول أو تحديث صلاحيات الحساب من إدارة المستخدمين.`
         );
       } else {
         setFormError(
@@ -324,11 +348,16 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     }
   };
 
-  // Scope visible deliverables by project access & active 48h window
+  // Scope visible deliverables by project access or own uploads & active 48h window
   const scopedDeliverables = useMemo(() => {
     return deliverables
       .filter((d) => d.expiresAtMs > nowTick)
-      .filter((d) => isAdmin || canAccessProject(currentUser, d.projectId));
+      .filter(
+        (d) =>
+          isAdmin ||
+          d.senderId === currentUser.id ||
+          canAccessProject(currentUser, d.projectId)
+      );
   }, [deliverables, currentUser, isAdmin, nowTick]);
 
   const projectCountsMap = useMemo(() => {
@@ -383,9 +412,17 @@ export const SiteDeliverablesView: React.FC<Props> = ({
     };
   }, [projectScopedDeliverables]);
 
+  const filterProjects = useMemo(() => {
+    const visibleProjectIds = new Set(scopedDeliverables.map((d) => d.projectId));
+    const list = uploadProjects.filter(
+      (p) => isAdmin || canAccessProject(currentUser, p.id) || visibleProjectIds.has(p.id)
+    );
+    return list.length > 0 ? list : uploadProjects;
+  }, [uploadProjects, scopedDeliverables, isAdmin, currentUser]);
+
   const selectedFilterProject = useMemo(
-    () => accessibleProjects.find((p) => p.id === filterProjectId) || null,
-    [accessibleProjects, filterProjectId]
+    () => filterProjects.find((p) => p.id === filterProjectId) || null,
+    [filterProjects, filterProjectId]
   );
 
   const typeEntries = Object.entries(DELIVERABLE_TYPE_CONFIG) as [
@@ -433,7 +470,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
               <option value="all" className="dark:bg-slate-900">
                 جميع المشاريع ({scopedDeliverables.length})
               </option>
-              {accessibleProjects.map((p) => (
+              {filterProjects.map((p) => (
                 <option key={p.id} value={p.id} className="dark:bg-slate-900">
                   {p.name} ({p.code}) — {projectCountsMap.get(p.id) || 0}
                 </option>
@@ -498,10 +535,10 @@ export const SiteDeliverablesView: React.FC<Props> = ({
             </span>
           </div>
 
-          {accessibleProjects.length === 0 ? (
+          {uploadProjects.length === 0 ? (
             <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 text-xs sm:text-sm text-amber-800 dark:text-amber-300 font-semibold flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 shrink-0" />
-              <span>لا توجد مشاريع مسندة إلى حسابك حالياً. يرجى التواصل مع مسؤول النظام.</span>
+              <span>لا توجد مشاريع مسجلة في النظام حالياً. يرجى التواصل مع مسؤول النظام لإضافة مشروع.</span>
             </div>
           ) : (
             <form onSubmit={handleSubmitDeliverable} className="space-y-4 text-xs sm:text-sm">
@@ -523,7 +560,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
                     required
                     className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-semibold"
                   >
-                    {accessibleProjects.map((p) => (
+                    {uploadProjects.map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.name} ({p.code})
                       </option>
@@ -830,7 +867,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           className="h-10 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white font-semibold"
         >
           <option value="all">جميع المشاريع ({scopedDeliverables.length})</option>
-          {accessibleProjects.map((p) => (
+          {filterProjects.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name} ({p.code}) — {projectCountsMap.get(p.id) || 0}
             </option>

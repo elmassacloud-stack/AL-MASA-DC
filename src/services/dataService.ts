@@ -101,6 +101,50 @@ const STORAGE_KEYS = {
   CUTOFF_HOUR: 'dc_cutoff_hour'
 };
 
+function normalizeEmail(email?: string | null): string {
+  return (email || '').trim().toLowerCase();
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function normalizeAssignedProjectsList(projects?: unknown): string[] {
+  if (!Array.isArray(projects)) return [];
+  return Array.from(
+    new Set(projects.filter((id): id is string => typeof id === 'string' && id.trim().length > 0))
+  );
+}
+
+function normalizeUserProfile(raw: Partial<UserProfile>, docId: string, fallbackEmail?: string): UserProfile {
+  const email = normalizeEmail(raw.email || fallbackEmail);
+  const role: UserRole = raw.role === 'admin' || isSuperAdminEmail(email) ? 'admin' : 'site';
+  const now = new Date().toISOString();
+  return stripUndefined({
+    id: docId,
+    email,
+    displayName: (raw.displayName || email || 'مستخدم').trim().slice(0, 150),
+    jobTitle: raw.jobTitle !== undefined ? String(raw.jobTitle).trim().slice(0, 150) : undefined,
+    role,
+    allProjects: role === 'admin' ? true : raw.allProjects === true,
+    canAccessExecutedWorks: role === 'admin' ? true : raw.canAccessExecutedWorks !== false,
+    canAccessSiteDeliverables: true,
+    assignedProjects: normalizeAssignedProjectsList(raw.assignedProjects),
+    status: raw.status === 'disabled' ? 'disabled' : 'active',
+    phone: raw.phone ? String(raw.phone).trim().slice(0, 40) : undefined,
+    notificationPreferences: raw.notificationPreferences
+      ? normalizeNotificationPreferences(raw.notificationPreferences)
+      : undefined,
+    createdAt: raw.createdAt || now,
+    updatedAt: raw.updatedAt || now
+  });
+}
+
 export interface CreateUserPayload {
   displayName: string;
   jobTitle: string;
@@ -242,6 +286,15 @@ class DataService {
   public clearSession() {
     this.stopRealtimeSync();
     localStorage.removeItem(STORAGE_KEYS.CURRENT_USER);
+    localStorage.removeItem(STORAGE_KEYS.PROJECTS);
+    localStorage.removeItem(STORAGE_KEYS.REPORTS);
+    localStorage.removeItem(STORAGE_KEYS.ISSUES);
+    localStorage.removeItem(STORAGE_KEYS.TASKS);
+    localStorage.removeItem(STORAGE_KEYS.ANNOUNCEMENTS);
+    localStorage.removeItem(STORAGE_KEYS.EXECUTED_WORKS);
+    localStorage.removeItem(STORAGE_KEYS.SITE_DELIVERABLES);
+    localStorage.removeItem(STORAGE_KEYS.USERS);
+    localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
     this.notify();
   }
 
@@ -250,7 +303,7 @@ class DataService {
    * and enforces active status & Super Admin bootstrapping.
    */
   public async resolveAuthenticatedProfile(firebaseUser: FirebaseUser): Promise<UserProfile> {
-    const email = (firebaseUser.email || '').trim().toLowerCase();
+    const email = normalizeEmail(firebaseUser.email);
     const uid = firebaseUser.uid;
     const isSuper = isSuperAdminEmail(email);
 
@@ -260,7 +313,7 @@ class DataService {
     try {
       const snap = await getDoc(userDocRef);
       if (snap.exists()) {
-        profile = { ...(snap.data() as UserProfile), id: uid };
+        profile = normalizeUserProfile(snap.data() as Partial<UserProfile>, uid, email);
       }
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, `users/${uid}`);
@@ -346,10 +399,83 @@ class DataService {
     }
   }
 
+  private resolveRecipientUserId(userId?: string, email?: string): string | undefined {
+    const cleanEmail = normalizeEmail(email);
+    const users = this.getUsers();
+    const matched = users.find(
+      (u) => (userId && u.id === userId) || (cleanEmail && normalizeEmail(u.email) === cleanEmail)
+    );
+    return matched?.id || userId || undefined;
+  }
+
+  private isNotificationTargetingUser(notif: AppNotification, user: UserProfile): boolean {
+    if (!notif.targetUserId) return true;
+    if (notif.targetUserId === user.id) return true;
+    const userEmail = normalizeEmail(user.email);
+    return Boolean(userEmail && normalizeEmail(notif.targetUserId) === userEmail);
+  }
+
+  private subscribeToScopedCollection<T>(
+    collectionName: string,
+    fieldName: 'id' | 'projectId',
+    allProjAccess: boolean,
+    assigned: string[],
+    storageKey: string,
+    onItems: (docs: T[]) => void,
+    sortFn?: (a: T, b: T) => number
+  ) {
+    if (allProjAccess) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, collectionName),
+          (snap) => {
+            const list = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
+            if (sortFn) list.sort(sortFn);
+            onItems(list);
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, collectionName)
+        )
+      );
+      return;
+    }
+
+    if (assigned.length === 0) {
+      localStorage.setItem(storageKey, JSON.stringify([]));
+      this.notify();
+      return;
+    }
+
+    const batches = chunkArray(assigned, 30);
+    const batchResults: T[][] = batches.map(() => []);
+
+    batches.forEach((batchIds, batchIndex) => {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, collectionName), where(fieldName, 'in', batchIds)),
+          (snap) => {
+            batchResults[batchIndex] = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
+            const mergedMap = new Map<string, T>();
+            batchResults.forEach((items) => {
+              items.forEach((item) => {
+                const itemId = (item as unknown as { id?: string }).id;
+                if (itemId) mergedMap.set(itemId, item);
+              });
+            });
+            const merged = Array.from(mergedMap.values());
+            if (sortFn) merged.sort(sortFn);
+            onItems(merged);
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, collectionName)
+        )
+      );
+    });
+  }
+
   public startRealtimeSync(user: UserProfile) {
     const canExecWorks = canAccessExecutedWorksTab(user);
     const canDeliverables = canAccessSiteDeliverablesTab(user);
-    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : (user.assignedProjects || []).join(',')}:${canExecWorks ? '1' : '0'}:${canDeliverables ? '1' : '0'}`;
+    const assigned = normalizeAssignedProjectsList(user.assignedProjects);
+    const signature = `${user.id}:${user.role}:${user.allProjects ? 'all' : assigned.join(',')}:${canExecWorks ? '1' : '0'}:${canDeliverables ? '1' : '0'}`;
     if (this.currentSyncSignature === signature && this.firestoreUnsubs.length > 0) {
       return;
     }
@@ -358,14 +484,15 @@ class DataService {
 
     const isAdmin = user.role === 'admin' || isSuperAdminEmail(user.email);
     const allProjAccess = hasAllProjectsAccess(user);
-    const assigned = (user.assignedProjects || []).slice(0, 30);
 
     // 1. User profile / Users list sync
     if (isAdmin) {
       const unsubUsers = onSnapshot(
         collection(db, 'users'),
         (snap) => {
-          const list = snap.docs.map((d) => d.data() as UserProfile);
+          const list = snap.docs.map((d) =>
+            normalizeUserProfile(d.data() as Partial<UserProfile>, d.id)
+          );
           if (list.length > 0) {
             localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(list));
             const active = this.getCurrentUser();
@@ -388,7 +515,11 @@ class DataService {
             this.clearSession();
             return;
           }
-          const updatedProfile = snap.data() as UserProfile;
+          const updatedProfile = normalizeUserProfile(
+            snap.data() as Partial<UserProfile>,
+            user.id,
+            user.email
+          );
           if (updatedProfile.status === 'disabled') {
             this.clearSession();
             return;
@@ -397,7 +528,8 @@ class DataService {
           localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedProfile));
           const nextCanExec = canAccessExecutedWorksTab(updatedProfile);
           const nextCanDeliverables = canAccessSiteDeliverablesTab(updatedProfile);
-          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : (updatedProfile.assignedProjects || []).join(',')}:${nextCanExec ? '1' : '0'}:${nextCanDeliverables ? '1' : '0'}`;
+          const nextAssigned = normalizeAssignedProjectsList(updatedProfile.assignedProjects);
+          const nextSig = `${updatedProfile.id}:${updatedProfile.role}:${updatedProfile.allProjects ? 'all' : nextAssigned.join(',')}:${nextCanExec ? '1' : '0'}:${nextCanDeliverables ? '1' : '0'}`;
           if (nextSig !== this.currentSyncSignature) {
             this.startRealtimeSync(updatedProfile);
           } else {
@@ -409,137 +541,60 @@ class DataService {
       this.firestoreUnsubs.push(unsubSelf);
     }
 
-    // 2. Projects sync
-    if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'projects'),
-          (snap) => {
-            const list = snap.docs.map((d) => d.data() as Project);
-            localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'projects')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'projects'), where('id', 'in', assigned)),
-          (snap) => {
-            const list = snap.docs.map((d) => d.data() as Project);
-            localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'projects')
-        )
-      );
-    } else {
-      localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify([]));
-      this.notify();
-    }
+    // 2. Projects sync (available to all active users so every email can upload in Site Deliverables)
+    this.subscribeToScopedCollection<Project>(
+      'projects',
+      'id',
+      true,
+      assigned,
+      STORAGE_KEYS.PROJECTS,
+      (list) => {
+        localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(list));
+        this.notify();
+      }
+    );
 
     // 3. Reports sync
-    if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'reports'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as DailyReport)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'reports')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'reports'), where('projectId', 'in', assigned)),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as DailyReport)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'reports')
-        )
-      );
-    } else {
-      localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify([]));
-      this.notify();
-    }
+    this.subscribeToScopedCollection<DailyReport>(
+      'reports',
+      'projectId',
+      allProjAccess,
+      assigned,
+      STORAGE_KEYS.REPORTS,
+      (list) => {
+        localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(list));
+        this.notify();
+      },
+      (a, b) => b.createdAt.localeCompare(a.createdAt)
+    );
 
     // 4. Issues sync
-    if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'issues'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as IssueReport)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'issues')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'issues'), where('projectId', 'in', assigned)),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as IssueReport)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'issues')
-        )
-      );
-    } else {
-      localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify([]));
-      this.notify();
-    }
+    this.subscribeToScopedCollection<IssueReport>(
+      'issues',
+      'projectId',
+      allProjAccess,
+      assigned,
+      STORAGE_KEYS.ISSUES,
+      (list) => {
+        localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list));
+        this.notify();
+      },
+      (a, b) => b.createdAt.localeCompare(a.createdAt)
+    );
 
     // 5. Tasks sync
-    if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'tasks'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as ProjectTask)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'tasks')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'tasks'), where('projectId', 'in', assigned)),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as ProjectTask)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'tasks')
-        )
-      );
-    } else {
-      localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify([]));
-      this.notify();
-    }
+    this.subscribeToScopedCollection<ProjectTask>(
+      'tasks',
+      'projectId',
+      allProjAccess,
+      assigned,
+      STORAGE_KEYS.TASKS,
+      (list) => {
+        localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(list));
+        this.notify();
+      },
+      (a, b) => b.createdAt.localeCompare(a.createdAt)
+    );
 
     // 6. Announcements sync
     this.firestoreUnsubs.push(
@@ -547,7 +602,7 @@ class DataService {
         collection(db, 'announcements'),
         (snap) => {
           const list = snap.docs
-            .map((d) => d.data() as Announcement)
+            .map((d) => ({ ...(d.data() as Announcement), id: d.id }))
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
           localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(list));
           this.notify();
@@ -560,37 +615,19 @@ class DataService {
     if (!canExecWorks) {
       localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
       this.notify();
-    } else if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'executedWorks'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as ExecutedWork)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'executedWorks')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'executedWorks'), where('projectId', 'in', assigned)),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => d.data() as ExecutedWork)
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'executedWorks')
-        )
-      );
     } else {
-      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
-      this.notify();
+      this.subscribeToScopedCollection<ExecutedWork>(
+        'executedWorks',
+        'projectId',
+        allProjAccess,
+        assigned,
+        STORAGE_KEYS.EXECUTED_WORKS,
+        (list) => {
+          localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+          this.notify();
+        },
+        (a, b) => b.createdAt.localeCompare(a.createdAt)
+      );
     }
 
     // 8. Site PDF Deliverables sync (48-hour auto-expiring items)
@@ -613,28 +650,49 @@ class DataService {
       localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify([]));
       this.notify();
     } else if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'siteDeliverables'),
-          (snap) => {
-            processDeliverablesSnapshot(snap.docs.map((d) => d.data() as SiteDeliverable));
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'siteDeliverables'), where('projectId', 'in', assigned)),
-          (snap) => {
-            processDeliverablesSnapshot(snap.docs.map((d) => d.data() as SiteDeliverable));
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
-        )
+      this.subscribeToScopedCollection<SiteDeliverable>(
+        'siteDeliverables',
+        'projectId',
+        true,
+        assigned,
+        STORAGE_KEYS.SITE_DELIVERABLES,
+        processDeliverablesSnapshot
       );
     } else {
-      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify([]));
-      this.notify();
+      let ownDeliverables: SiteDeliverable[] = [];
+      let projectDeliverables: SiteDeliverable[] = [];
+      const mergeAndProcessDeliverables = () => {
+        const mergedMap = new Map<string, SiteDeliverable>();
+        [...projectDeliverables, ...ownDeliverables].forEach((item) => {
+          if (item.id) mergedMap.set(item.id, item);
+        });
+        processDeliverablesSnapshot(Array.from(mergedMap.values()));
+      };
+
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'siteDeliverables'), where('senderId', '==', user.id)),
+          (snap) => {
+            ownDeliverables = snap.docs.map((d) => ({ ...(d.data() as SiteDeliverable), id: d.id }));
+            mergeAndProcessDeliverables();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
+        )
+      );
+
+      if (assigned.length > 0) {
+        this.subscribeToScopedCollection<SiteDeliverable>(
+          'siteDeliverables',
+          'projectId',
+          false,
+          assigned,
+          STORAGE_KEYS.SITE_DELIVERABLES,
+          (list) => {
+            projectDeliverables = list;
+            mergeAndProcessDeliverables();
+          }
+        );
+      }
     }
 
     // Start Firebase periodic 48-hour auto-cleanup scheduler for memory & storage management
@@ -662,7 +720,7 @@ class DataService {
           isRead: n.isRead || (Array.isArray(n.readBy) && n.readBy.includes(user.id))
         }))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .slice(0, 60);
+        .slice(0, 100);
 
       if (!this.notificationsInitialized) {
         normalized.forEach((n) => this.seenNotificationIds.add(n.id));
@@ -674,17 +732,19 @@ class DataService {
             const latestUser = this.getCurrentUser() || user;
             const latestIsAdmin =
               latestUser.role === 'admin' || isSuperAdminEmail(latestUser.email);
-            const isFromSelf = n.senderId && n.senderId === latestUser.id;
-            const visibleToUser = latestIsAdmin
+            const isFromSelf = Boolean(n.senderId && n.senderId === latestUser.id);
+            const targetMatchesUser = this.isNotificationTargetingUser(n, latestUser);
+            const roleMatchesUser = latestIsAdmin
               ? !n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all'
-              : n.targetUserId === latestUser.id ||
-                n.targetRole === 'site' ||
-                n.targetRole === 'all';
+              : n.targetRole === 'site' || n.targetRole === 'all' || (!n.targetRole && Boolean(n.targetUserId));
+            const visibleToUser = n.targetUserId
+              ? targetMatchesUser
+              : roleMatchesUser;
             const projectAllowed =
               latestIsAdmin ||
               !n.projectId ||
               hasAllProjectsAccess(latestUser) ||
-              (latestUser.assignedProjects || []).includes(n.projectId);
+              normalizeAssignedProjectsList(latestUser.assignedProjects).includes(n.projectId);
             const allowedByPrefs = isNotificationAllowedForUser(
               n,
               latestUser.notificationPreferences
@@ -705,7 +765,7 @@ class DataService {
         onSnapshot(
           collection(db, 'notifications'),
           (snap) => {
-            processNotificationsList(snap.docs.map((d) => d.data() as AppNotification));
+            processNotificationsList(snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id })));
           },
           (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
         )
@@ -723,7 +783,7 @@ class DataService {
         onSnapshot(
           query(collection(db, 'notifications'), where('targetUserId', '==', user.id)),
           (snap) => {
-            directItems = snap.docs.map((d) => d.data() as AppNotification);
+            directItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
             mergeAndProcess();
           },
           (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
@@ -734,7 +794,7 @@ class DataService {
         onSnapshot(
           query(collection(db, 'notifications'), where('targetRole', 'in', ['site', 'all'])),
           (snap) => {
-            broadcastItems = snap.docs.map((d) => d.data() as AppNotification);
+            broadcastItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
             mergeAndProcess();
           },
           (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
@@ -911,7 +971,7 @@ class DataService {
       completionPercent: Math.max(0, Math.min(100, Math.round(work.completionPercent))),
       relatedSubmittalNumber: work.relatedSubmittalNumber?.trim().slice(0, 120) || undefined,
       notes: work.notes?.trim().slice(0, 2000) || undefined,
-      authorId: work.authorId,
+      authorId: auth.currentUser?.uid || work.authorId,
       authorName: work.authorName.trim().slice(0, 150),
       reviewStatus: work.reviewStatus,
       adminNote: work.adminNote?.trim().slice(0, 1000) || undefined,
@@ -1093,8 +1153,15 @@ class DataService {
       chunkCount: chunks.length,
       pageCount: payload.pageCount,
       senderId: auth.currentUser?.uid || payload.senderId,
-      senderName: payload.senderName.trim().slice(0, 150),
-      senderEmail: payload.senderEmail.trim().slice(0, 200),
+      senderName: (
+        payload.senderName ||
+        auth.currentUser?.displayName ||
+        normalizeEmail(auth.currentUser?.email || payload.senderEmail) ||
+        'مستخدم'
+      )
+        .trim()
+        .slice(0, 150),
+      senderEmail: normalizeEmail(payload.senderEmail || auth.currentUser?.email).slice(0, 200),
       status: 'pending_receipt',
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -1269,6 +1336,7 @@ class DataService {
     }
 
     const adminUser = this.getCurrentUser();
+    const recipientUserId = this.resolveRecipientUserId(list[idx].senderId, list[idx].senderEmail);
     this.addNotification({
       title:
         status === 'received'
@@ -1280,7 +1348,7 @@ class DataService {
           : `طلبت الإدارة مراجعة ملف "${list[idx].fileName}"${cleanedNote ? `: ${cleanedNote}` : '.'}`,
       type: 'deliverable_reviewed',
       targetRole: 'site',
-      targetUserId: list[idx].senderId,
+      targetUserId: recipientUserId,
       projectId: list[idx].projectId,
       senderId: adminUser?.id,
       senderName: adminUser?.displayName,
@@ -1492,6 +1560,11 @@ class DataService {
 
     const newReport: DailyReport = stripUndefined({
       ...reportData,
+      senderId: auth.currentUser?.uid || reportData.senderId,
+      senderEmail: normalizeEmail(reportData.senderEmail || auth.currentUser?.email).slice(0, 200),
+      senderName: (reportData.senderName || auth.currentUser?.displayName || 'مستخدم')
+        .trim()
+        .slice(0, 150),
       id: reportId,
       attachments: finalAttachments,
       createdAt: now,
@@ -1852,12 +1925,16 @@ class DataService {
     ).catch((error) => handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`));
 
     const adminUser = this.getCurrentUser();
+    const recipientUserId = this.resolveRecipientUserId(
+      reports[index].senderId,
+      reports[index].senderEmail
+    );
     this.addNotification({
       title: `مراجعة تقرير: ${reports[index].projectName}`,
       message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${status}"${adminFeedback ? ` مع ملاحظات: ${adminFeedback}` : ''}`,
       type: 'report_reviewed',
       targetRole: 'site',
-      targetUserId: reports[index].senderId,
+      targetUserId: recipientUserId,
       projectId: reports[index].projectId,
       senderId: adminUser?.id,
       senderName: adminUser?.displayName,
@@ -1922,6 +1999,7 @@ class DataService {
 
     const newIssue: IssueReport = stripUndefined({
       ...issue,
+      authorId: auth.currentUser?.uid || issue.authorId,
       id: 'iss-' + Date.now().toString(36),
       issueNumber,
       status: 'new',
@@ -2200,6 +2278,7 @@ class DataService {
       type: 'announcement',
       priority: newAnn.isUrgent ? 'urgent' : 'normal',
       targetRole: 'all',
+      projectId: newAnn.targetProjects.length === 1 ? newAnn.targetProjects[0] : undefined,
       senderId: newAnn.createdBy,
       senderName: newAnn.authorName,
       linkTab: 'announcements'
@@ -2255,7 +2334,7 @@ class DataService {
       role: isAdminUser ? 'admin' : 'site',
       allProjects: isAdminUser ? true : Boolean(payload.allProjects),
       canAccessExecutedWorks: isAdminUser ? true : Boolean(payload.canAccessExecutedWorks),
-      canAccessSiteDeliverables: isAdminUser ? true : Boolean(payload.canAccessSiteDeliverables),
+      canAccessSiteDeliverables: true,
       assignedProjects:
         isAdminUser || payload.allProjects
           ? this.getProjects().map((p) => p.id)
@@ -2283,8 +2362,11 @@ class DataService {
     if (idx === -1) return false;
 
     const target = users[idx];
-    // Protect Super Admin from role downgrade or disablement
-    const sanitizedUpdates = { ...updates };
+    // Protect Super Admin from role downgrade or disablement & keep site deliverables upload enabled for all users
+    const sanitizedUpdates = {
+      ...updates,
+      canAccessSiteDeliverables: true
+    };
     if (isSuperAdminEmail(target.email)) {
       sanitizedUpdates.role = 'admin';
       sanitizedUpdates.status = 'active';
@@ -2293,11 +2375,15 @@ class DataService {
       sanitizedUpdates.canAccessSiteDeliverables = true;
     }
 
-    const updatedUser: UserProfile = stripUndefined({
-      ...target,
-      ...sanitizedUpdates,
-      updatedAt: new Date().toISOString()
-    });
+    const updatedUser: UserProfile = normalizeUserProfile(
+      {
+        ...target,
+        ...sanitizedUpdates,
+        updatedAt: new Date().toISOString()
+      },
+      userId,
+      target.email
+    );
 
     users[idx] = updatedUser;
     localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
@@ -2412,6 +2498,7 @@ class DataService {
       if (!activeUser || isAdmin) {
         return list.filter(
           (n) =>
+            (!activeUser || !n.targetUserId || this.isNotificationTargetingUser(n, activeUser)) &&
             (!n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all') &&
             isNotificationAllowedForUser(n, userPrefs)
         );
@@ -2431,11 +2518,11 @@ class DataService {
         ) {
           return false;
         }
-        if (n.targetUserId && n.targetUserId !== activeUser.id) return false;
+        if (n.targetUserId && !this.isNotificationTargetingUser(n, activeUser)) return false;
         if (
           n.projectId &&
           !hasAllProjectsAccess(activeUser) &&
-          !(activeUser.assignedProjects || []).includes(n.projectId)
+          !normalizeAssignedProjectsList(activeUser.assignedProjects).includes(n.projectId)
         ) {
           return false;
         }
@@ -2453,6 +2540,7 @@ class DataService {
       const id = 'notif-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5);
       const newNotif: AppNotification = stripUndefined({
         ...notif,
+        senderId: auth.currentUser?.uid || notif.senderId,
         id,
         title: notif.title.trim().slice(0, 300),
         message: notif.message.trim().slice(0, 1500),
@@ -2470,15 +2558,20 @@ class DataService {
       const activeUser = this.getCurrentUser();
       const activeIsAdmin =
         activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
+      const isTargetedToMe = Boolean(
+        activeUser && newNotif.targetUserId && this.isNotificationTargetingUser(newNotif, activeUser)
+      );
       const isRelevantLocally = activeIsAdmin
-        ? !newNotif.targetRole || newNotif.targetRole === 'admin' || newNotif.targetRole === 'all'
-        : newNotif.targetRole !== 'admin';
+        ? (!newNotif.targetUserId || isTargetedToMe) &&
+          (!newNotif.targetRole || newNotif.targetRole === 'admin' || newNotif.targetRole === 'all')
+        : isTargetedToMe ||
+          (!newNotif.targetUserId && (newNotif.targetRole === 'site' || newNotif.targetRole === 'all'));
 
       if (isRelevantLocally) {
         const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
         const notifs: AppNotification[] = data ? JSON.parse(data) : [];
         notifs.unshift(newNotif);
-        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs.slice(0, 60)));
+        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs.slice(0, 100)));
         this.notify();
       }
     } catch {

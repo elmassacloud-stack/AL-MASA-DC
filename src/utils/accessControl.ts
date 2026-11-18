@@ -45,10 +45,10 @@ export function canAccessExecutedWorksTab(user: UserProfile | null | undefined):
 }
 
 /**
- * Checks whether a user is allowed to access the "مرسلات وتسليمات PDF" tab.
+ * Checks whether a user is allowed to access the "تسليمات الموقع" tab.
+ * Enabled for all active authenticated user emails.
  */
 export function canAccessSiteDeliverablesTab(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
-  if (user.role === 'admin' || isSuperAdminEmail(user.email)) return true;
-  return user.canAccessSiteDeliverables !== false;
+  return user.status !== 'disabled';
 }

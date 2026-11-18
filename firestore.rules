@@ -39,17 +39,30 @@ service cloud.firestore {
     }
 
     function isActiveUser() {
-      return isSuperAdmin() || (userDocExists() && currentUserData().status == 'active');
+      return isSuperAdmin() || (
+        userDocExists() &&
+        (!('status' in currentUserData()) || currentUserData().status != 'disabled')
+      );
     }
 
     function isAdmin() {
       return isSuperAdmin() || (isActiveUser() && currentUserData().role == 'admin');
     }
 
+    function hasAllProjectsFlag() {
+      return 'allProjects' in currentUserData() && currentUserData().allProjects == true;
+    }
+
+    function hasAssignedProject(projectId) {
+      return 'assignedProjects' in currentUserData()
+        && currentUserData().assignedProjects is list
+        && projectId in currentUserData().assignedProjects;
+    }
+
     function hasProjectAccess(projectId) {
       return isAdmin() || (
         isActiveUser() &&
-        (currentUserData().allProjects == true || projectId in currentUserData().assignedProjects)
+        (hasAllProjectsFlag() || hasAssignedProject(projectId))
       );
     }
 
@@ -61,10 +74,7 @@ service cloud.firestore {
     }
 
     function hasSiteDeliverablesAccess() {
-      return isAdmin() || (
-        isActiveUser() &&
-        (!('canAccessSiteDeliverables' in currentUserData()) || currentUserData().canAccessSiteDeliverables != false)
-      );
+      return isAdmin() || isActiveUser();
     }
 
     function isValidNotificationPreferences(prefs) {
@@ -295,8 +305,8 @@ service cloud.firestore {
 
     // Projects collection
     match /projects/{projectId} {
-      allow get: if isValidId(projectId) && hasProjectAccess(projectId);
-      allow list: if isAdmin() || (isActiveUser() && (currentUserData().allProjects == true || resource.data.id in currentUserData().assignedProjects));
+      allow get: if isValidId(projectId) && isActiveUser();
+      allow list: if isActiveUser();
       allow create: if isValidId(projectId) && isAdmin() && isValidProject(incoming());
       allow update: if isValidId(projectId) && isAdmin() && isValidProject(incoming())
         && incoming().createdAt == existing().createdAt;
@@ -306,7 +316,7 @@ service cloud.firestore {
     // Daily Reports collection
     match /reports/{reportId} {
       allow get: if isValidId(reportId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (currentUserData().allProjects == true || resource.data.projectId in currentUserData().assignedProjects));
+      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
       allow create: if isValidId(reportId)
         && isValidDailyReport(incoming())
         && hasProjectAccess(incoming().projectId)
@@ -387,7 +397,7 @@ service cloud.firestore {
     // Issue Reports collection
     match /issues/{issueId} {
       allow get: if isValidId(issueId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (currentUserData().allProjects == true || resource.data.projectId in currentUserData().assignedProjects));
+      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
       allow create: if isValidId(issueId)
         && isValidIssueReport(incoming())
         && hasProjectAccess(incoming().projectId)
@@ -404,7 +414,7 @@ service cloud.firestore {
     // Project Tasks collection
     match /tasks/{taskId} {
       allow get: if isValidId(taskId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (currentUserData().allProjects == true || resource.data.projectId in currentUserData().assignedProjects));
+      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
       allow create: if isValidId(taskId) && isAdmin() && isValidProjectTask(incoming());
       allow update: if isValidId(taskId)
         && isValidProjectTask(incoming())
@@ -441,7 +451,7 @@ service cloud.firestore {
     // Executed Works collection
     match /executedWorks/{workId} {
       allow get: if isValidId(workId) && hasExecutedWorksAccess() && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (hasExecutedWorksAccess() && (currentUserData().allProjects == true || resource.data.projectId in currentUserData().assignedProjects));
+      allow list: if isAdmin() || (hasExecutedWorksAccess() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
       allow create: if isValidId(workId)
         && isValidExecutedWork(incoming())
         && hasExecutedWorksAccess()
@@ -469,14 +479,23 @@ service cloud.firestore {
       );
     }
 
-    // Site PDF Deliverables (48-hour retention)
+    // Site PDF Deliverables (48-hour retention - upload enabled for all active authenticated emails)
     match /siteDeliverables/{deliverableId} {
-      allow get: if isValidId(deliverableId) && hasSiteDeliverablesAccess() && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (hasSiteDeliverablesAccess() && (currentUserData().allProjects == true || resource.data.projectId in currentUserData().assignedProjects));
+      allow get: if isValidId(deliverableId) && isActiveUser() && (
+        isAdmin() ||
+        existing().senderId == request.auth.uid ||
+        hasProjectAccess(existing().projectId)
+      );
+      allow list: if isAdmin() || (
+        isActiveUser() && (
+          resource.data.senderId == request.auth.uid ||
+          hasAllProjectsFlag() ||
+          hasAssignedProject(resource.data.projectId)
+        )
+      );
       allow create: if isValidId(deliverableId)
         && isValidSiteDeliverable(incoming())
         && hasSiteDeliverablesAccess()
-        && hasProjectAccess(incoming().projectId)
         && (isAdmin() || incoming().senderId == request.auth.uid)
         && (isAdmin() || incoming().status == 'pending_receipt');
       allow update: if isValidId(deliverableId)
@@ -489,34 +508,40 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'updatedAt']);
       allow delete: if isValidId(deliverableId) && (
         isAdmin() ||
-        (hasSiteDeliverablesAccess() && hasProjectAccess(existing().projectId) && existing().senderId == request.auth.uid) ||
+        (isActiveUser() && existing().senderId == request.auth.uid) ||
         (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis())
       );
 
       match /chunks/{chunkId} {
         allow get: if isValidId(deliverableId)
           && isValidId(chunkId)
+          && isActiveUser()
           && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-          && hasSiteDeliverablesAccess()
-          && hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId);
+          && (
+            isAdmin() ||
+            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid ||
+            hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
+          );
         allow list: if isValidId(deliverableId)
+          && isActiveUser()
           && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-          && hasSiteDeliverablesAccess()
-          && hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId);
+          && (
+            isAdmin() ||
+            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid ||
+            hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
+          );
         allow create: if isValidId(deliverableId)
           && isValidId(chunkId)
           && isValidSiteDeliverableChunk(incoming())
-          && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
           && hasSiteDeliverablesAccess()
-          && hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
+          && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
           && (isAdmin() || get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid);
         allow delete: if isValidId(deliverableId) && isValidId(chunkId) && (
           isAdmin() ||
           (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis()) ||
           (
-            exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-            && hasSiteDeliverablesAccess()
-            && hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
+            isActiveUser()
+            && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
             && get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid
           )
         );
@@ -551,7 +576,11 @@ service cloud.firestore {
             incoming().targetRole == 'admin'
             && incoming().senderId == request.auth.uid
             && incoming().type in ['report_submitted', 'urgent_issue', 'issue_reported', 'deliverable_sent', 'work_logged', 'task_done']
-            && (!('projectId' in incoming()) || hasProjectAccess(incoming().projectId))
+            && (
+              incoming().type == 'deliverable_sent' ||
+              !('projectId' in incoming()) ||
+              hasProjectAccess(incoming().projectId)
+            )
           )
         );
       allow update: if isValidId(notificationId)

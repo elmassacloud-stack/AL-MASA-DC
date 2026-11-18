@@ -53,7 +53,6 @@ export const AdminUsersView: React.FC<Props> = ({
   const [role, setRole] = useState<UserRole>('site');
   const [allProjects, setAllProjects] = useState<boolean>(false);
   const [canAccessExecutedWorks, setCanAccessExecutedWorks] = useState<boolean>(true);
-  const [canAccessSiteDeliverables, setCanAccessSiteDeliverables] = useState<boolean>(true);
   const [assignedProjects, setAssignedProjects] = useState<string[]>(
     projects[0]?.id ? [projects[0].id] : []
   );
@@ -79,7 +78,6 @@ export const AdminUsersView: React.FC<Props> = ({
     setRole('site');
     setAllProjects(false);
     setCanAccessExecutedWorks(true);
-    setCanAccessSiteDeliverables(true);
     setAssignedProjects(projects[0]?.id ? [projects[0].id] : []);
     setPhone('');
     setCreateError(null);
@@ -119,7 +117,7 @@ export const AdminUsersView: React.FC<Props> = ({
         role,
         allProjects: role === 'admin' ? true : allProjects,
         canAccessExecutedWorks: role === 'admin' ? true : canAccessExecutedWorks,
-        canAccessSiteDeliverables: role === 'admin' ? true : canAccessSiteDeliverables,
+        canAccessSiteDeliverables: true,
         assignedProjects: role === 'admin' || allProjects ? projects.map((p) => p.id) : assignedProjects,
         phone: phone.trim()
       });
@@ -159,8 +157,7 @@ export const AdminUsersView: React.FC<Props> = ({
         allProjects: isAll,
         canAccessExecutedWorks:
           editingUser.role === 'admin' ? true : editingUser.canAccessExecutedWorks !== false,
-        canAccessSiteDeliverables:
-          editingUser.role === 'admin' ? true : editingUser.canAccessSiteDeliverables !== false,
+        canAccessSiteDeliverables: true,
         assignedProjects: isAll ? projects.map((p) => p.id) : editingUser.assignedProjects,
         phone: (editingUser.phone || '').trim() || undefined
       });
@@ -411,15 +408,9 @@ export const AdminUsersView: React.FC<Props> = ({
                       <FileUp className="w-3.5 h-3.5 text-blue-600" />
                       <span>تبويب تسليمات الموقع:</span>
                     </span>
-                    {user.role === 'admin' || isSuper || user.canAccessSiteDeliverables !== false ? (
-                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                        مصرح بالوصول
-                      </span>
-                    ) : (
-                      <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-rose-50 dark:bg-rose-950/70 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
-                        محجوب
-                      </span>
-                    )}
+                    <span className="text-[11px] px-2 py-0.5 rounded-md font-bold bg-emerald-50 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                      مصرح بالرفع والوصول
+                    </span>
                   </div>
                 </div>
               </div>
@@ -625,28 +616,24 @@ export const AdminUsersView: React.FC<Props> = ({
                     </div>
                   </label>
 
-                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 cursor-pointer">
+                  <div className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
                     <input
                       type="checkbox"
-                      checked={editingUser.canAccessSiteDeliverables !== false}
-                      onChange={(e) =>
-                        setEditingUser({
-                          ...editingUser,
-                          canAccessSiteDeliverables: e.target.checked
-                        })
-                      }
-                      className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                      checked
+                      readOnly
+                      disabled
+                      className="w-4 h-4 rounded text-blue-600"
                     />
                     <div>
                       <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
                         <FileUp className="w-3.5 h-3.5" />
-                        <span>صلاحية الوصول إلى تبويب «تسليمات الموقع»</span>
+                        <span>صلاحية رفع الملفات في تبويب «تسليمات الموقع»</span>
                       </span>
                       <span className="text-[11px] text-blue-700 dark:text-blue-400">
-                        يتيح للمستخدم إرسال ملفات PDF للمستندات المستلمة بالموقع (تُحذف بعد 48 ساعة)
+                        مفعّلة تلقائياً لجميع الإيميلات النشطة لإرسال ملفات PDF و Excel للإدارة
                       </span>
                     </div>
-                  </label>
+                  </div>
 
                   <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">
                     <input
@@ -877,18 +864,19 @@ export const AdminUsersView: React.FC<Props> = ({
                     </span>
                   </label>
 
-                  <label className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 cursor-pointer">
+                  <div className="flex items-center gap-2.5 p-3 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
                     <input
                       type="checkbox"
-                      checked={canAccessSiteDeliverables}
-                      onChange={(e) => setCanAccessSiteDeliverables(e.target.checked)}
-                      className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
+                      checked
+                      readOnly
+                      disabled
+                      className="w-4 h-4 rounded text-blue-600"
                     />
                     <span className="font-bold text-blue-900 dark:text-blue-200 text-xs flex items-center gap-1.5">
                       <FileUp className="w-3.5 h-3.5" />
-                      <span>السماح بالوصول إلى تبويب «تسليمات الموقع»</span>
+                      <span>رفع الملفات في تبويب «تسليمات الموقع» متاح تلقائياً لجميع الإيميلات</span>
                     </span>
-                  </label>
+                  </div>
 
                   <label className="flex items-center gap-2.5 p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 cursor-pointer">
                     <input

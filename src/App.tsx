@@ -296,7 +296,9 @@ export default function App() {
   ).length;
 
   const pendingDeliverablesCount = siteDeliverables.filter(
-    (d) => d.status === 'pending_receipt' && canAccessProject(currentUser, d.projectId)
+    (d) =>
+      d.status === 'pending_receipt' &&
+      (d.senderId === currentUser.id || canAccessProject(currentUser, d.projectId))
   ).length;
 
   const canAccessExecutedWorks = canAccessExecutedWorksTab(currentUser);
