@@ -13,8 +13,7 @@ import {
   Sun,
   Moon,
   Loader2,
-  ArrowLeft,
-  Diamond
+  ArrowLeft
 } from 'lucide-react';
 import {
   signInWithEmail,
@@ -105,8 +104,12 @@ export const LoginScreen: React.FC<Props> = ({
       <header className="relative z-10 w-full max-w-6xl mx-auto px-4 sm:px-6 pt-5 pb-2 flex items-center justify-between gap-4">
         {/* Company Brand (Right in RTL) */}
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-[#133559]/90 border border-sky-400/35 text-sky-300 flex items-center justify-center shadow-[0_0_20px_rgba(56,189,248,0.2)] shrink-0">
-            <Diamond className="w-5 h-5" />
+          <div className="h-10 sm:h-11 px-2.5 py-1 rounded-xl bg-white border border-white/25 shadow-[0_0_20px_rgba(56,189,248,0.18)] flex items-center justify-center shrink-0">
+            <img
+              src="/assets/aistudio/WhatsApp_Image_2026-10-28_at_10.05.14_AM_da55daa3.jpeg"
+              alt="شعار شركة الماسة للمقاولات"
+              className="h-full w-auto max-w-[125px] sm:max-w-[145px] object-contain"
+            />
           </div>
           <div>
             <span className="font-bold text-sm sm:text-base text-white block leading-snug">

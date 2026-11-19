@@ -6,7 +6,6 @@ import {
   SlidersHorizontal,
   UserCheck,
   LogOut,
-  FolderArchive,
   Share2,
   Users
 } from 'lucide-react';
@@ -45,16 +44,23 @@ export const Header: React.FC<Props> = ({
       <div className="max-w-7xl mx-auto px-3 sm:px-6 h-16 flex items-center justify-between gap-2">
         {/* Logo and Department Brand */}
         <div className="flex items-center gap-3 min-w-0">
-          <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shadow-md shadow-blue-500/20 shrink-0">
-            <FolderArchive className="w-5 h-5" />
+          <div className="h-10 sm:h-11 px-2 py-1 rounded-xl bg-white border border-slate-200/80 dark:border-slate-700/80 shadow-xs flex items-center justify-center shrink-0">
+            <img
+              src="/assets/aistudio/WhatsApp_Image_2026-10-28_at_10.05.14_AM_da55daa3.jpeg"
+              alt="شعار شركة الماسة للمقاولات"
+              className="h-full w-auto max-w-[120px] sm:max-w-[140px] object-contain"
+            />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h1 className="text-base sm:text-lg font-bold tracking-tight text-slate-900 dark:text-white leading-none whitespace-nowrap">
                 متابعة المواقع
               </h1>
-              <span className="text-xs px-2 py-0.5 rounded-full font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800 shrink-0">
-                DC
+              <span
+                dir="ltr"
+                className="text-xs px-2 py-0.5 rounded-full font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 border border-blue-200 dark:border-blue-800 shrink-0 whitespace-nowrap"
+              >
+                DC DEPARTMENT
               </span>
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-400 hidden sm:block mt-0.5 font-medium truncate">
@@ -144,10 +150,10 @@ export const Header: React.FC<Props> = ({
               <UserCheck className="w-4 h-4" />
             </div>
             <div className="text-right leading-tight">
-              <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[130px]">
-                {currentUser.displayName}
+              <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
+                {currentUser.displayName.replace(/\bDC\b(?!\s+MANAGER)/gi, 'DC MANAGER')}
               </div>
-              <div className="text-[11px] text-slate-600 dark:text-slate-400 font-medium truncate max-w-[130px]">
+              <div className="text-[11px] text-slate-600 dark:text-slate-400 font-medium truncate max-w-[200px]">
                 {currentUser.jobTitle || (isAdmin ? 'مسؤول النظام (Admin)' : 'مهندس موقع')}
               </div>
             </div>
