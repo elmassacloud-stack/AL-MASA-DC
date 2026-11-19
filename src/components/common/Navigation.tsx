@@ -11,7 +11,8 @@ import {
   FolderGit2,
   Building2,
   Hammer,
-  FileUp
+  FileUp,
+  NotebookPen
 } from 'lucide-react';
 import { UserRole } from '../../types';
 
@@ -29,6 +30,7 @@ interface Props {
   urgentIssuesCount?: number;
   openTasksCount?: number;
   pendingDeliverablesCount?: number;
+  personalNotesPendingCount?: number;
   canAccessExecutedWorks?: boolean;
   canAccessSiteDeliverables?: boolean;
 }
@@ -40,6 +42,7 @@ export const Navigation: React.FC<Props> = ({
   urgentIssuesCount = 0,
   openTasksCount = 0,
   pendingDeliverablesCount = 0,
+  personalNotesPendingCount = 0,
   canAccessExecutedWorks = true,
   canAccessSiteDeliverables = true
 }) => {
@@ -54,7 +57,13 @@ export const Navigation: React.FC<Props> = ({
       : []),
     { id: 'report-issue', label: 'إبلاغ عن عائق', icon: AlertTriangle },
     { id: 'my-submissions', label: 'تقديماتي', icon: ClipboardList },
-    { id: 'my-tasks', label: 'مهامي', icon: CheckSquare, badge: openTasksCount }
+    { id: 'my-tasks', label: 'مهامي', icon: CheckSquare, badge: openTasksCount },
+    {
+      id: 'personal-notes',
+      label: 'مهامي الشخصية',
+      icon: NotebookPen,
+      badge: personalNotesPendingCount
+    }
   ];
 
   // Navigation tabs for Admin (DC Manager)
@@ -71,6 +80,12 @@ export const Navigation: React.FC<Props> = ({
     { id: 'submittal-tracker', label: 'تتبع التقديمات', icon: Search },
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
     { id: 'tasks', label: 'المهام', icon: CheckSquare },
+    {
+      id: 'personal-notes',
+      label: 'مهامي الشخصية',
+      icon: NotebookPen,
+      badge: personalNotesPendingCount
+    },
     { id: 'announcements', label: 'التعاميم', icon: BellRing },
     { id: 'projects', label: 'إدارة المشاريع', icon: Building2 },
     { id: 'users', label: 'إدارة المستخدمين', icon: Users },

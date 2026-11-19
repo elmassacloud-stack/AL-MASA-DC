@@ -8,6 +8,7 @@ import { SettingsModal } from './components/common/SettingsModal';
 import { ShareAppModal } from './components/common/ShareAppModal';
 import { ExecutedWorksView } from './components/common/ExecutedWorksView';
 import { SiteDeliverablesView } from './components/common/SiteDeliverablesView';
+import { PersonalNotesView } from './components/common/PersonalNotesView';
 
 // Site User Views
 import { DailyReportForm } from './components/site/DailyReportForm';
@@ -47,8 +48,10 @@ import {
   Announcement,
   AppNotification,
   ExecutedWork,
-  SiteDeliverable
+  SiteDeliverable,
+  PersonalNote
 } from './types';
+import { getTodayDateStr } from './seedData';
 
 export default function App() {
   // Theme state
@@ -83,6 +86,9 @@ export default function App() {
   const [users, setUsers] = useState<UserProfile[]>(() => dataService.getUsers());
   const [notifications, setNotifications] = useState<AppNotification[]>(() =>
     dataService.getNotifications(null)
+  );
+  const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>(() =>
+    dataService.getPersonalNotes()
   );
   const [stalledDays, setStalledDays] = useState<number>(() =>
     dataService.getStalledDaysThreshold()
@@ -167,6 +173,7 @@ export default function App() {
       setSiteDeliverables(dataService.getSiteDeliverables());
       setUsers(dataService.getUsers());
       setNotifications(dataService.getNotifications(activeUser));
+      setPersonalNotes(dataService.getPersonalNotes(activeUser?.id));
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
       setCurrentUser((prev) => {
@@ -304,6 +311,11 @@ export default function App() {
   const canAccessExecutedWorks = canAccessExecutedWorksTab(currentUser);
   const canAccessSiteDeliverables = canAccessSiteDeliverablesTab(currentUser);
 
+  const todayDateStr = getTodayDateStr();
+  const personalNotesPendingCount = personalNotes.filter(
+    (n) => n.userId === currentUser.id && !n.isCompleted && n.noteDate <= todayDateStr
+  ).length;
+
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
       {/* Top Application Header */}
@@ -328,6 +340,7 @@ export default function App() {
         urgentIssuesCount={urgentIssuesCount}
         openTasksCount={userOpenTasksCount}
         pendingDeliverablesCount={pendingDeliverablesCount}
+        personalNotesPendingCount={personalNotesPendingCount}
         canAccessExecutedWorks={canAccessExecutedWorks}
         canAccessSiteDeliverables={canAccessSiteDeliverables}
       />
@@ -486,6 +499,14 @@ export default function App() {
               />
             )}
           </>
+        )}
+
+        {/* SHARED PRIVATE PERSONAL NOTES SCREEN (FOR EVERY USER) */}
+        {activeTab === 'personal-notes' && (
+          <PersonalNotesView
+            currentUser={currentUser}
+            personalNotes={personalNotes}
+          />
         )}
       </main>
 

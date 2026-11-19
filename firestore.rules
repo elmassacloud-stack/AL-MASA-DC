@@ -650,6 +650,24 @@ service cloud.firestore {
         && data.createdAt is string && data.createdAt.size() <= 64;
     }
 
+    function isValidPersonalNote(data, ownerUid) {
+      return data.keys().hasAll(['id', 'userId', 'noteDate', 'text', 'isCompleted', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'noteDate', 'text', 'isCompleted', 'isStarred', 'carriedOverFrom', 'completedAt', 'reminderDate', 'reminderTime', 'reminderDismissed', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && data.userId is string && data.userId == ownerUid && data.userId == request.auth.uid
+        && data.noteDate is string && data.noteDate.size() == 10 && data.noteDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 500
+        && data.isCompleted is bool
+        && (!('isStarred' in data) || data.isStarred is bool)
+        && (!('carriedOverFrom' in data) || (data.carriedOverFrom is string && data.carriedOverFrom.size() <= 20))
+        && (!('completedAt' in data) || (data.completedAt is string && data.completedAt.size() <= 64))
+        && (!('reminderDate' in data) || (data.reminderDate is string && (data.reminderDate == '' || data.reminderDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))))
+        && (!('reminderTime' in data) || (data.reminderTime is string && (data.reminderTime == '' || data.reminderTime.matches('^[0-9]{2}:[0-9]{2}$'))))
+        && (!('reminderDismissed' in data) || data.reminderDismissed is bool)
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
     // Users collection (PII isolated to owner or Admin)
     match /users/{userId} {
       allow get: if isValidId(userId) && ((isSignedIn() && request.auth.uid == userId) || isAdmin());
@@ -660,6 +678,44 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && canUpdateUser(userId, incoming(), existing());
       allow delete: if isValidId(userId) && existing().email.lower() != 'elmassacloud@gmail.com' && isAdmin();
+
+      // Strictly private personal daily notes & tasks (owner-only, not even visible to admins)
+      match /personalNotes/{noteId} {
+        allow get: if isValidId(userId)
+          && isValidId(noteId)
+          && isSignedIn()
+          && request.auth.uid == userId
+          && isActiveUser();
+        allow list: if isValidId(userId)
+          && isSignedIn()
+          && request.auth.uid == userId
+          && resource.data.userId == request.auth.uid
+          && isActiveUser();
+        allow create: if isValidId(userId)
+          && isValidId(noteId)
+          && isSignedIn()
+          && request.auth.uid == userId
+          && incoming().id == noteId
+          && isValidPersonalNote(incoming(), userId)
+          && isActiveUser();
+        allow update: if isValidId(userId)
+          && isValidId(noteId)
+          && isSignedIn()
+          && request.auth.uid == userId
+          && existing().userId == request.auth.uid
+          && isValidPersonalNote(incoming(), userId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['noteDate', 'text', 'isCompleted', 'isStarred', 'carriedOverFrom', 'completedAt', 'reminderDate', 'reminderTime', 'reminderDismissed', 'updatedAt'])
+          && isActiveUser();
+        allow delete: if isValidId(userId)
+          && isValidId(noteId)
+          && isSignedIn()
+          && request.auth.uid == userId
+          && existing().userId == request.auth.uid
+          && isActiveUser();
+      }
     }
 
     // Projects collection

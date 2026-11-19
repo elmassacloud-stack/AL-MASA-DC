@@ -276,12 +276,37 @@
         "createdAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "title", "message", "type", "isRead", "createdAt"]
+    },
+    "PersonalNote": {
+      "title": "PersonalNote",
+      "description": "Private daily personal checklist note visible strictly to its owner.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "noteDate": { "type": "string", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "isCompleted": { "type": "boolean" },
+        "isStarred": { "type": "boolean" },
+        "carriedOverFrom": { "type": "string", "maxLength": 20 },
+        "completedAt": { "type": "string", "maxLength": 64 },
+        "reminderDate": { "type": "string", "maxLength": 10 },
+        "reminderTime": { "type": "string", "maxLength": 5 },
+        "reminderDismissed": { "type": "boolean" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "userId", "noteDate", "text", "isCompleted", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
       "description": "User accounts created and managed by Admin, keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/personalNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/PersonalNote" },
+      "description": "Private daily personal tasks and notes strictly isolated to the owning user."
     },
     "/projects/{projectId}": {
       "schema": { "$ref": "#/entities/Project" },

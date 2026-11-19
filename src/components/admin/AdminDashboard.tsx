@@ -22,6 +22,7 @@ import {
   Announcement
 } from '../../types';
 import { getTodayDateStr } from '../../seedData';
+import { AdminAnalyticsCharts } from './AdminAnalyticsCharts';
 
 interface Props {
   projects: Project[];
@@ -208,6 +209,16 @@ export const AdminDashboard: React.FC<Props> = ({
           </div>
         </div>
       </div>
+
+      {/* =========================================================================
+          INTERACTIVE ANALYTICS CHARTS (RECHARTS)
+          ========================================================================= */}
+      <AdminAnalyticsCharts
+        projects={projects}
+        reports={reports}
+        tasks={tasks}
+        onNavigateTab={onNavigateTab}
+      />
 
       {/* =========================================================================
           PER-PROJECT STATUS & COMPLIANCE TABLE (Requested specifically)

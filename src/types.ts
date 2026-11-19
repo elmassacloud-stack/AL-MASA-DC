@@ -269,3 +269,19 @@ export interface AppNotification {
   isRead: boolean;
   createdAt: string;
 }
+
+export interface PersonalNote {
+  id: string;
+  userId: string;
+  noteDate: string; // YYYY-MM-DD
+  text: string;
+  isCompleted: boolean;
+  isStarred?: boolean;
+  carriedOverFrom?: string; // YYYY-MM-DD when rolled over from an earlier day
+  completedAt?: string;
+  reminderDate?: string; // YYYY-MM-DD for scheduled reminder
+  reminderTime?: string; // HH:mm optional reminder time
+  reminderDismissed?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}

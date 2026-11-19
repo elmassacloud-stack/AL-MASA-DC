@@ -30,7 +30,8 @@ import {
   SiteDeliverable,
   SiteDeliverableChunk,
   SiteDeliverableType,
-  SiteDeliverableStatus
+  SiteDeliverableStatus,
+  PersonalNote
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -106,6 +107,7 @@ const STORAGE_KEYS = {
   SITE_DELIVERABLES: 'dc_site_deliverables_v2',
   USERS: 'dc_users_v2',
   NOTIFICATIONS: 'dc_notifications_v2',
+  PERSONAL_NOTES: 'dc_personal_notes_v2',
   CURRENT_USER: 'dc_active_user_v2',
   REPORT_DRAFT_PREFIX: 'dc_report_draft_',
   STALLED_DAYS_LIMIT: 'dc_stalled_days_limit',
@@ -308,6 +310,7 @@ class DataService {
     localStorage.removeItem(STORAGE_KEYS.SITE_DELIVERABLES);
     localStorage.removeItem(STORAGE_KEYS.USERS);
     localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
+    localStorage.removeItem(STORAGE_KEYS.PERSONAL_NOTES);
     this.notify();
   }
 
@@ -820,6 +823,22 @@ class DataService {
         )
       );
     }
+
+    // 10. Strictly Private Personal Notes sync (owner-only subcollection under /users/{uid}/personalNotes)
+    this.firestoreUnsubs.push(
+      onSnapshot(
+        query(collection(db, 'users', user.id, 'personalNotes'), where('userId', '==', user.id)),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ ...(d.data() as PersonalNote), id: d.id }))
+            .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+          localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(list));
+          this.notify();
+        },
+        (error) =>
+          handleFirestoreError(error, OperationType.LIST, `users/${user.id}/personalNotes`)
+      )
+    );
   }
 
   public stopRealtimeSync() {
@@ -3129,6 +3148,302 @@ class DataService {
 
     localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs));
     this.notify();
+  }
+
+  // --- Personal Daily Notes & Tasks (Strictly Private Per User) ---
+  public getPersonalNotes(userId?: string): PersonalNote[] {
+    try {
+      const data = localStorage.getItem(STORAGE_KEYS.PERSONAL_NOTES);
+      const parsed: PersonalNote[] = data ? JSON.parse(data) : [];
+      const activeUid = userId || this.getCurrentUser()?.id;
+      if (!activeUid) return [];
+      return parsed.filter((n) => n.userId === activeUid);
+    } catch {
+      return [];
+    }
+  }
+
+  public async addPersonalNote(
+    text: string,
+    noteDate: string,
+    isStarred = false,
+    reminder?: { date?: string; time?: string }
+  ): Promise<PersonalNote | null> {
+    const activeUser = this.getCurrentUser();
+    const uid = auth.currentUser?.uid || activeUser?.id;
+    const cleanText = text.trim().slice(0, 500);
+    if (!uid || !cleanText) return null;
+
+    const validDate = /^\d{4}-\d{2}-\d{2}$/.test(noteDate) ? noteDate : getTodayDateStr();
+    const validReminderDate =
+      reminder?.date && /^\d{4}-\d{2}-\d{2}$/.test(reminder.date) ? reminder.date : undefined;
+    const validReminderTime =
+      validReminderDate && reminder?.time && /^\d{2}:\d{2}$/.test(reminder.time)
+        ? reminder.time
+        : undefined;
+    const now = new Date().toISOString();
+    const id = `pn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+    const note: PersonalNote = stripUndefined({
+      id,
+      userId: uid,
+      noteDate: validDate,
+      text: cleanText,
+      isCompleted: false,
+      isStarred: Boolean(isStarred),
+      reminderDate: validReminderDate,
+      reminderTime: validReminderTime,
+      reminderDismissed: validReminderDate ? false : undefined,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    const notes = this.getPersonalNotes(uid);
+    notes.unshift(note);
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await setDoc(doc(db, 'users', uid, 'personalNotes', id), note);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `users/${uid}/personalNotes/${id}`);
+    }
+
+    return note;
+  }
+
+  public async togglePersonalNote(noteId: string): Promise<void> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid) return;
+
+    const notes = this.getPersonalNotes(uid);
+    const idx = notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+
+    const now = new Date().toISOString();
+    const nextCompleted = !notes[idx].isCompleted;
+    const nextCompletedAt = nextCompleted ? now : '';
+
+    notes[idx] = {
+      ...notes[idx],
+      isCompleted: nextCompleted,
+      completedAt: nextCompletedAt,
+      updatedAt: now
+    };
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await updateDoc(doc(db, 'users', uid, 'personalNotes', noteId), {
+        isCompleted: nextCompleted,
+        completedAt: nextCompletedAt,
+        updatedAt: now
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}/personalNotes/${noteId}`);
+    }
+  }
+
+  public async togglePersonalNoteStar(noteId: string): Promise<void> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid) return;
+
+    const notes = this.getPersonalNotes(uid);
+    const idx = notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+
+    const now = new Date().toISOString();
+    const nextStarred = !notes[idx].isStarred;
+    notes[idx] = {
+      ...notes[idx],
+      isStarred: nextStarred,
+      updatedAt: now
+    };
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await updateDoc(doc(db, 'users', uid, 'personalNotes', noteId), {
+        isStarred: nextStarred,
+        updatedAt: now
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}/personalNotes/${noteId}`);
+    }
+  }
+
+  public async updatePersonalNoteText(noteId: string, newText: string): Promise<void> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    const cleanText = newText.trim().slice(0, 500);
+    if (!uid || !cleanText) return;
+
+    const notes = this.getPersonalNotes(uid);
+    const idx = notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+
+    const now = new Date().toISOString();
+    notes[idx] = {
+      ...notes[idx],
+      text: cleanText,
+      updatedAt: now
+    };
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await updateDoc(doc(db, 'users', uid, 'personalNotes', noteId), {
+        text: cleanText,
+        updatedAt: now
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}/personalNotes/${noteId}`);
+    }
+  }
+
+  public async setPersonalNoteReminder(
+    noteId: string,
+    reminderDate: string,
+    reminderTime = ''
+  ): Promise<void> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid) return;
+
+    const notes = this.getPersonalNotes(uid);
+    const idx = notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+
+    const cleanDate = /^\d{4}-\d{2}-\d{2}$/.test(reminderDate) ? reminderDate : '';
+    const cleanTime = cleanDate && /^\d{2}:\d{2}$/.test(reminderTime) ? reminderTime : '';
+    const now = new Date().toISOString();
+
+    notes[idx] = {
+      ...notes[idx],
+      reminderDate: cleanDate,
+      reminderTime: cleanTime,
+      reminderDismissed: false,
+      updatedAt: now
+    };
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await updateDoc(doc(db, 'users', uid, 'personalNotes', noteId), {
+        reminderDate: cleanDate,
+        reminderTime: cleanTime,
+        reminderDismissed: false,
+        updatedAt: now
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}/personalNotes/${noteId}`);
+    }
+  }
+
+  public async dismissPersonalNoteReminder(noteId: string): Promise<void> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid) return;
+
+    const notes = this.getPersonalNotes(uid);
+    const idx = notes.findIndex((n) => n.id === noteId);
+    if (idx === -1) return;
+
+    const now = new Date().toISOString();
+    notes[idx] = {
+      ...notes[idx],
+      reminderDismissed: true,
+      updatedAt: now
+    };
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(notes));
+    this.notify();
+
+    try {
+      await updateDoc(doc(db, 'users', uid, 'personalNotes', noteId), {
+        reminderDismissed: true,
+        updatedAt: now
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${uid}/personalNotes/${noteId}`);
+    }
+  }
+
+  public async carryOverPersonalNotes(noteIds: string[], targetDate: string): Promise<number> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid || noteIds.length === 0 || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return 0;
+
+    const idSet = new Set(noteIds);
+    const notes = this.getPersonalNotes(uid);
+    const now = new Date().toISOString();
+    const updates: Array<{ id: string; carriedOverFrom: string }> = [];
+
+    const nextNotes = notes.map((n) => {
+      if (!idSet.has(n.id) || n.noteDate === targetDate) return n;
+      const originDate = n.carriedOverFrom || n.noteDate;
+      updates.push({ id: n.id, carriedOverFrom: originDate });
+      return {
+        ...n,
+        noteDate: targetDate,
+        isCompleted: false,
+        completedAt: '',
+        carriedOverFrom: originDate,
+        updatedAt: now
+      };
+    });
+
+    if (updates.length === 0) return 0;
+
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(nextNotes));
+    this.notify();
+
+    await Promise.all(
+      updates.map(async (item) => {
+        try {
+          await updateDoc(doc(db, 'users', uid, 'personalNotes', item.id), {
+            noteDate: targetDate,
+            isCompleted: false,
+            completedAt: '',
+            carriedOverFrom: item.carriedOverFrom,
+            updatedAt: now
+          });
+        } catch (error) {
+          handleFirestoreError(
+            error,
+            OperationType.UPDATE,
+            `users/${uid}/personalNotes/${item.id}`
+          );
+        }
+      })
+    );
+
+    return updates.length;
+  }
+
+  public async deletePersonalNotes(noteIds: string[]): Promise<number> {
+    const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
+    if (!uid || noteIds.length === 0) return 0;
+
+    const idSet = new Set(noteIds);
+    const notes = this.getPersonalNotes(uid);
+    const toDelete = notes.filter((n) => idSet.has(n.id));
+    if (toDelete.length === 0) return 0;
+
+    const remaining = notes.filter((n) => !idSet.has(n.id));
+    localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(remaining));
+    this.notify();
+
+    await Promise.all(
+      toDelete.map(async (item) => {
+        try {
+          await deleteDoc(doc(db, 'users', uid, 'personalNotes', item.id));
+        } catch (error) {
+          handleFirestoreError(
+            error,
+            OperationType.DELETE,
+            `users/${uid}/personalNotes/${item.id}`
+          );
+        }
+      })
+    );
+
+    return toDelete.length;
   }
 
   // --- Settings (Stalled days, Cutoff) ---
