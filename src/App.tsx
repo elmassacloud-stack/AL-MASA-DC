@@ -404,6 +404,7 @@ export default function App() {
                 reports={reports}
                 projects={projects}
                 users={users}
+                currentUser={currentUser}
               />
             )}
 

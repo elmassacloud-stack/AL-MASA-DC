@@ -41,59 +41,385 @@ service cloud.firestore {
       return get(userDocPath(request.auth.uid)).data;
     }
 
-    function isActiveUser() {
-      return isSuperAdmin() || (
-        userDocExists() &&
-        (!('status' in currentUserData()) || currentUserData().status != 'disabled')
+    // Pure in-memory helpers evaluated against a single fetched user document map `u`
+    // (guarantees at most 1 exists() + 1 get() per request to stay well under Firestore's 10-call limit)
+    function userDataIsActive(u) {
+      return !('status' in u) || u.status != 'disabled';
+    }
+
+    function userDataIsAdmin(u) {
+      return userDataIsActive(u) && 'role' in u && u.role == 'admin';
+    }
+
+    function userDataHasAllProjects(u) {
+      return 'allProjects' in u && u.allProjects == true;
+    }
+
+    function userDataHasAssignedProject(u, projectId) {
+      return 'assignedProjects' in u
+        && u.assignedProjects is list
+        && projectId in u.assignedProjects;
+    }
+
+    function userDataHasProjectAccess(u, projectId) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) &&
+        (userDataHasAllProjects(u) || userDataHasAssignedProject(u, projectId))
       );
+    }
+
+    function userDataHasExecutedWorksAccess(u) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) &&
+        (!('canAccessExecutedWorks' in u) || u.canAccessExecutedWorks != false)
+      );
+    }
+
+    function userDataIsReportOwner(u, reportData) {
+      return ('senderId' in reportData && reportData.senderId == request.auth.uid) || (
+        'senderEmail' in reportData &&
+        reportData.senderEmail is string && (
+          ('email' in u && u.email is string && reportData.senderEmail.lower() == u.email.lower()) ||
+          ('email' in request.auth.token && request.auth.token.email is string && reportData.senderEmail.lower() == request.auth.token.email.lower())
+        )
+      );
+    }
+
+    // Single-fetch wrapper helpers (max 1 exists + 1 get each)
+    function isActiveUser() {
+      return isSuperAdmin() || (userDocExists() && userDataIsActive(currentUserData()));
     }
 
     function isAdmin() {
-      return isSuperAdmin() || (isActiveUser() && currentUserData().role == 'admin');
-    }
-
-    function hasAllProjectsFlag() {
-      return 'allProjects' in currentUserData() && currentUserData().allProjects == true;
-    }
-
-    function hasAssignedProject(projectId) {
-      return 'assignedProjects' in currentUserData()
-        && currentUserData().assignedProjects is list
-        && projectId in currentUserData().assignedProjects;
+      return isSuperAdmin() || (userDocExists() && userDataIsAdmin(currentUserData()));
     }
 
     function hasProjectAccess(projectId) {
-      return isAdmin() || (
-        isActiveUser() &&
-        (hasAllProjectsFlag() || hasAssignedProject(projectId))
+      return isSuperAdmin() || (userDocExists() && userDataHasProjectAccess(currentUserData(), projectId));
+    }
+
+    // Composite single-fetch permission gates (prevent repeated get() calls per rule)
+    function userDataCanUpdateUser(u, userId, inc, ext) {
+      return userDataIsAdmin(u) || (
+        request.auth.uid == userId
+        && userDataIsActive(u)
+        && inc.diff(ext).affectedKeys().hasOnly(['notificationPreferences', 'updatedAt'])
       );
     }
 
-    function hasExecutedWorksAccess() {
-      return isAdmin() || (
-        isActiveUser() &&
-        (!('canAccessExecutedWorks' in currentUserData()) || currentUserData().canAccessExecutedWorks != false)
+    function canUpdateUser(userId, inc, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanUpdateUser(currentUserData(), userId, inc, ext));
+    }
+
+    function userDataCanGetReport(u, res) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          res == null ||
+          userDataHasProjectAccess(u, res.data.projectId) ||
+          userDataIsReportOwner(u, res.data)
+        )
       );
     }
 
-    function hasSiteDeliverablesAccess() {
-      return isAdmin() || isActiveUser();
+    function canGetReport(res) {
+      return isSuperAdmin() || (userDocExists() && userDataCanGetReport(currentUserData(), res));
     }
 
-    function isReportOwner(reportData) {
-      return isSignedIn() && (
-        ('senderId' in reportData && reportData.senderId == request.auth.uid) ||
-        (
-          'senderEmail' in reportData &&
-          reportData.senderEmail is string &&
+    function userDataCanCreateReport(u, reportId, inc) {
+      return userDataIsAdmin(u) || (
+        userDataHasProjectAccess(u, inc.projectId)
+        && inc.senderId == request.auth.uid
+        && reportId == 'rep-' + inc.projectId + '-' + inc.reportDate
+      );
+    }
+
+    function canCreateReport(reportId, inc) {
+      return isSuperAdmin() || (userDocExists() && userDataCanCreateReport(currentUserData(), reportId, inc));
+    }
+
+    function userDataCanUpdateReport(u, inc, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u)
+        && (
           (
-            (userDocExists() && 'email' in currentUserData() && currentUserData().email is string && reportData.senderEmail.lower() == currentUserData().email.lower()) ||
-            ('email' in request.auth.token && request.auth.token.email is string && reportData.senderEmail.lower() == request.auth.token.email.lower())
+            userDataIsReportOwner(u, ext)
+            && (
+              (userDataHasProjectAccess(u, ext.projectId) && userDataHasProjectAccess(u, inc.projectId)) ||
+              inc.projectId == ext.projectId
+            )
+          ) ||
+          (
+            userDataHasProjectAccess(u, ext.projectId)
+            && userDataHasProjectAccess(u, inc.projectId)
+          )
+        )
+        && (!('senderId' in ext) || inc.senderId == ext.senderId)
+        && (!('senderEmail' in ext) || inc.senderEmail == ext.senderEmail)
+        && inc.status == 'submitted'
+        && inc.diff(ext).affectedKeys().hasOnly([
+          'projectId',
+          'projectName',
+          'reportDate',
+          'submittedWorks',
+          'receivedWorks',
+          'notes',
+          'attachments',
+          'status',
+          'updatedAt'
+        ])
+      );
+    }
+
+    function canUpdateReport(inc, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanUpdateReport(currentUserData(), inc, ext));
+    }
+
+    function userDataCanAccessReportDoc(u, repData) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          userDataHasProjectAccess(u, repData.projectId) ||
+          userDataIsReportOwner(u, repData)
+        )
+      );
+    }
+
+    function canAccessReportChunks(reportId) {
+      return exists(/databases/$(database)/documents/reports/$(reportId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanAccessReportDoc(
+            currentUserData(),
+            get(/databases/$(database)/documents/reports/$(reportId)).data
           )
         )
       );
     }
 
+    function canDeleteReportChunk(reportId) {
+      return isSuperAdmin() || (
+        userDocExists() && (
+          userDataIsAdmin(currentUserData()) || (
+            exists(/databases/$(database)/documents/reports/$(reportId)) &&
+            userDataCanAccessReportDoc(
+              currentUserData(),
+              get(/databases/$(database)/documents/reports/$(reportId)).data
+            )
+          )
+        )
+      );
+    }
+
+    function userDataCanCreateIssue(u, inc) {
+      return userDataIsAdmin(u) || (
+        userDataHasProjectAccess(u, inc.projectId) &&
+        inc.authorId == request.auth.uid
+      );
+    }
+
+    function canCreateIssue(inc) {
+      return isSuperAdmin() || (userDocExists() && userDataCanCreateIssue(currentUserData(), inc));
+    }
+
+    function userDataCanUpdateTask(u, inc, ext) {
+      return userDataIsAdmin(u) || (
+        userDataHasProjectAccess(u, ext.projectId)
+        && inc.projectId == ext.projectId
+        && inc.diff(ext).affectedKeys().hasOnly(['status', 'completedBy', 'completedAt', 'proofNote', 'proofAttachment', 'updatedAt'])
+      );
+    }
+
+    function canUpdateTask(inc, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanUpdateTask(currentUserData(), inc, ext));
+    }
+
+    function userDataCanDeleteTaskChunk(u, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && ext.expiresAtMs is int && ext.expiresAtMs <= request.time.toMillis()
+      );
+    }
+
+    function canDeleteTaskChunk(ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanDeleteTaskChunk(currentUserData(), ext));
+    }
+
+    function userDataCanUpdateAnnouncement(u, inc, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) &&
+        inc.diff(ext).affectedKeys().hasOnly(['readBy'])
+      );
+    }
+
+    function canUpdateAnnouncement(inc, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanUpdateAnnouncement(currentUserData(), inc, ext));
+    }
+
+    function userDataCanReadExecutedWork(u, projectId) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u) &&
+        userDataHasProjectAccess(u, projectId)
+      );
+    }
+
+    function canReadExecutedWork(projectId) {
+      return isSuperAdmin() || (userDocExists() && userDataCanReadExecutedWork(currentUserData(), projectId));
+    }
+
+    function userDataCanCreateExecutedWork(u, inc) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u)
+        && userDataHasProjectAccess(u, inc.projectId)
+        && inc.authorId == request.auth.uid
+        && inc.reviewStatus == 'pending'
+      );
+    }
+
+    function canCreateExecutedWork(inc) {
+      return isSuperAdmin() || (userDocExists() && userDataCanCreateExecutedWork(currentUserData(), inc));
+    }
+
+    function userDataCanUpdateExecutedWork(u, inc, ext) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u)
+        && userDataHasProjectAccess(u, ext.projectId)
+        && ext.authorId == request.auth.uid
+        && ext.reviewStatus == 'pending'
+        && inc.authorId == ext.authorId
+        && inc.reviewStatus == 'pending'
+      );
+    }
+
+    function canUpdateExecutedWork(inc, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanUpdateExecutedWork(currentUserData(), inc, ext));
+    }
+
+    function userDataCanDeleteExecutedWork(u, ext) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u)
+        && userDataHasProjectAccess(u, ext.projectId)
+        && ext.authorId == request.auth.uid
+        && ext.reviewStatus == 'pending'
+      );
+    }
+
+    function canDeleteExecutedWork(ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanDeleteExecutedWork(currentUserData(), ext));
+    }
+
+    function userDataCanReadDeliverableData(u, delData) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          delData.senderId == request.auth.uid ||
+          userDataHasProjectAccess(u, delData.projectId)
+        )
+      );
+    }
+
+    function canReadDeliverableData(delData) {
+      return isSuperAdmin() || (userDocExists() && userDataCanReadDeliverableData(currentUserData(), delData));
+    }
+
+    function userDataCanCreateDeliverable(u, inc) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u)
+        && inc.senderId == request.auth.uid
+        && inc.status == 'pending_receipt'
+      );
+    }
+
+    function canCreateDeliverable(inc) {
+      return isSuperAdmin() || (userDocExists() && userDataCanCreateDeliverable(currentUserData(), inc));
+    }
+
+    function userDataCanDeleteDeliverable(u, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          ext.senderId == request.auth.uid ||
+          (ext.expiresAtMs is int && ext.expiresAtMs <= request.time.toMillis())
+        )
+      );
+    }
+
+    function canDeleteDeliverable(ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanDeleteDeliverable(currentUserData(), ext));
+    }
+
+    function canReadDeliverableChunks(deliverableId) {
+      return exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanReadDeliverableData(
+            currentUserData(),
+            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data
+          )
+        )
+      );
+    }
+
+    function userDataCanCreateDeliverableChunk(u, delData) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && delData.senderId == request.auth.uid
+      );
+    }
+
+    function canCreateDeliverableChunk(deliverableId) {
+      return exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanCreateDeliverableChunk(
+            currentUserData(),
+            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data
+          )
+        )
+      );
+    }
+
+    function userDataCanDeleteDeliverableChunk(u, deliverableId, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          (ext.expiresAtMs is int && ext.expiresAtMs <= request.time.toMillis()) || (
+            exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId)) &&
+            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid
+          )
+        )
+      );
+    }
+
+    function canDeleteDeliverableChunk(deliverableId, ext) {
+      return isSuperAdmin() || (userDocExists() && userDataCanDeleteDeliverableChunk(currentUserData(), deliverableId, ext));
+    }
+
+    function userDataCanReadNotification(u, notifData) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u) && (
+          notifData.targetUserId == request.auth.uid ||
+          notifData.targetRole in ['site', 'all']
+        )
+      );
+    }
+
+    function canReadNotification(notifData) {
+      return isSuperAdmin() || (userDocExists() && userDataCanReadNotification(currentUserData(), notifData));
+    }
+
+    function userDataCanCreateNotification(u, inc) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u)
+        && inc.targetRole == 'admin'
+        && inc.senderId == request.auth.uid
+        && inc.type in ['report_submitted', 'urgent_issue', 'issue_reported', 'deliverable_sent', 'work_logged', 'task_done']
+        && (
+          inc.type == 'deliverable_sent' ||
+          !('projectId' in inc) ||
+          userDataHasProjectAccess(u, inc.projectId)
+        )
+      );
+    }
+
+    function canCreateNotification(inc) {
+      return isSuperAdmin() || (userDocExists() && userDataCanCreateNotification(currentUserData(), inc));
+    }
+
+    // Schema validation blueprints (pure, 0 DB calls)
     function isValidNotificationPreferences(prefs) {
       return prefs is map
         && prefs.keys().hasAll(['dailyReports', 'tasks', 'urgentTasksOnly', 'issues', 'urgentIssuesOnly', 'deliverables', 'executedWorks', 'announcements'])
@@ -150,11 +476,13 @@ service cloud.firestore {
         && data.senderName is string && data.senderName.size() <= 150
         && data.senderEmail is string && data.senderEmail.size() <= 200
         && data.submittedWorks is list && data.submittedWorks.size() <= 200
+        && (data.submittedWorks.size() == 0 || data.submittedWorks[0] is map)
         && data.receivedWorks is list && data.receivedWorks.size() <= 200
-        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 4000))
-        && (!('attachments' in data) || (data.attachments is list && data.attachments.size() <= 5))
+        && (data.receivedWorks.size() == 0 || data.receivedWorks[0] is map)
+        && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 4000))
+        && (!('attachments' in data) || data.attachments == null || (data.attachments is list && data.attachments.size() <= 5 && (data.attachments.size() == 0 || data.attachments[0] is map)))
         && (data.status == 'submitted' || data.status == 'reviewed' || data.status == 'needs_revision')
-        && (!('adminFeedback' in data) || (data.adminFeedback is string && data.adminFeedback.size() <= 2000))
+        && (!('adminFeedback' in data) || data.adminFeedback == null || (data.adminFeedback is string && data.adminFeedback.size() <= 2000))
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
@@ -324,152 +652,82 @@ service cloud.firestore {
 
     // Users collection (PII isolated to owner or Admin)
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isAdmin() || (isSignedIn() && request.auth.uid == userId));
+      allow get: if isValidId(userId) && ((isSignedIn() && request.auth.uid == userId) || isAdmin());
       allow list: if isAdmin();
-      allow create: if isValidId(userId) && isAdmin() && isValidUserProfile(incoming());
+      allow create: if isValidId(userId) && isValidUserProfile(incoming()) && isAdmin();
       allow update: if isValidId(userId)
         && isValidUserProfile(incoming())
         && incoming().createdAt == existing().createdAt
-        && (
-          isAdmin() ||
-          (
-            isSignedIn()
-            && request.auth.uid == userId
-            && isActiveUser()
-            && incoming().diff(existing()).affectedKeys().hasOnly(['notificationPreferences', 'updatedAt'])
-          )
-        );
-      allow delete: if isValidId(userId) && isAdmin() && existing().email.lower() != 'elmassacloud@gmail.com';
+        && canUpdateUser(userId, incoming(), existing());
+      allow delete: if isValidId(userId) && existing().email.lower() != 'elmassacloud@gmail.com' && isAdmin();
     }
 
     // Projects collection
     match /projects/{projectId} {
       allow get: if isValidId(projectId) && isActiveUser();
       allow list: if isActiveUser();
-      allow create: if isValidId(projectId) && isAdmin() && isValidProject(incoming());
-      allow update: if isValidId(projectId) && isAdmin() && isValidProject(incoming())
-        && incoming().createdAt == existing().createdAt;
+      allow create: if isValidId(projectId) && isValidProject(incoming()) && isAdmin();
+      allow update: if isValidId(projectId) && isValidProject(incoming())
+        && incoming().createdAt == existing().createdAt
+        && isAdmin();
       allow delete: if isValidId(projectId) && isAdmin();
     }
 
     // Daily Reports collection
     match /reports/{reportId} {
-      allow get: if isValidId(reportId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
+      allow get: if isValidId(reportId) && canGetReport(resource);
+      allow list: if hasProjectAccess(resource.data.projectId);
       allow create: if isValidId(reportId)
         && isValidDailyReport(incoming())
-        && hasProjectAccess(incoming().projectId)
-        && (isAdmin() || incoming().senderId == request.auth.uid)
         && incoming().status == 'submitted'
-        && (isAdmin() || reportId == 'rep-' + incoming().projectId + '-' + incoming().reportDate);
+        && canCreateReport(reportId, incoming());
       allow update: if isValidId(reportId)
         && isValidDailyReport(incoming())
         && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
-        && (
-          isAdmin() ||
-          (
-            isActiveUser()
-            && (
-              (
-                isReportOwner(existing())
-                && (
-                  (hasProjectAccess(existing().projectId) && hasProjectAccess(incoming().projectId)) ||
-                  incoming().projectId == existing().projectId
-                )
-              ) ||
-              (
-                hasProjectAccess(existing().projectId)
-                && hasProjectAccess(incoming().projectId)
-              )
-            )
-            && incoming().senderId == existing().senderId
-            && incoming().senderEmail == existing().senderEmail
-            && incoming().status == 'submitted'
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'projectId',
-              'projectName',
-              'reportDate',
-              'submittedWorks',
-              'receivedWorks',
-              'notes',
-              'attachments',
-              'status',
-              'updatedAt'
-            ])
-          )
-        );
+        && canUpdateReport(incoming(), existing());
       allow delete: if isValidId(reportId) && isAdmin();
 
       match /chunks/{chunkId} {
         allow get: if isValidId(reportId)
           && isValidId(chunkId)
-          && exists(/databases/$(database)/documents/reports/$(reportId))
-          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId);
+          && canAccessReportChunks(reportId);
         allow list: if isValidId(reportId)
-          && exists(/databases/$(database)/documents/reports/$(reportId))
-          && hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId);
+          && canAccessReportChunks(reportId);
         allow create: if isValidId(reportId)
           && isValidId(chunkId)
           && isValidReportAttachmentChunk(incoming())
-          && exists(/databases/$(database)/documents/reports/$(reportId))
-          && (
-            isAdmin() ||
-            (
-              isActiveUser() && (
-                hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId) ||
-                isReportOwner(get(/databases/$(database)/documents/reports/$(reportId)).data)
-              )
-            )
-          );
+          && canAccessReportChunks(reportId);
         allow delete: if isValidId(reportId)
           && isValidId(chunkId)
-          && (
-            isAdmin() ||
-            (
-              exists(/databases/$(database)/documents/reports/$(reportId))
-              && isActiveUser()
-              && (
-                hasProjectAccess(get(/databases/$(database)/documents/reports/$(reportId)).data.projectId) ||
-                isReportOwner(get(/databases/$(database)/documents/reports/$(reportId)).data)
-              )
-            )
-          );
+          && canDeleteReportChunk(reportId);
       }
     }
 
     // Issue Reports collection
     match /issues/{issueId} {
       allow get: if isValidId(issueId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
+      allow list: if hasProjectAccess(resource.data.projectId);
       allow create: if isValidId(issueId)
         && isValidIssueReport(incoming())
-        && hasProjectAccess(incoming().projectId)
-        && (isAdmin() || incoming().authorId == request.auth.uid)
-        && incoming().status == 'new';
+        && incoming().status == 'new'
+        && canCreateIssue(incoming());
       allow update: if isValidId(issueId)
-        && isAdmin()
         && isValidIssueReport(incoming())
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminComment', 'resolvedAt', 'updatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminComment', 'resolvedAt', 'updatedAt'])
+        && isAdmin();
       allow delete: if isValidId(issueId) && isAdmin();
     }
 
     // Project Tasks collection
     match /tasks/{taskId} {
       allow get: if isValidId(taskId) && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (isActiveUser() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
-      allow create: if isValidId(taskId) && isAdmin() && isValidProjectTask(incoming());
+      allow list: if hasProjectAccess(resource.data.projectId);
+      allow create: if isValidId(taskId) && isValidProjectTask(incoming()) && isAdmin();
       allow update: if isValidId(taskId)
         && isValidProjectTask(incoming())
         && incoming().createdAt == existing().createdAt
-        && (
-          isAdmin() ||
-          (
-            hasProjectAccess(existing().projectId)
-            && incoming().projectId == existing().projectId
-            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'completedBy', 'completedAt', 'proofNote', 'proofAttachment', 'updatedAt'])
-          )
-        );
+        && canUpdateTask(incoming(), existing());
       allow delete: if isValidId(taskId) && isAdmin();
 
       match /chunks/{chunkId} {
@@ -482,185 +740,87 @@ service cloud.firestore {
           && hasProjectAccess(get(/databases/$(database)/documents/tasks/$(taskId)).data.projectId);
         allow create: if isValidId(taskId)
           && isValidId(chunkId)
-          && isAdmin()
           && isValidTaskAttachmentChunk(incoming())
-          && exists(/databases/$(database)/documents/tasks/$(taskId));
+          && exists(/databases/$(database)/documents/tasks/$(taskId))
+          && isAdmin();
         allow delete: if isValidId(taskId)
           && isValidId(chunkId)
-          && (
-            isAdmin() ||
-            (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis())
-          );
+          && canDeleteTaskChunk(existing());
       }
     }
 
     // Announcements collection
     match /announcements/{announcementId} {
       allow get: if isValidId(announcementId) && isActiveUser();
-      allow list: if isAdmin() || isActiveUser();
-      allow create: if isValidId(announcementId) && isAdmin() && isValidAnnouncement(incoming());
+      allow list: if isActiveUser();
+      allow create: if isValidId(announcementId) && isValidAnnouncement(incoming()) && isAdmin();
       allow update: if isValidId(announcementId)
         && isValidAnnouncement(incoming())
         && incoming().createdAt == existing().createdAt
-        && (
-          isAdmin() ||
-          (
-            isActiveUser()
-            && incoming().diff(existing()).affectedKeys().hasOnly(['readBy'])
-          )
-        );
+        && canUpdateAnnouncement(incoming(), existing());
       allow delete: if isValidId(announcementId) && isAdmin();
     }
 
     // Executed Works collection
     match /executedWorks/{workId} {
-      allow get: if isValidId(workId) && hasExecutedWorksAccess() && hasProjectAccess(existing().projectId);
-      allow list: if isAdmin() || (hasExecutedWorksAccess() && (hasAllProjectsFlag() || hasAssignedProject(resource.data.projectId)));
+      allow get: if isValidId(workId) && canReadExecutedWork(existing().projectId);
+      allow list: if canReadExecutedWork(resource.data.projectId);
       allow create: if isValidId(workId)
         && isValidExecutedWork(incoming())
-        && hasExecutedWorksAccess()
-        && hasProjectAccess(incoming().projectId)
-        && (isAdmin() || incoming().authorId == request.auth.uid)
-        && (isAdmin() || incoming().reviewStatus == 'pending');
+        && canCreateExecutedWork(incoming());
       allow update: if isValidId(workId)
         && isValidExecutedWork(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().projectId == existing().projectId
-        && (
-          isAdmin() ||
-          (
-            hasExecutedWorksAccess()
-            && hasProjectAccess(existing().projectId)
-            && existing().authorId == request.auth.uid
-            && existing().reviewStatus == 'pending'
-            && incoming().authorId == existing().authorId
-            && incoming().reviewStatus == 'pending'
-          )
-        );
-      allow delete: if isValidId(workId) && (
-        isAdmin() ||
-        (hasExecutedWorksAccess() && hasProjectAccess(existing().projectId) && existing().authorId == request.auth.uid && existing().reviewStatus == 'pending')
-      );
+        && canUpdateExecutedWork(incoming(), existing());
+      allow delete: if isValidId(workId) && canDeleteExecutedWork(existing());
     }
 
     // Site PDF Deliverables (48-hour retention - upload enabled for all active authenticated emails)
     match /siteDeliverables/{deliverableId} {
-      allow get: if isValidId(deliverableId) && isActiveUser() && (
-        isAdmin() ||
-        existing().senderId == request.auth.uid ||
-        hasProjectAccess(existing().projectId)
-      );
-      allow list: if isAdmin() || (
-        isActiveUser() && (
-          resource.data.senderId == request.auth.uid ||
-          hasAllProjectsFlag() ||
-          hasAssignedProject(resource.data.projectId)
-        )
-      );
+      allow get: if isValidId(deliverableId) && canReadDeliverableData(existing());
+      allow list: if canReadDeliverableData(resource.data);
       allow create: if isValidId(deliverableId)
         && isValidSiteDeliverable(incoming())
-        && hasSiteDeliverablesAccess()
-        && (isAdmin() || incoming().senderId == request.auth.uid)
-        && (isAdmin() || incoming().status == 'pending_receipt');
+        && canCreateDeliverable(incoming());
       allow update: if isValidId(deliverableId)
-        && isAdmin()
         && isValidSiteDeliverable(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().projectId == existing().projectId
         && incoming().senderId == existing().senderId
         && incoming().expiresAtMs == existing().expiresAtMs
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'updatedAt']);
-      allow delete: if isValidId(deliverableId) && (
-        isAdmin() ||
-        (isActiveUser() && existing().senderId == request.auth.uid) ||
-        (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis())
-      );
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'updatedAt'])
+        && isAdmin();
+      allow delete: if isValidId(deliverableId) && canDeleteDeliverable(existing());
 
       match /chunks/{chunkId} {
         allow get: if isValidId(deliverableId)
           && isValidId(chunkId)
-          && isActiveUser()
-          && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-          && (
-            isAdmin() ||
-            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid ||
-            hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
-          );
+          && canReadDeliverableChunks(deliverableId);
         allow list: if isValidId(deliverableId)
-          && isActiveUser()
-          && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-          && (
-            isAdmin() ||
-            get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid ||
-            hasProjectAccess(get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.projectId)
-          );
+          && canReadDeliverableChunks(deliverableId);
         allow create: if isValidId(deliverableId)
           && isValidId(chunkId)
           && isValidSiteDeliverableChunk(incoming())
-          && hasSiteDeliverablesAccess()
-          && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-          && (isAdmin() || get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid);
-        allow delete: if isValidId(deliverableId) && isValidId(chunkId) && (
-          isAdmin() ||
-          (isActiveUser() && existing().expiresAtMs is int && existing().expiresAtMs <= request.time.toMillis()) ||
-          (
-            isActiveUser()
-            && exists(/databases/$(database)/documents/siteDeliverables/$(deliverableId))
-            && get(/databases/$(database)/documents/siteDeliverables/$(deliverableId)).data.senderId == request.auth.uid
-          )
-        );
+          && canCreateDeliverableChunk(deliverableId);
+        allow delete: if isValidId(deliverableId)
+          && isValidId(chunkId)
+          && canDeleteDeliverableChunk(deliverableId, existing());
       }
     }
 
     // Real-time Notifications collection
     match /notifications/{notificationId} {
-      allow get: if isValidId(notificationId) && (
-        isAdmin() ||
-        (
-          isActiveUser() &&
-          (
-            existing().targetUserId == request.auth.uid ||
-            existing().targetRole in ['site', 'all']
-          )
-        )
-      );
-      allow list: if isAdmin() || (
-        isActiveUser() &&
-        (
-          resource.data.targetUserId == request.auth.uid ||
-          resource.data.targetRole in ['site', 'all']
-        )
-      );
+      allow get: if isValidId(notificationId) && canReadNotification(existing());
+      allow list: if canReadNotification(resource.data);
       allow create: if isValidId(notificationId)
         && isValidAppNotification(incoming())
-        && isActiveUser()
-        && (
-          isAdmin() ||
-          (
-            incoming().targetRole == 'admin'
-            && incoming().senderId == request.auth.uid
-            && incoming().type in ['report_submitted', 'urgent_issue', 'issue_reported', 'deliverable_sent', 'work_logged', 'task_done']
-            && (
-              incoming().type == 'deliverable_sent' ||
-              !('projectId' in incoming()) ||
-              hasProjectAccess(incoming().projectId)
-            )
-          )
-        );
+        && canCreateNotification(incoming());
       allow update: if isValidId(notificationId)
         && isValidAppNotification(incoming())
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['readBy', 'isRead'])
-        && (
-          isAdmin() ||
-          (
-            isActiveUser() &&
-            (
-              existing().targetUserId == request.auth.uid ||
-              existing().targetRole in ['site', 'all']
-            )
-          )
-        );
+        && canReadNotification(existing());
       allow delete: if isValidId(notificationId) && isAdmin();
     }
   }

@@ -1631,8 +1631,28 @@ class DataService {
       });
     }
 
+    const reportDocRef = doc(db, 'reports', newReport.id);
     try {
-      await setDoc(doc(db, 'reports', newReport.id), stripUndefined(newReport));
+      const existingSnap = await getDoc(reportDocRef);
+      if (existingSnap.exists()) {
+        const remoteReport = {
+          ...(existingSnap.data() as DailyReport),
+          id: existingSnap.id
+        };
+        const mergedReports = [remoteReport, ...reports.filter((r) => r.id !== remoteReport.id)];
+        localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(mergedReports));
+        this.notify();
+        throw new Error('DAILY_REPORT_ALREADY_EXISTS');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === 'DAILY_REPORT_ALREADY_EXISTS') {
+        throw error;
+      }
+      // If pre-check fails unexpectedly, proceed to setDoc so Firestore returns the authoritative error
+    }
+
+    try {
+      await setDoc(reportDocRef, stripUndefined(newReport));
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}`);
     }
@@ -1819,49 +1839,83 @@ class DataService {
     });
 
     const reportRef = doc(db, 'reports', reportId);
+    const updatePayload = stripUndefined({
+      projectId: nextProjectId,
+      projectName: nextProjectName,
+      reportDate: nextReportDate,
+      submittedWorks: nextSubmittedWorks,
+      receivedWorks: nextReceivedWorks,
+      notes: nextNotes,
+      attachments: nextAttachments,
+      status: 'submitted' as const,
+      updatedAt
+    });
+
+    let savedReportId = reportId;
     try {
-      const remoteSnap = await getDoc(reportRef);
-      if (remoteSnap.exists()) {
-        await updateDoc(
-          reportRef,
-          stripUndefined({
-            projectId: nextProjectId,
-            projectName: nextProjectName,
-            reportDate: nextReportDate,
-            submittedWorks: nextSubmittedWorks,
-            receivedWorks: nextReceivedWorks,
-            notes: nextNotes,
-            attachments: nextAttachments,
-            status: 'submitted',
-            updatedAt
-          })
-        );
-      } else {
+      await updateDoc(reportRef, updatePayload);
+    } catch (error) {
+      const errCode = (error as { code?: string })?.code || '';
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (errCode === 'not-found' || errMsg.includes('No document to update')) {
         const currentUser = this.getCurrentUser();
         const fallbackSenderId = (auth.currentUser?.uid || existing.senderId || currentUser?.id || '').slice(0, 128);
         const fallbackSenderEmail = normalizeEmail(
           existing.senderEmail || currentUser?.email || auth.currentUser?.email
         ).slice(0, 200);
-        const fallbackSenderName = (existing.senderName || currentUser?.displayName || auth.currentUser?.displayName || 'مستخدم')
+        const fallbackSenderName = (
+          existing.senderName ||
+          currentUser?.displayName ||
+          auth.currentUser?.displayName ||
+          'مستخدم'
+        )
           .trim()
           .slice(0, 150);
-        await setDoc(
-          reportRef,
-          stripUndefined({
-            ...updatedReport,
-            id: reportId,
-            senderId: fallbackSenderId,
-            senderEmail: fallbackSenderEmail,
-            senderName: fallbackSenderName,
-            createdAt: existing.createdAt || updatedAt
-          })
-        );
+
+        const canonicalCandidate = `rep-${nextProjectId}-${nextReportDate}`;
+        const targetId =
+          canonicalCandidate.length <= 128 && /^[a-zA-Z0-9_\-]+$/.test(canonicalCandidate)
+            ? canonicalCandidate
+            : reportId;
+        savedReportId = targetId;
+
+        try {
+          const sanitizedAdminFeedback =
+            typeof existing.adminFeedback === 'string' && existing.adminFeedback.trim()
+              ? existing.adminFeedback.trim().slice(0, 2000)
+              : undefined;
+          await setDoc(
+            doc(db, 'reports', targetId),
+            stripUndefined({
+              id: targetId,
+              projectId: nextProjectId,
+              projectName: nextProjectName,
+              reportDate: nextReportDate,
+              senderId: fallbackSenderId,
+              senderName: fallbackSenderName,
+              senderEmail: fallbackSenderEmail,
+              submittedWorks: nextSubmittedWorks,
+              receivedWorks: nextReceivedWorks,
+              notes: nextNotes || undefined,
+              attachments: nextAttachments,
+              status: 'submitted' as const,
+              adminFeedback: sanitizedAdminFeedback,
+              createdAt: existing.createdAt || updatedAt,
+              updatedAt
+            })
+          );
+        } catch (createError) {
+          if (writtenChunkIds.length > 0) {
+            await this.deleteChunksByIds(reportId, writtenChunkIds);
+          }
+          handleFirestoreError(createError, OperationType.CREATE, `reports/${targetId}`);
+        }
+      } else {
+        if (writtenChunkIds.length > 0) {
+          await this.deleteChunksByIds(reportId, writtenChunkIds);
+        }
+        handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
       }
-    } catch (error) {
-      if (writtenChunkIds.length > 0) {
-        await this.deleteChunksByIds(reportId, writtenChunkIds);
-      }
-      handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
     }
 
     // Delete orphaned chunks for any chunked attachment removed by the user
@@ -1891,7 +1945,7 @@ class DataService {
       });
     }
 
-    reports[idx] = updatedReport;
+    reports[idx] = { ...updatedReport, id: savedReportId };
     localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
 
     const activeUser = this.getCurrentUser();

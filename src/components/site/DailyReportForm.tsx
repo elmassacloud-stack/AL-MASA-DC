@@ -11,7 +11,8 @@ import {
   AlertCircle,
   Loader2,
   FileText,
-  Image as ImageIcon
+  Image as ImageIcon,
+  Pencil
 } from 'lucide-react';
 import {
   UserProfile,
@@ -33,6 +34,7 @@ import {
   PreparedReportAttachment,
   formatFileSize
 } from '../../utils/pdfUtils';
+import { EditDailyReportModal } from './EditDailyReportModal';
 
 interface Props {
   currentUser: UserProfile;
@@ -99,6 +101,8 @@ export const DailyReportForm: React.FC<Props> = ({
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<ReportUploadProgress | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
 
   const allReports = reports ?? dataService.getReports();
   const existingReportForDate = allReports.find(
@@ -373,7 +377,7 @@ export const DailyReportForm: React.FC<Props> = ({
     } catch (err) {
       if (err instanceof Error && err.message === 'DAILY_REPORT_ALREADY_EXISTS') {
         setValidationError(
-          'تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل. يمكنك تعديله مباشرة من تبويب «تقديماتي» أو عبر زر التعديل أعلاه.'
+          'تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل. يمكنك تعديله وحفظه مباشرة عبر زر «تعديل التقرير المرسل» أدناه أو من تبويب «تقديماتي».'
         );
       } else {
         setValidationError(
@@ -501,6 +505,35 @@ export const DailyReportForm: React.FC<Props> = ({
         </div>
       )}
 
+
+      {existingReportForDate && (
+        <div className="p-4 bg-amber-50 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 rounded-2xl text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 text-xs sm:text-sm">
+            <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold">تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل.</p>
+              <p className="text-xs opacity-90 mt-0.5">
+                يمكنك تعديل بيانات التقرير والمرفقات وحفظ التعديلات لإعادة إرسالها لإدارة مراقبة الوثائق.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setIsEditModalOpen(true)}
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs sm:text-sm rounded-xl shadow-xs flex items-center justify-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+          >
+            <Pencil className="w-4 h-4" />
+            <span>تعديل وحفظ التقرير المرسل</span>
+          </button>
+        </div>
+      )}
+
+      {editSuccessMsg && (
+        <div className="p-4 bg-emerald-50 dark:bg-emerald-950/80 border border-emerald-300 dark:border-emerald-800 rounded-xl text-emerald-800 dark:text-emerald-300 text-sm flex items-center gap-2">
+          <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
+          <span className="font-bold">{editSuccessMsg}</span>
+        </div>
+      )}
 
       {/* Validation or Success Banner */}
       {validationError && (
@@ -925,34 +958,57 @@ export const DailyReportForm: React.FC<Props> = ({
         )}
 
         {/* Submit Actions Button Bar */}
-        <div className="flex items-center justify-end gap-3 pt-2">
-          <button
-            type="submit"
-            disabled={
-              accessibleProjects.length === 0 ||
-              Boolean(existingReportForDate) ||
-              isSubmitting ||
-              isPreparingAttachments
-            }
-            className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isSubmitting ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <Save className="w-5 h-5" />
-            )}
-            <span>
-              {existingReportForDate
-                ? 'تم إرسال تقرير هذا اليوم بالفعل (يمكنك التعديل فقط)'
-                : isSubmitting
+        <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+          {existingReportForDate ? (
+            <button
+              type="button"
+              onClick={() => setIsEditModalOpen(true)}
+              className="w-full sm:w-auto px-8 py-3.5 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-amber-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation"
+            >
+              <Pencil className="w-5 h-5" />
+              <span>تعديل التقرير المرسل وحفظ التغييرات</span>
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={
+                accessibleProjects.length === 0 ||
+                isSubmitting ||
+                isPreparingAttachments
+              }
+              className="w-full sm:w-auto px-8 py-3.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold text-sm sm:text-base rounded-xl shadow-md shadow-blue-500/25 flex items-center justify-center gap-2 cursor-pointer transition-all touch-manipulation disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? (
+                <Loader2 className="w-5 h-5 animate-spin" />
+              ) : (
+                <Save className="w-5 h-5" />
+              )}
+              <span>
+                {isSubmitting
                   ? uploadProgress
                     ? `جاري رفع المرفقات (${uploadProgress.percent}%)...`
                     : 'جاري إرسال التقرير...'
                   : 'إرسال التقرير اليومي للإدارة'}
-            </span>
-          </button>
+              </span>
+            </button>
+          )}
         </div>
       </form>
+
+      {isEditModalOpen && existingReportForDate && (
+        <EditDailyReportModal
+          report={existingReportForDate}
+          currentUser={currentUser}
+          projects={projects}
+          onClose={() => setIsEditModalOpen(false)}
+          onSaved={(updatedTitle) => {
+            setIsEditModalOpen(false);
+            setValidationError(null);
+            setEditSuccessMsg(`تم تعديل وحفظ التقرير اليومي (${updatedTitle}) وإرساله للإدارة بنجاح.`);
+            setTimeout(() => setEditSuccessMsg(null), 5000);
+          }}
+        />
+      )}
     </div>
   );
 };

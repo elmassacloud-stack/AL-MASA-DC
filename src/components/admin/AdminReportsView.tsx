@@ -14,30 +14,36 @@ import {
   Search,
   Check,
   Copy,
-  Paperclip
+  Paperclip,
+  Pencil
 } from 'lucide-react';
 import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ReportAttachmentList } from '../common/ReportAttachmentList';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
 import { dataService } from '../../services/dataService';
+import { EditDailyReportModal } from '../site/EditDailyReportModal';
 
 interface Props {
   reports: DailyReport[];
   projects: Project[];
   users: UserProfile[];
+  currentUser: UserProfile;
 }
 
 export const AdminReportsView: React.FC<Props> = ({
   reports,
   projects,
-  users
+  users,
+  currentUser
 }) => {
   const [filterProjectId, setFilterProjectId] = useState<string>('all');
   const [filterDate, setFilterDate] = useState<string>('');
   const [filterSender, setFilterSender] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
+  const [editingReport, setEditingReport] = useState<DailyReport | null>(null);
+  const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
   const [adminFeedbackInput, setAdminFeedbackInput] = useState<string>('');
   const [savedFeedbackMsg, setSavedFeedbackMsg] = useState<boolean>(false);
   const [feedbackErrorMsg, setFeedbackErrorMsg] = useState<string | null>(null);
@@ -222,6 +228,23 @@ export const AdminReportsView: React.FC<Props> = ({
         </div>
       </div>
 
+      {editSuccessMsg && (
+        <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-xs sm:text-sm font-bold flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{editSuccessMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setEditSuccessMsg(null)}
+            className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+            aria-label="إغلاق الرسالة"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Reports List */}
       <div className="space-y-3">
         {filteredReports.length === 0 ? (
@@ -306,7 +329,16 @@ export const AdminReportsView: React.FC<Props> = ({
               )}
 
               {/* Card Actions */}
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingReport(report)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:hover:bg-amber-900/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title="تعديل بيانات التقرير اليومي"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                  <span>تعديل التقرير</span>
+                </button>
                 <button
                   onClick={() => handleCopyReportSummary(report)}
                   className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -545,6 +577,18 @@ export const AdminReportsView: React.FC<Props> = ({
                   <span>تصدير نموذج إكسل (.xlsx)</span>
                 </button>
                 <button
+                  type="button"
+                  onClick={() => {
+                    const target = selectedReport;
+                    setSelectedReport(null);
+                    setEditingReport(target);
+                  }}
+                  className="px-4 py-2 bg-amber-50 hover:bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:hover:bg-amber-900/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                >
+                  <Pencil className="w-4 h-4" />
+                  <span>تعديل التقرير</span>
+                </button>
+                <button
                   onClick={() => handleCopyReportSummary(selectedReport)}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors shadow-xs"
                 >
@@ -561,6 +605,20 @@ export const AdminReportsView: React.FC<Props> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {editingReport && (
+        <EditDailyReportModal
+          report={editingReport}
+          currentUser={currentUser}
+          projects={projects}
+          onClose={() => setEditingReport(null)}
+          onSaved={(updatedTitle) => {
+            setEditingReport(null);
+            setEditSuccessMsg(`تم تعديل وحفظ التقرير اليومي (${updatedTitle}) بنجاح.`);
+            setTimeout(() => setEditSuccessMsg(null), 4000);
+          }}
+        />
       )}
     </div>
   );
