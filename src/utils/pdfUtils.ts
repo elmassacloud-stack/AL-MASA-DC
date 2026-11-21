@@ -26,17 +26,21 @@ export interface ExcelPreviewSheet {
 
 export function isExcelFileName(fileName?: string): boolean {
   if (!fileName) return false;
-  return /\.(xlsx|xls|xlsm|xlsb|csv)$/i.test(fileName.trim());
+  return /\.(xlsx|xls|xlsm|xlsb|xltx|xltm|ods|csv|tsv)$/i.test(fileName.trim());
 }
 
 export function isExcelFile(file: File): boolean {
   if (isExcelFileName(file.name)) return true;
   const excelMimes = [
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
     'application/vnd.ms-excel',
     'application/vnd.ms-excel.sheet.macroEnabled.12',
+    'application/vnd.ms-excel.template.macroEnabled.12',
     'application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet',
+    'application/vnd.oasis.opendocument.spreadsheet',
     'text/csv',
+    'text/tab-separated-values',
     'application/csv'
   ];
   return excelMimes.includes(file.type);
@@ -47,6 +51,7 @@ export function getExcelMimeType(fileName: string): string {
   if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
   if (lower.endsWith('.xlsm')) return 'application/vnd.ms-excel.sheet.macroEnabled.12';
   if (lower.endsWith('.xlsb')) return 'application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet';
+  if (lower.endsWith('.ods')) return 'application/vnd.oasis.opendocument.spreadsheet';
   if (lower.endsWith('.csv')) return 'text/csv;charset=utf-8';
   return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 }
@@ -54,34 +59,80 @@ export function getExcelMimeType(fileName: string): string {
 export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<ExcelPreviewSheet[]> {
   const response = await fetch(blobUrl);
   const buffer = await response.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: 'array' });
-  const MAX_PREVIEW_ROWS = 250;
-
-  return workbook.SheetNames.map((name) => {
-    const sheet = workbook.Sheets[name];
-    const rawRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' });
-    const truncated = rawRows.length > MAX_PREVIEW_ROWS;
-    const sliced = rawRows.slice(0, MAX_PREVIEW_ROWS);
-    const maxCols = Math.min(
-      30,
-      sliced.reduce((max, row) => Math.max(max, Array.isArray(row) ? row.length : 0), 0)
-    );
-    const normalizedRows = sliced.map((row) => {
-      const arr = Array.isArray(row) ? row : [];
-      const out: string[] = [];
-      for (let c = 0; c < maxCols; c++) {
-        const val = arr[c];
-        out.push(val === null || val === undefined ? '' : String(val));
-      }
-      return out;
-    });
-    return {
-      name,
-      rows: normalizedRows,
-      totalRows: rawRows.length,
-      truncated
-    };
+  const bytes = new Uint8Array(buffer);
+  const workbook = XLSX.read(bytes, {
+    type: 'array',
+    cellFormula: false,
+    cellHTML: false,
+    cellStyles: false,
+    cellNF: true,
+    sheetStubs: false,
+    bookVBA: false
   });
+  const MAX_PREVIEW_ROWS = 250;
+  const MAX_PREVIEW_COLS = 30;
+  const sheets: ExcelPreviewSheet[] = [];
+
+  for (const name of workbook.SheetNames) {
+    try {
+      const sheet = workbook.Sheets?.[name];
+      if (!sheet || (sheet as Record<string, unknown>)['!type'] === 'chart') continue;
+
+      const rowMap = new Map<number, Map<number, string>>();
+      let maxCol = -1;
+      for (const key of Object.keys(sheet)) {
+        if (key.charCodeAt(0) === 33) continue;
+        const cell = sheet[key] as XLSX.CellObject | undefined;
+        if (!cell || cell.t === 'z' || cell.t === 'e') continue;
+        const val =
+          typeof cell.w === 'string' && cell.w.trim()
+            ? cell.w.trim()
+            : cell.v === null || cell.v === undefined
+              ? ''
+              : String(cell.v);
+        if (!val) continue;
+        let pos: XLSX.CellAddress;
+        try {
+          pos = XLSX.utils.decode_cell(key);
+        } catch {
+          continue;
+        }
+        if (pos.r < 0 || pos.c < 0 || pos.c >= MAX_PREVIEW_COLS) continue;
+        let cols = rowMap.get(pos.r);
+        if (!cols) {
+          cols = new Map<number, string>();
+          rowMap.set(pos.r, cols);
+        }
+        cols.set(pos.c, val);
+        if (pos.c > maxCol) maxCol = pos.c;
+      }
+
+      const sortedRows = Array.from(rowMap.keys()).sort((a, b) => a - b);
+      const totalRows = sortedRows.length;
+      const truncated = totalRows > MAX_PREVIEW_ROWS;
+      const slicedKeys = sortedRows.slice(0, MAX_PREVIEW_ROWS);
+      const colCount = Math.max(0, maxCol + 1);
+      const normalizedRows = slicedKeys.map((rIdx) => {
+        const cols = rowMap.get(rIdx)!;
+        const out = new Array<string>(colCount).fill('');
+        cols.forEach((v, cIdx) => {
+          out[cIdx] = v;
+        });
+        return out;
+      });
+
+      sheets.push({
+        name,
+        rows: normalizedRows,
+        totalRows,
+        truncated
+      });
+    } catch {
+      sheets.push({ name, rows: [], totalRows: 0, truncated: false });
+    }
+  }
+
+  return sheets;
 }
 
 function uint8ArrayToBase64(bytes: Uint8Array): string {
