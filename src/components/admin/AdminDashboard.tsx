@@ -22,6 +22,7 @@ import {
   Announcement
 } from '../../types';
 import { getTodayDateStr } from '../../seedData';
+import { WORK_DISCIPLINE_CONFIG } from '../../config';
 import { AdminAnalyticsCharts } from './AdminAnalyticsCharts';
 
 interface Props {
@@ -79,17 +80,30 @@ export const AdminDashboard: React.FC<Props> = ({
     <div className="space-y-6 max-w-7xl mx-auto pb-16">
       {/* Top Banner / Welcome */}
       <div className="bg-gradient-to-l from-blue-700 via-blue-600 to-indigo-800 rounded-3xl p-5 sm:p-7 text-white shadow-lg relative overflow-hidden">
-        <div className="relative z-10 max-w-2xl">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-xs font-semibold mb-3">
-            <Layers className="w-3.5 h-3.5" />
-            <span>لوحة المؤشرات والرقابة المركزية DC</span>
+        <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="max-w-2xl">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-xs font-semibold mb-3">
+              <Layers className="w-3.5 h-3.5" />
+              <span>لوحة المؤشرات والرقابة المركزية DC</span>
+            </div>
+            <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight">
+              متابعة مشاريع ومواقع العمل الميدانية
+            </h2>
+            <p className="text-blue-100 text-xs sm:text-sm mt-1.5 leading-relaxed">
+              مراقبة لحظية لتقارير الإنجاز اليومية، تتبع مواقف التقديمات الهندسية (Submittals)، والتدخل السريع لحل عوائق المواقع.
+            </p>
           </div>
-          <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight">
-            متابعة مشاريع ومواقع العمل الميدانية
-          </h2>
-          <p className="text-blue-100 text-xs sm:text-sm mt-1.5 leading-relaxed">
-            مراقبة لحظية لتقارير الإنجاز اليومية، تتبع مواقف التقديمات الهندسية (Submittals)، والتدخل السريع لحل عوائق المواقع.
-          </p>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onNavigateTab('projects')}
+              className="min-h-[42px] px-4 py-2 rounded-xl bg-white text-blue-700 hover:bg-blue-50 text-xs sm:text-sm font-extrabold flex items-center gap-2 cursor-pointer shadow-sm transition-colors"
+            >
+              <Building className="w-4 h-4" />
+              <span>إدارة المشاريع ({projects.length})</span>
+            </button>
+          </div>
         </div>
 
         {/* Decorative badge in background */}
@@ -284,12 +298,22 @@ export const AdminDashboard: React.FC<Props> = ({
                     key={project.id}
                     className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40 transition-colors"
                   >
-                    {/* Project Name */}
+                    {/* Project Name & Scope */}
                     <td className="py-3.5 px-4 font-bold text-slate-900 dark:text-white">
                       <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-blue-600" />
+                        <span className="w-2 h-2 rounded-full bg-blue-600 shrink-0" />
                         <span>{project.name}</span>
                       </div>
+                      {(project.scopeDisciplines?.length || project.workScope) && (
+                        <div className="mt-1 mr-4 text-[11px] font-normal text-slate-500 dark:text-slate-400 line-clamp-1">
+                          {project.scopeDisciplines && project.scopeDisciplines.length > 0
+                            ? project.scopeDisciplines
+                                .slice(0, 3)
+                                .map((d) => WORK_DISCIPLINE_CONFIG[d]?.labelAr || d)
+                                .join(' · ')
+                            : project.workScope}
+                        </div>
+                      )}
                     </td>
 
                     {/* Code */}

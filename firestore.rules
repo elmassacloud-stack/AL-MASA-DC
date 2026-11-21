@@ -569,11 +569,20 @@ service cloud.firestore {
 
     function isValidProject(data) {
       return data.keys().hasAll(['id', 'name', 'code', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'name', 'code', 'description', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'name', 'code', 'description', 'workScope', 'scopeDisciplines', 'plannedWorksCount', 'location', 'clientName', 'status', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && data.name is string && data.name.size() >= 1 && data.name.size() <= 200
         && data.code is string && data.code.size() >= 1 && data.code.size() <= 80
-        && (!('description' in data) || (data.description is string && data.description.size() <= 1000))
+        && (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 1000))
+        && (!('workScope' in data) || data.workScope == null || (data.workScope is string && data.workScope.size() <= 2000))
+        && (!('scopeDisciplines' in data) || data.scopeDisciplines == null || (
+          data.scopeDisciplines is list
+          && data.scopeDisciplines.size() <= 10
+          && data.scopeDisciplines.hasOnly(['civil_structural', 'architectural', 'electrical', 'mechanical', 'finishing', 'infrastructure', 'other'])
+        ))
+        && (!('plannedWorksCount' in data) || data.plannedWorksCount == null || (data.plannedWorksCount is number && data.plannedWorksCount >= 0 && data.plannedWorksCount <= 100000))
+        && (!('location' in data) || data.location == null || (data.location is string && data.location.size() <= 200))
+        && (!('clientName' in data) || data.clientName == null || (data.clientName is string && data.clientName.size() <= 200))
         && (data.status == 'active' || data.status == 'completed')
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.updatedAt is string && data.updatedAt.size() <= 64;
@@ -783,6 +792,18 @@ service cloud.firestore {
         && (!('reminderTime' in data) || (data.reminderTime is string && (data.reminderTime == '' || data.reminderTime.matches('^[0-9]{2}:[0-9]{2}$'))))
         && (!('reminderDismissed' in data) || data.reminderDismissed is bool)
         && data.createdAt is string && data.createdAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidAppBrandingSettings(data) {
+      return data.keys().hasAll(['id', 'brandColor', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'brandColor', 'updatedBy', 'updatedByName', 'updatedAt'])
+        && data.id == 'branding'
+        && data.brandColor is string
+        && data.brandColor.size() == 7
+        && data.brandColor.matches('^#[0-9a-fA-F]{6}$')
+        && (!('updatedBy' in data) || data.updatedBy == null || (data.updatedBy is string && data.updatedBy.size() <= 128))
+        && (!('updatedByName' in data) || data.updatedByName == null || (data.updatedByName is string && data.updatedByName.size() <= 150))
         && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
@@ -1021,6 +1042,22 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly(['readBy', 'isRead'])
         && canReadNotification(existing());
       allow delete: if isValidId(notificationId) && isAdmin();
+    }
+
+    // Global App Settings (Branding / Custom Brand Color)
+    match /appSettings/{settingId} {
+      allow get: if isValidId(settingId) && settingId == 'branding' && isActiveUser();
+      allow create: if isValidId(settingId)
+        && settingId == 'branding'
+        && isValidAppBrandingSettings(incoming())
+        && isAdmin();
+      allow update: if isValidId(settingId)
+        && settingId == 'branding'
+        && isValidAppBrandingSettings(incoming())
+        && incoming().id == existing().id
+        && incoming().diff(existing()).affectedKeys().hasOnly(['brandColor', 'updatedBy', 'updatedByName', 'updatedAt'])
+        && isAdmin();
+      allow delete: if false;
     }
   }
 }

@@ -129,6 +129,11 @@ export interface Project {
   name: string;
   code: string;
   description?: string;
+  workScope?: string;
+  scopeDisciplines?: WorkDiscipline[];
+  plannedWorksCount?: number;
+  location?: string;
+  clientName?: string;
   status: 'active' | 'completed';
   createdAt: string;
   updatedAt: string;
@@ -290,3 +295,12 @@ export interface PersonalNote {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface AppBrandingSettings {
+  id: 'branding';
+  brandColor: string; // #RRGGBB hex color
+  updatedBy?: string;
+  updatedByName?: string;
+  updatedAt: string;
+}
+

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   FileSpreadsheet,
   Upload,
@@ -22,7 +22,9 @@ import {
   LayoutGrid,
   Calendar,
   GitBranch,
-  RotateCcw
+  RotateCcw,
+  Building2,
+  CloudDownload
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -36,8 +38,16 @@ import {
   Tooltip,
   CartesianGrid
 } from 'recharts';
-import { UserProfile, SubmittalStatusCode } from '../../types';
+import {
+  UserProfile,
+  SubmittalStatusCode,
+  Project,
+  SiteDeliverable,
+  DailyReport,
+  ReportAttachment
+} from '../../types';
 import { SUBMITTAL_STATUS_CONFIG } from '../../config';
+import { dataService } from '../../services/dataService';
 import {
   parseDriveExcelWorkbook,
   autoDetectColumnMapping,
@@ -56,20 +66,47 @@ import {
   DateFilterConfig,
   DateFilterMode
 } from '../../utils/driveLogParser';
-import { formatFileSize, isExcelFile } from '../../utils/pdfUtils';
+import { formatFileSize, isExcelFile, isExcelFileName } from '../../utils/pdfUtils';
+import {
+  loadAllStoredExcelFiles,
+  saveStoredExcelFile,
+  deleteStoredExcelFile
+} from '../../utils/excelLogsStorage';
 
 interface Props {
   currentUser: UserProfile;
+  projects: Project[];
+  siteDeliverables?: SiteDeliverable[];
+  reports?: DailyReport[];
 }
 
 interface UploadedExcelWorkbook {
   id: string;
+  projectId: string;
   fileName: string;
   fileSize: number;
   uploadedAt: string;
+  savedAtMs: number;
+  buffer?: ArrayBuffer;
+  sourceLabel?: string;
+  remoteKey?: string;
   workbook: ParsedWorkbookData;
   sheetOverrides: Record<number, SheetOverrideConfig>;
   excludedSheetIndices: number[];
+}
+
+interface RemoteProjectExcelSource {
+  key: string;
+  projectId: string;
+  fileName: string;
+  fileSize?: number;
+  sourceType: 'deliverable' | 'report';
+  sourceLabel: string;
+  dateLabel: string;
+  senderName: string;
+  deliverable?: SiteDeliverable;
+  reportId?: string;
+  attachment?: ReportAttachment;
 }
 
 const MAPPING_FIELD_LABELS: { key: keyof LogColumnMapping; label: string }[] = [
@@ -213,13 +250,36 @@ const ExcelChartTooltip: React.FC<{
   );
 };
 
-export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
+export const AdminExcelLogsView: React.FC<Props> = ({
+  currentUser,
+  projects,
+  siteDeliverables = [],
+  reports = []
+}) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const uploadTargetProjectIdRef = useRef<string | null>(null);
 
-  // Uploaded local workbooks state
+  // Projects ordered: active first, then completed
+  const sortedProjects = useMemo(() => {
+    return [...projects].sort((a, b) => {
+      if (a.status !== b.status) return a.status === 'active' ? -1 : 1;
+      return a.name.localeCompare(b.name, 'ar');
+    });
+  }, [projects]);
+
+  // Selected project tab: 'all' (all sites overview) or a specific Project ID
+  const [selectedProjectTab, setSelectedProjectTab] = useState<string>(() =>
+    sortedProjects.length > 0 ? sortedProjects[0].id : 'all'
+  );
+  const [projectTabSearch, setProjectTabSearch] = useState<string>('');
+  const [activeFileByProject, setActiveFileByProject] = useState<Record<string, string>>({});
+
+  // Uploaded workbooks state (persisted per project in IndexedDB)
   const [uploadedFiles, setUploadedFiles] = useState<UploadedExcelWorkbook[]>([]);
+  const [isHydratingSaved, setIsHydratingSaved] = useState<boolean>(true);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState<boolean>(false);
+  const [loadingRemoteKey, setLoadingRemoteKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
@@ -261,9 +321,95 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     }, 1800);
   };
 
-  if (currentUser.role !== 'admin') {
-    return null;
-  }
+  // Ensure selectedProjectTab stays valid if projects load or change dynamically
+  useEffect(() => {
+    if (sortedProjects.length === 0) {
+      if (selectedProjectTab !== 'all') setSelectedProjectTab('all');
+      return;
+    }
+    if (
+      selectedProjectTab !== 'all' &&
+      !sortedProjects.some((p) => p.id === selectedProjectTab)
+    ) {
+      setSelectedProjectTab(sortedProjects[0].id);
+    }
+  }, [sortedProjects, selectedProjectTab]);
+
+  // Hydrate previously uploaded project Excel workbooks from IndexedDB on mount
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const stored = await loadAllStoredExcelFiles();
+        if (!active || stored.length === 0) return;
+
+        const restored: UploadedExcelWorkbook[] = [];
+        for (const rec of stored) {
+          try {
+            const parsed = parseDriveExcelWorkbook(rec.buffer, rec.fileName);
+            if (parsed.sheets.length === 0) continue;
+            restored.push({
+              id: rec.id,
+              projectId: rec.projectId,
+              fileName: rec.fileName,
+              fileSize: rec.fileSize,
+              uploadedAt: rec.uploadedAt,
+              savedAtMs: rec.savedAtMs,
+              buffer: rec.buffer,
+              sourceLabel: rec.sourceLabel,
+              workbook: parsed,
+              sheetOverrides: rec.sheetOverrides || {},
+              excludedSheetIndices: rec.excludedSheetIndices || []
+            });
+          } catch {
+            // Skip corrupted cached entry silently
+          }
+        }
+
+        if (!active || restored.length === 0) return;
+        setUploadedFiles(restored);
+        const firstByProject: Record<string, string> = {};
+        for (const item of restored) {
+          if (!firstByProject[item.projectId]) {
+            firstByProject[item.projectId] = item.id;
+          }
+        }
+        setActiveFileByProject(firstByProject);
+        setSelectedProjectTab((currentTab) => {
+          const match = restored.find((r) => r.projectId === currentTab);
+          if (match) {
+            setActiveFileId(match.id);
+            const visibleIndices = match.workbook.sheets
+              .map((_, i) => i)
+              .filter((i) => !match.excludedSheetIndices.includes(i));
+            setActiveView(visibleIndices.length === 1 ? visibleIndices[0] : 'overview');
+          }
+          return currentTab;
+        });
+      } finally {
+        if (active) setIsHydratingSaved(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const persistEntryToStorage = (entry: UploadedExcelWorkbook) => {
+    if (!entry.buffer) return;
+    void saveStoredExcelFile({
+      id: entry.id,
+      projectId: entry.projectId,
+      fileName: entry.fileName,
+      fileSize: entry.fileSize,
+      uploadedAt: entry.uploadedAt,
+      savedAtMs: entry.savedAtMs,
+      buffer: entry.buffer,
+      sheetOverrides: entry.sheetOverrides,
+      excludedSheetIndices: entry.excludedSheetIndices,
+      sourceLabel: entry.sourceLabel
+    });
+  };
 
   const resetSheetFilters = () => {
     setRevisionViewMode('latest');
@@ -281,8 +427,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
 
   const selectWorkbookEntry = (entry: UploadedExcelWorkbook) => {
     setActiveFileId(entry.id);
+    setActiveFileByProject((prev) => ({ ...prev, [entry.projectId]: entry.id }));
     resetSheetFilters();
-    setDateFilter(DEFAULT_DATE_FILTER);
+    setOverviewBarScope('sheets');
     const visibleIndices = entry.workbook.sheets
       .map((_, i) => i)
       .filter((i) => !entry.excludedSheetIndices.includes(i));
@@ -291,9 +438,232 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     setActiveView(visibleIndices.length === 1 ? visibleIndices[0] : 'overview');
   };
 
-  const handleLocalFilesSelected = async (fileList: FileList | File[]) => {
+  const selectProjectTab = (projectId: string) => {
+    setSelectedProjectTab(projectId);
+    setUploadError(null);
+    resetSheetFilters();
+    setOverviewBarScope('sheets');
+    setInspectRow(null);
+
+    if (projectId === 'all') {
+      setActiveFileId(null);
+      setActiveView('overview');
+      return;
+    }
+
+    const projectFiles = uploadedFiles.filter((f) => f.projectId === projectId);
+    if (projectFiles.length === 0) {
+      setActiveFileId(null);
+      setActiveView('overview');
+      return;
+    }
+
+    const preferredId = activeFileByProject[projectId];
+    const targetEntry = projectFiles.find((f) => f.id === preferredId) || projectFiles[0];
+    selectWorkbookEntry(targetEntry);
+  };
+
+  const triggerUploadForProject = (projectId?: string) => {
+    const resolvedTarget =
+      projectId ||
+      (selectedProjectTab !== 'all'
+        ? selectedProjectTab
+        : sortedProjects[0]?.id || 'general');
+    uploadTargetProjectIdRef.current = resolvedTarget;
+    fileInputRef.current?.click();
+  };
+
+  // Discover Excel files already uploaded on the website (Deliverables & Daily Report Attachments) per project
+  const remoteExcelSourcesByProject = useMemo(() => {
+    const map: Record<string, RemoteProjectExcelSource[]> = {};
+    const addSource = (src: RemoteProjectExcelSource) => {
+      if (!map[src.projectId]) map[src.projectId] = [];
+      map[src.projectId].push(src);
+    };
+
+    for (const deliv of siteDeliverables) {
+      if (deliv.fileFormat === 'excel' || isExcelFileName(deliv.fileName)) {
+        addSource({
+          key: `deliv:${deliv.id}`,
+          projectId: deliv.projectId,
+          fileName: deliv.fileName,
+          fileSize: deliv.fileSizeBytes,
+          sourceType: 'deliverable',
+          sourceLabel: 'تسليمات الموقع',
+          dateLabel: (deliv.createdAt || '').slice(0, 10),
+          senderName: deliv.senderName,
+          deliverable: deliv
+        });
+      }
+    }
+
+    for (const rep of reports) {
+      if (!rep.attachments || rep.attachments.length === 0) continue;
+      for (let i = 0; i < rep.attachments.length; i++) {
+        const att = rep.attachments[i];
+        if (!isExcelFileName(att.name)) continue;
+        addSource({
+          key: `rep:${rep.id}:${att.id || i}`,
+          projectId: rep.projectId,
+          fileName: att.name,
+          fileSize: att.size,
+          sourceType: 'report',
+          sourceLabel: `تقرير يومي (${rep.reportDate})`,
+          dateLabel: rep.reportDate,
+          senderName: rep.senderName,
+          reportId: rep.id,
+          attachment: att
+        });
+      }
+    }
+
+    return map;
+  }, [siteDeliverables, reports]);
+
+  const activeProject = useMemo(
+    () =>
+      selectedProjectTab !== 'all'
+        ? sortedProjects.find((p) => p.id === selectedProjectTab) || null
+        : null,
+    [sortedProjects, selectedProjectTab]
+  );
+
+  // Files belonging ONLY to the currently selected project tab
+  const projectUploadedFiles = useMemo(() => {
+    if (selectedProjectTab === 'all') return uploadedFiles;
+    return uploadedFiles.filter((f) => f.projectId === selectedProjectTab);
+  }, [uploadedFiles, selectedProjectTab]);
+
+  // Visible projects in tab bar (filtered by optional quick search when many projects exist)
+  const visibleProjectTabs = useMemo(() => {
+    const q = projectTabSearch.trim().toLowerCase();
+    if (!q) return sortedProjects;
+    return sortedProjects.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.code.toLowerCase().includes(q)
+    );
+  }, [sortedProjects, projectTabSearch]);
+
+  // Files count map per project
+  const fileCountByProject = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const f of uploadedFiles) {
+      counts[f.projectId] = (counts[f.projectId] || 0) + 1;
+    }
+    return counts;
+  }, [uploadedFiles]);
+
+  const dateFilterActive = useMemo(() => isDateFilterActive(dateFilter), [dateFilter]);
+  const activeDateFilterLabel = useMemo(() => describeDateFilter(dateFilter), [dateFilter]);
+
+  // Unfiltered sheets across all uploaded project workbooks for discovering available years/dates
+  const allProjectsUnfilteredSheets = useMemo(() => {
+    const sheets: SheetAnalytics[] = [];
+    for (const file of uploadedFiles) {
+      const analysis = analyzeWorkbook(
+        file.workbook,
+        file.sheetOverrides,
+        file.excludedSheetIndices
+      );
+      sheets.push(...analysis.sheets);
+    }
+    return sheets;
+  }, [uploadedFiles]);
+
+  // Date metadata across all projects (available years, earliest/latest date, reply dates)
+  const allProjectsDateMeta = useMemo(() => {
+    return buildWorkbookDateSummary(allProjectsUnfilteredSheets, 'year', dateFilter.field);
+  }, [allProjectsUnfilteredSheets, dateFilter.field]);
+
+  // Cross-project summary for the 'كل المشاريع' overview tab (respects active dateFilter)
+  const allProjectsOverview = useMemo(() => {
+    const activeFilterArg = dateFilterActive ? dateFilter : undefined;
+
+    const perProject = sortedProjects.map((project) => {
+      const files = uploadedFiles.filter((f) => f.projectId === project.id);
+      const remoteCount = (remoteExcelSourcesByProject[project.id] || []).length;
+      let sheetsCount = 0;
+      let totalRows = 0;
+      let approvedCount = 0;
+      let pendingCount = 0;
+      let rejectedCount = 0;
+      let otherCount = 0;
+
+      for (const file of files) {
+        const analysis = analyzeWorkbook(
+          file.workbook,
+          file.sheetOverrides,
+          file.excludedSheetIndices,
+          activeFilterArg
+        );
+        sheetsCount += analysis.totals.sheetsCount;
+        totalRows += analysis.totals.totalRows;
+        approvedCount += analysis.totals.approvedCount;
+        pendingCount += analysis.totals.pendingCount;
+        rejectedCount += analysis.totals.rejectedCount;
+        otherCount += analysis.totals.statusCounts.OTHER;
+      }
+
+      const statusBase = approvedCount + pendingCount + rejectedCount;
+      const approvalRate = statusBase > 0 ? Math.round((approvedCount / statusBase) * 100) : 0;
+
+      return {
+        project,
+        filesCount: files.length,
+        remoteCount,
+        sheetsCount,
+        totalRows,
+        approvedCount,
+        pendingCount,
+        rejectedCount,
+        otherCount,
+        approvalRate,
+        latestFileName: files[0]?.fileName || ''
+      };
+    });
+
+    const chartData = perProject
+      .filter((p) => p.totalRows > 0)
+      .map((p) => ({
+        projectId: p.project.id,
+        name:
+          p.project.name.length > 18 ? p.project.name.slice(0, 17) + '…' : p.project.name,
+        fullName: p.project.name,
+        معتمد: p.approvedCount,
+        'تحت المراجعة': p.pendingCount,
+        'تعديل / مرفوض': p.rejectedCount,
+        أخرى: p.otherCount
+      }));
+
+    const totals = {
+      projectsCount: sortedProjects.length,
+      projectsWithLogs: perProject.filter((p) => p.filesCount > 0).length,
+      filesCount: uploadedFiles.length,
+      sheetsCount: perProject.reduce((acc, p) => acc + p.sheetsCount, 0),
+      totalRows: perProject.reduce((acc, p) => acc + p.totalRows, 0),
+      approvedCount: perProject.reduce((acc, p) => acc + p.approvedCount, 0),
+      pendingCount: perProject.reduce((acc, p) => acc + p.pendingCount, 0),
+      rejectedCount: perProject.reduce((acc, p) => acc + p.rejectedCount, 0)
+    };
+
+    return { perProject, chartData, totals };
+  }, [sortedProjects, uploadedFiles, remoteExcelSourcesByProject, dateFilter, dateFilterActive]);
+
+  const handleLocalFilesSelected = async (fileList: FileList | File[], explicitProjectId?: string) => {
     const files = Array.from(fileList);
     if (files.length === 0) return;
+
+    const targetProjectId =
+      explicitProjectId ||
+      uploadTargetProjectIdRef.current ||
+      (selectedProjectTab !== 'all'
+        ? selectedProjectTab
+        : sortedProjects[0]?.id || 'general');
+    uploadTargetProjectIdRef.current = null;
+
+    const targetProjectName =
+      sortedProjects.find((p) => p.id === targetProjectId)?.name || 'المشروع';
 
     setUploadError(null);
     setIsParsing(true);
@@ -320,18 +690,24 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
           errors.push(`لم يتم العثور على أوراق عمل داخل «${file.name}».`);
           continue;
         }
-        newlyLoaded.push({
-          id: 'xl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        const nowMs = Date.now();
+        const entry: UploadedExcelWorkbook = {
+          id: 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+          projectId: targetProjectId,
           fileName: file.name,
           fileSize: file.size,
-          uploadedAt: new Date().toLocaleTimeString('ar-EG', {
+          uploadedAt: new Date(nowMs).toLocaleTimeString('ar-EG', {
             hour: '2-digit',
             minute: '2-digit'
           }),
+          savedAtMs: nowMs,
+          buffer,
           workbook: parsed,
           sheetOverrides: {},
           excludedSheetIndices: []
-        });
+        };
+        newlyLoaded.push(entry);
+        persistEntryToStorage(entry);
       } catch (err) {
         const detail = err instanceof Error ? err.message : '';
         if (/password|encrypt/i.test(detail)) {
@@ -348,12 +724,15 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
 
     if (newlyLoaded.length > 0) {
       setUploadedFiles((prev) => [...newlyLoaded, ...prev]);
+      if (selectedProjectTab !== targetProjectId && sortedProjects.some((p) => p.id === targetProjectId)) {
+        setSelectedProjectTab(targetProjectId);
+      }
       selectWorkbookEntry(newlyLoaded[0]);
       const firstSheetsCount = newlyLoaded[0].workbook.sheets.length;
       showToast(
         newlyLoaded.length === 1
-          ? `تم قراءة وتحليل ${firstSheetsCount} ورقة داخلية من «${newlyLoaded[0].fileName}» بنجاح.`
-          : `تم رفع وتحليل ${newlyLoaded.length} ملفات Excel بنجاح.`
+          ? `تم قراءة وتحليل ${firstSheetsCount} ورقة داخلية من «${newlyLoaded[0].fileName}» لموقع «${targetProjectName}».`
+          : `تم رفع وتحليل ${newlyLoaded.length} ملفات Excel لموقع «${targetProjectName}».`
       );
     }
 
@@ -367,12 +746,83 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     }
   };
 
+  // Load & parse an Excel file already uploaded on the website (Site Deliverables or Daily Report)
+  const handleLoadRemoteProjectExcel = async (source: RemoteProjectExcelSource) => {
+    const existing = uploadedFiles.find(
+      (f) => f.projectId === source.projectId && f.remoteKey === source.key
+    );
+    if (existing) {
+      selectWorkbookEntry(existing);
+      return;
+    }
+
+    setUploadError(null);
+    setLoadingRemoteKey(source.key);
+    try {
+      let url = '';
+      if (source.sourceType === 'deliverable' && source.deliverable) {
+        url = await dataService.fetchSiteDeliverablePdfUrl(source.deliverable);
+      } else if (source.sourceType === 'report' && source.reportId && source.attachment) {
+        url = await dataService.fetchReportAttachmentUrl(source.reportId, source.attachment);
+      }
+      if (!url) {
+        throw new Error('تعذر جلب رابط الملف من قاعدة البيانات.');
+      }
+
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error('تعذر تحميل بيانات ملف Excel.');
+      }
+      const buffer = await resp.arrayBuffer();
+      const parsed = parseDriveExcelWorkbook(buffer, source.fileName);
+      if (parsed.sheets.length === 0) {
+        throw new Error(`لم يتم العثور على أوراق عمل داخل «${source.fileName}».`);
+      }
+
+      const nowMs = Date.now();
+      const entry: UploadedExcelWorkbook = {
+        id: 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        projectId: source.projectId,
+        fileName: source.fileName,
+        fileSize: source.fileSize || buffer.byteLength,
+        uploadedAt: new Date(nowMs).toLocaleTimeString('ar-EG', {
+          hour: '2-digit',
+          minute: '2-digit'
+        }),
+        savedAtMs: nowMs,
+        buffer,
+        sourceLabel: source.sourceLabel,
+        remoteKey: source.key,
+        workbook: parsed,
+        sheetOverrides: {},
+        excludedSheetIndices: []
+      };
+
+      setUploadedFiles((prev) => [entry, ...prev]);
+      persistEntryToStorage(entry);
+      selectWorkbookEntry(entry);
+      showToast(
+        `تم استيراد وتحليل «${source.fileName}» (${parsed.sheets.length} ورقة) من ${source.sourceLabel}.`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'تعذر فتح ملف Excel المرفوع على الموقع.';
+      setUploadError(msg);
+    } finally {
+      setLoadingRemoteKey(null);
+    }
+  };
+
   const handleRemoveUploadedFile = (id: string) => {
+    void deleteStoredExcelFile(id);
     setUploadedFiles((prev) => {
+      const removed = prev.find((item) => item.id === id);
       const next = prev.filter((item) => item.id !== id);
       if (activeFileId === id) {
-        if (next.length > 0) {
-          selectWorkbookEntry(next[0]);
+        const sameProjectFiles = removed
+          ? next.filter((item) => item.projectId === removed.projectId)
+          : next;
+        if (sameProjectFiles.length > 0) {
+          selectWorkbookEntry(sameProjectFiles[0]);
         } else {
           setActiveFileId(null);
           setActiveView('overview');
@@ -382,10 +832,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     });
   };
 
-  const activeEntry = useMemo(
-    () => uploadedFiles.find((f) => f.id === activeFileId) || null,
-    [uploadedFiles, activeFileId]
-  );
+  const activeEntry = useMemo(() => {
+    if (selectedProjectTab === 'all') return null;
+    const found = projectUploadedFiles.find((f) => f.id === activeFileId);
+    return found || projectUploadedFiles[0] || null;
+  }, [selectedProjectTab, projectUploadedFiles, activeFileId]);
 
   // Unfiltered analysis used to discover all available years/dates across the workbook
   const unfilteredWorkbookAnalysis = useMemo(() => {
@@ -396,9 +847,6 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
       activeEntry.excludedSheetIndices
     );
   }, [activeEntry]);
-
-  const dateFilterActive = useMemo(() => isDateFilterActive(dateFilter), [dateFilter]);
-  const activeDateFilterLabel = useMemo(() => describeDateFilter(dateFilter), [dateFilter]);
 
   // Full multi-sheet analysis across all active (non-deleted) internal sheets with active date filter
   const workbookAnalysis = useMemo(() => {
@@ -443,8 +891,10 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     return activeEntry.workbook.sheets[activeView] || null;
   }, [activeEntry, activeView]);
 
+  const effectiveDateMeta = selectedProjectTab === 'all' ? allProjectsDateMeta : fullDateMeta;
+
   const applyQuickRangePreset = (preset: 'last7' | 'last30' | 'last90' | 'thisMonth' | 'thisYear') => {
-    const baseStr = fullDateMeta?.latestDate || new Date().toISOString().slice(0, 10);
+    const baseStr = effectiveDateMeta?.latestDate || new Date().toISOString().slice(0, 10);
     const [y, m, d] = baseStr.split('-').map(Number);
     const endDate = new Date(Date.UTC(y, (m || 1) - 1, d || 1));
     const toISO = (dt: Date) => dt.toISOString().slice(0, 10);
@@ -472,10 +922,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
   };
 
   const handleDateModeChange = (mode: DateFilterMode) => {
-    const defaultYear = dateFilter.year || fullDateMeta?.availableYears[0] || String(new Date().getFullYear());
+    const defaultYear =
+      dateFilter.year || effectiveDateMeta?.availableYears[0] || String(new Date().getFullYear());
     const defaultMonth =
       dateFilter.month ||
-      (fullDateMeta?.latestDate ? fullDateMeta.latestDate.slice(5, 7) : String(new Date().getMonth() + 1).padStart(2, '0'));
+      (effectiveDateMeta?.latestDate
+        ? effectiveDateMeta.latestDate.slice(5, 7)
+        : String(new Date().getMonth() + 1).padStart(2, '0'));
 
     if (mode === 'all') {
       setDateFilter((prev) => ({ ...DEFAULT_DATE_FILTER, field: prev.field }));
@@ -489,8 +942,8 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
       setDateFilter((prev) => ({
         ...prev,
         mode: 'range',
-        fromDate: prev.fromDate || fullDateMeta?.earliestDate || '',
-        toDate: prev.toDate || fullDateMeta?.latestDate || ''
+        fromDate: prev.fromDate || effectiveDateMeta?.earliestDate || '',
+        toDate: prev.toDate || effectiveDateMeta?.latestDate || ''
       }));
     }
   };
@@ -511,10 +964,12 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
       prev.map((entry) => {
         if (entry.id !== activeEntry.id) return entry;
         if (entry.excludedSheetIndices.includes(sheetIndex)) return entry;
-        return {
+        const updated = {
           ...entry,
           excludedSheetIndices: [...entry.excludedSheetIndices, sheetIndex]
         };
+        persistEntryToStorage(updated);
+        return updated;
       })
     );
     if (activeView === sheetIndex) {
@@ -530,10 +985,12 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     setUploadedFiles((prev) =>
       prev.map((entry) => {
         if (entry.id !== activeEntry.id) return entry;
-        return {
+        const updated = {
           ...entry,
           excludedSheetIndices: entry.excludedSheetIndices.filter((i) => i !== sheetIndex)
         };
+        persistEntryToStorage(updated);
+        return updated;
       })
     );
     showToast(`تمت استعادة الورقة الداخلية «${sheetName}» إلى التحليل.`);
@@ -543,9 +1000,12 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     if (!activeEntry || activeEntry.excludedSheetIndices.length === 0) return;
     const count = activeEntry.excludedSheetIndices.length;
     setUploadedFiles((prev) =>
-      prev.map((entry) =>
-        entry.id === activeEntry.id ? { ...entry, excludedSheetIndices: [] } : entry
-      )
+      prev.map((entry) => {
+        if (entry.id !== activeEntry.id) return entry;
+        const updated = { ...entry, excludedSheetIndices: [] };
+        persistEntryToStorage(updated);
+        return updated;
+      })
     );
     showToast(`تمت استعادة جميع الأوراق المحذوفة (${count}).`);
   };
@@ -555,17 +1015,18 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     if (!activeEntry || typeof activeView !== 'number') return;
     const sheetIdx = activeView;
     setUploadedFiles((prev) =>
-      prev.map((entry) =>
-        entry.id === activeEntry.id
-          ? {
-              ...entry,
-              sheetOverrides: {
-                ...entry.sheetOverrides,
-                [sheetIdx]: nextConfig
-              }
-            }
-          : entry
-      )
+      prev.map((entry) => {
+        if (entry.id !== activeEntry.id) return entry;
+        const updated = {
+          ...entry,
+          sheetOverrides: {
+            ...entry.sheetOverrides,
+            [sheetIdx]: nextConfig
+          }
+        };
+        persistEntryToStorage(updated);
+        return updated;
+      })
     );
   };
 
@@ -577,7 +1038,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
         if (entry.id !== activeEntry.id) return entry;
         const copy = { ...entry.sheetOverrides };
         delete copy[sheetIdx];
-        return { ...entry, sheetOverrides: copy };
+        const updated = { ...entry, sheetOverrides: copy };
+        persistEntryToStorage(updated);
+        return updated;
       })
     );
   };
@@ -759,10 +1222,10 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     return { items, hasStatuses: false, total };
   }, [workbookAnalysis]);
 
-  // Multi-file comparison chart data (sheet counts & submittals per uploaded file)
+  // Multi-file comparison chart data (sheet counts & submittals per uploaded file in active project)
   const filesComparisonChartData = useMemo(() => {
-    if (uploadedFiles.length < 2) return [];
-    return uploadedFiles.map((entry) => {
+    if (projectUploadedFiles.length < 2) return [];
+    return projectUploadedFiles.map((entry) => {
       const analysis = analyzeWorkbook(
         entry.workbook,
         entry.sheetOverrides,
@@ -784,7 +1247,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
         'تعديل / مرفوض': analysis.totals.rejectedCount
       };
     });
-  }, [uploadedFiles, dateFilter, dateFilterActive]);
+  }, [projectUploadedFiles, dateFilter, dateFilterActive]);
 
   // Individual Sheet Donut & Secondary Bar chart data
   const activeSheetStatusDonutData = useMemo(() => {
@@ -869,6 +1332,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
     );
   };
 
+  if (currentUser.role !== 'admin') {
+    return null;
+  }
+
+  const activeProjectRemoteSources = activeProject
+    ? remoteExcelSourcesByProject[activeProject.id] || []
+    : [];
+
   return (
     <div className="space-y-5 max-w-7xl mx-auto pb-16">
       {/* Hidden File Input */}
@@ -893,11 +1364,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
           </div>
           <div className="min-w-0">
             <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-snug">
-              تحليل وتبويب شيتات اللوج (Excel Logs)
+              شيتات اللوج حسب المواقع والمشاريع (Excel Logs)
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
-              قراءة جميع الأوراق الداخلية بأسمائها الحقيقية وتحليل آخر كود والعدد ومواقف الاعتماد على
-              أساس آخر Revision لكل كود فقط
+              تبويب داخلي مستقل لكل موقع مسجل على النظام لقراءة أوراق اللوج وتحليل آخر كود وحالات
+              التقديمات على آخر Revision فقط
             </p>
           </div>
         </div>
@@ -905,12 +1376,122 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
         <button
           type="button"
           disabled={isParsing}
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => triggerUploadForProject()}
           className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0 whitespace-nowrap touch-manipulation"
         >
           {isParsing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          <span>رفع ملف Excel من الجهاز</span>
+          <span>
+            {activeProject
+              ? `رفع Excel لـ «${activeProject.name.length > 22 ? activeProject.name.slice(0, 21) + '…' : activeProject.name}»`
+              : 'رفع ملف Excel من الجهاز'}
+          </span>
         </button>
+      </div>
+
+      {/* =====================================================================
+          INTERNAL PROJECTS / SITES TABS BAR (One Tab Per Website Project)
+          ===================================================================== */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-800 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
+            <Building2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span>مواقع ومشاريع النظام ({sortedProjects.length})</span>
+            {activeProject && (
+              <>
+                <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
+                  /
+                </span>
+                <span className="text-blue-600 dark:text-blue-400 truncate max-w-[260px]">
+                  {activeProject.name}
+                </span>
+                <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">
+                  {activeProject.code}
+                </span>
+              </>
+            )}
+          </div>
+
+          {sortedProjects.length > 6 && (
+            <div className="relative w-full sm:w-56">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={projectTabSearch}
+                onChange={(e) => setProjectTabSearch(e.target.value)}
+                placeholder="بحث في المواقع..."
+                className="w-full h-8 pr-8 pl-2.5 rounded-lg bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs dark:text-white outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 -mx-0.5 px-0.5">
+          {/* All Projects Summary Tab */}
+          <button
+            type="button"
+            onClick={() => selectProjectTab('all')}
+            className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
+              selectedProjectTab === 'all'
+                ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white'
+                : 'bg-slate-100/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent hover:bg-slate-200/80 dark:hover:bg-slate-700'
+            }`}
+          >
+            <LayoutGrid className="w-3.5 h-3.5 shrink-0" />
+            <span>كل المشاريع</span>
+            <span
+              className={`font-mono tabular-nums text-[11px] ${
+                selectedProjectTab === 'all'
+                  ? 'text-slate-300 dark:text-slate-600'
+                  : 'text-slate-400 dark:text-slate-500'
+              }`}
+            >
+              ({sortedProjects.length})
+            </span>
+          </button>
+
+          {sortedProjects.length > 0 && (
+            <span className="h-5 w-px bg-slate-200 dark:bg-slate-700 shrink-0 mx-0.5" />
+          )}
+
+          {/* Dedicated Internal Tab for Every Project Registered on the Website */}
+          {visibleProjectTabs.map((project) => {
+            const isSelected = selectedProjectTab === project.id;
+            const localFilesCount = fileCountByProject[project.id] || 0;
+            const remoteFilesCount = (remoteExcelSourcesByProject[project.id] || []).length;
+            return (
+              <button
+                key={project.id}
+                type="button"
+                onClick={() => selectProjectTab(project.id)}
+                title={`${project.name} (${project.code}) — ${localFilesCount} ملف لوج محمّل`}
+                className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
+                  isSelected
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-slate-50 dark:bg-slate-800/70 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-600'
+                }`}
+              >
+                <span className="max-w-[200px] truncate">{project.name}</span>
+                <span
+                  className={`font-mono tabular-nums text-[11px] ${
+                    isSelected ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'
+                  }`}
+                >
+                  {localFilesCount > 0
+                    ? `${localFilesCount} ملف`
+                    : remoteFilesCount > 0
+                      ? `${remoteFilesCount} بالموقع`
+                      : project.code}
+                </span>
+              </button>
+            );
+          })}
+
+          {sortedProjects.length === 0 && (
+            <span className="text-xs text-slate-500 dark:text-slate-400 px-2">
+              لا توجد مشاريع مضافة على الموقع بعد — يمكنك إضافتها من تبويب «المشاريع».
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Toast */}
@@ -939,139 +1520,795 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
         </div>
       )}
 
-      {/* Empty State Dropzone OR Compact Uploaded Workbooks Bar */}
-      {uploadedFiles.length === 0 ? (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800">
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setIsDragging(true);
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDragging(false);
-              if (e.dataTransfer.files?.length) {
-                handleLocalFilesSelected(e.dataTransfer.files);
-              }
-            }}
-            onClick={() => {
-              if (!isParsing) fileInputRef.current?.click();
-            }}
-            className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center transition-colors cursor-pointer ${
-              isDragging
-                ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40'
-                : 'border-slate-300 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-500 bg-slate-50/60 dark:bg-slate-800/30'
-            }`}
-          >
-            {isParsing ? (
-              <div className="flex items-center justify-center gap-2 text-blue-600 dark:text-blue-400 font-bold text-sm py-4">
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>جاري قراءة جميع الأوراق الداخلية وتحليل البيانات...</span>
+      {/* =====================================================================
+          ALL PROJECTS OVERVIEW TAB (selectedProjectTab === 'all')
+          ===================================================================== */}
+      {selectedProjectTab === 'all' && (
+        <div className="space-y-5">
+          {/* Cross-Projects Date Filter Panel */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <Calendar className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  فلتر التاريخ والفترات عبر كل المشاريع
+                </h3>
+                {allProjectsDateMeta.earliestDate && allProjectsDateMeta.latestDate && (
+                  <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                    ({allProjectsDateMeta.earliestDate} ← {allProjectsDateMeta.latestDate} ·{' '}
+                    {allProjectsDateMeta.datedCount} بند مؤرخ)
+                  </span>
+                )}
               </div>
-            ) : (
-              <div className="space-y-2.5 max-w-lg mx-auto">
-                <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
-                  <Upload className="w-6 h-6" />
+
+              <div className="flex flex-wrap items-center gap-2">
+                {allProjectsDateMeta.hasReplyDates && (
+                  <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setDateFilter((prev) => ({ ...prev, field: 'submissionDate' }))}
+                      className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
+                        dateFilter.field === 'submissionDate'
+                          ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      تاريخ التقديم
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDateFilter((prev) => ({ ...prev, field: 'replyDate' }))}
+                      className={`px-2.5 py-1 rounded-lg font-bold cursor-pointer transition-colors ${
+                        dateFilter.field === 'replyDate'
+                          ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      تاريخ الرد
+                    </button>
+                  </div>
+                )}
+
+                {dateFilterActive && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDateFilter((prev) => ({ ...DEFAULT_DATE_FILTER, field: prev.field }))
+                    }
+                    className="min-h-[34px] px-2.5 py-1 rounded-lg text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 inline-flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>إلغاء الفلتر</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Mode Selector Buttons */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(
+                [
+                  { id: 'all', label: 'كل الفترات' },
+                  { id: 'year', label: 'حسب السنة' },
+                  { id: 'month', label: 'حسب الشهر' },
+                  { id: 'quarter', label: 'حسب الربع (Q1–Q4)' },
+                  { id: 'range', label: 'فترة مخصصة (من – إلى)' }
+                ] as { id: DateFilterMode; label: string }[]
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => handleDateModeChange(m.id)}
+                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer whitespace-nowrap ${
+                    dateFilter.mode === m.id
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                  }`}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Mode: By Year */}
+            {dateFilter.mode === 'year' && (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                  اختر السنة:
+                </span>
+                {allProjectsDateMeta.availableYears.length > 0 ? (
+                  allProjectsDateMeta.availableYears.map((yr) => (
+                    <button
+                      key={yr}
+                      type="button"
+                      onClick={() => setDateFilter((prev) => ({ ...prev, year: yr }))}
+                      className={`px-3.5 py-1.5 rounded-lg font-mono tabular-nums text-xs font-bold border transition-colors cursor-pointer ${
+                        dateFilter.year === yr
+                          ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-300 dark:border-slate-700 hover:border-indigo-400'
+                      }`}
+                    >
+                      {yr}
+                    </button>
+                  ))
+                ) : (
+                  <input
+                    type="number"
+                    min={2000}
+                    max={2099}
+                    value={dateFilter.year}
+                    onChange={(e) =>
+                      setDateFilter((prev) => ({ ...prev, year: e.target.value }))
+                    }
+                    placeholder="2026"
+                    className="h-9 w-28 px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono text-xs dark:text-white"
+                  />
+                )}
+              </div>
+            )}
+
+            {/* Mode: By Month */}
+            {dateFilter.mode === 'month' && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-1 text-xs">
+                <div>
+                  <label className="block font-bold text-slate-600 dark:text-slate-300 mb-1">
+                    السنة
+                  </label>
+                  <select
+                    value={dateFilter.year}
+                    onChange={(e) =>
+                      setDateFilter((prev) => ({ ...prev, year: e.target.value }))
+                    }
+                    className="w-full h-10 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">كل السنوات</option>
+                    {allProjectsDateMeta.availableYears.map((yr) => (
+                      <option key={yr} value={yr}>
+                        {yr}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <div className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">
-                  اختر ملف Excel من جهازك أو اسحبه وأفلته هنا
-                </div>
-                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                  سيقوم البرنامج بقراءة كل شيت داخلي داخل الملف وتسميته باسمه الحقيقي، وحساب التحليل
-                  والعدد وموقف الاعتماد على آخر Revision فقط لكل كود مع استبعاد المراجعات القديمة تلقائياً.
-                </p>
-                <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400 pt-1" dir="ltr">
-                  .xlsx · .xls · .xlsm · .csv
+                <div>
+                  <label className="block font-bold text-slate-600 dark:text-slate-300 mb-1">
+                    الشهر
+                  </label>
+                  <select
+                    value={dateFilter.month}
+                    onChange={(e) =>
+                      setDateFilter((prev) => ({ ...prev, month: e.target.value }))
+                    }
+                    className="w-full h-10 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-bold dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">كل الشهور</option>
+                    {ARABIC_MONTH_OPTIONS.map((m) => (
+                      <option key={m.value} value={m.value}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      ) : (
-        /* Compact Uploaded Files Bar + Drag-and-Drop Support */
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragging(false);
-            if (e.dataTransfer.files?.length) {
-              handleLocalFilesSelected(e.dataTransfer.files);
-            }
-          }}
-          className={`bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 border transition-colors ${
-            isDragging
-              ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/30'
-              : 'border-slate-200 dark:border-slate-800'
-          }`}
-        >
-          <div className="flex items-center justify-between gap-2 mb-2.5">
-            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-              ملفات Excel المحمّلة ({uploadedFiles.length})
-            </span>
-            <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
-              يمكنك سحب وإفلات ملفات إضافية هنا مباشرة
-            </span>
-          </div>
 
-          <div className="flex items-center gap-2 overflow-x-auto pb-1">
-            {uploadedFiles.map((item) => {
-              const isSelected = activeFileId === item.id;
-              return (
-                <div
-                  key={item.id}
-                  onClick={() => selectWorkbookEntry(item)}
-                  className={`px-3 py-2 rounded-xl border transition-colors flex items-center gap-2.5 cursor-pointer shrink-0 max-w-[280px] ${
-                    isSelected
-                      ? 'bg-blue-50/90 dark:bg-blue-950/50 border-blue-500 dark:border-blue-600'
-                      : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
-                  }`}
-                >
-                  <FileSpreadsheet
-                    className={`w-4 h-4 shrink-0 ${
-                      isSelected
-                        ? 'text-blue-600 dark:text-blue-400'
-                        : 'text-emerald-600 dark:text-emerald-400'
-                    }`}
-                  />
-                  <div className="min-w-0">
-                    <div
-                      className="text-xs font-bold text-slate-900 dark:text-white truncate"
-                      title={item.fileName}
+            {/* Mode: By Quarter */}
+            {dateFilter.mode === 'quarter' && (
+              <div className="space-y-2.5 pt-1 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-bold text-slate-600 dark:text-slate-300">السنة:</span>
+                  <select
+                    value={dateFilter.year}
+                    onChange={(e) =>
+                      setDateFilter((prev) => ({ ...prev, year: e.target.value }))
+                    }
+                    className="h-9 px-3 rounded-lg bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono font-bold dark:text-white"
+                  >
+                    <option value="">كل السنوات</option>
+                    {allProjectsDateMeta.availableYears.map((yr) => (
+                      <option key={yr} value={yr}>
+                        {yr}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {(
+                    [
+                      { id: '1', label: 'الربع الأول Q1', sub: 'يناير – مارس' },
+                      { id: '2', label: 'الربع الثاني Q2', sub: 'أبريل – يونيو' },
+                      { id: '3', label: 'الربع الثالث Q3', sub: 'يوليو – سبتمبر' },
+                      { id: '4', label: 'الربع الرابع Q4', sub: 'أكتوبر – ديسمبر' }
+                    ] as { id: '1' | '2' | '3' | '4'; label: string; sub: string }[]
+                  ).map((q) => (
+                    <button
+                      key={q.id}
+                      type="button"
+                      onClick={() => setDateFilter((prev) => ({ ...prev, quarter: q.id }))}
+                      className={`p-2.5 rounded-xl border text-right transition-colors cursor-pointer ${
+                        dateFilter.quarter === q.id
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-indigo-400'
+                      }`}
                     >
-                      {item.fileName}
-                    </div>
-                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums whitespace-nowrap">
-                      {item.workbook.sheets.length - item.excludedSheetIndices.length} ورقة ·{' '}
-                      {formatFileSize(item.fileSize)}
-                    </div>
+                      <div className="font-bold text-xs">{q.label}</div>
+                      <div
+                        className={`text-[11px] mt-0.5 ${
+                          dateFilter.quarter === q.id
+                            ? 'text-indigo-100'
+                            : 'text-slate-500 dark:text-slate-400'
+                        }`}
+                      >
+                        {q.sub}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Mode: Custom Date Range */}
+            {dateFilter.mode === 'range' && (
+              <div className="space-y-3 pt-1 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-bold text-slate-600 dark:text-slate-300 mb-1">
+                      من تاريخ
+                    </label>
+                    <input
+                      type="date"
+                      value={dateFilter.fromDate}
+                      onChange={(e) =>
+                        setDateFilter((prev) => ({ ...prev, fromDate: e.target.value }))
+                      }
+                      className="w-full h-10 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
                   </div>
+                  <div>
+                    <label className="block font-bold text-slate-600 dark:text-slate-300 mb-1">
+                      إلى تاريخ
+                    </label>
+                    <input
+                      type="date"
+                      value={dateFilter.toDate}
+                      onChange={(e) =>
+                        setDateFilter((prev) => ({ ...prev, toDate: e.target.value }))
+                      }
+                      className="w-full h-10 px-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 ml-1">
+                    اختصارات سريعة:
+                  </span>
+                  {(
+                    [
+                      { id: 'last7', label: 'آخر 7 أيام' },
+                      { id: 'last30', label: 'آخر 30 يوماً' },
+                      { id: 'last90', label: 'آخر 90 يوماً' },
+                      { id: 'thisMonth', label: 'آخر شهر بالملفات' },
+                      { id: 'thisYear', label: 'آخر سنة بالملفات' }
+                    ] as {
+                      id: 'last7' | 'last30' | 'last90' | 'thisMonth' | 'thisYear';
+                      label: string;
+                    }[]
+                  ).map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => applyQuickRangePreset(preset.id)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-50 dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/50 text-slate-700 dark:text-slate-300 hover:text-indigo-700 dark:hover:text-indigo-300 border border-slate-200 dark:border-slate-700 text-[11px] font-bold cursor-pointer transition-colors"
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Active Filter Footer */}
+            {(dateFilterActive || allProjectsDateMeta.undatedCount > 0) && (
+              <div className="pt-2.5 border-t border-slate-200/80 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="text-slate-600 dark:text-slate-300 tabular-nums">
+                  الفترة المعروضة:{' '}
+                  <strong className="text-indigo-700 dark:text-indigo-300">
+                    {activeDateFilterLabel}
+                  </strong>
+                  {allProjectsDateMeta.undatedCount > 0 && !dateFilterActive && (
+                    <span className="text-slate-400 dark:text-slate-500 mr-2">
+                      (يوجد {allProjectsDateMeta.undatedCount} بند بدون تاريخ)
+                    </span>
+                  )}
+                </div>
+                {dateFilterActive && (
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleRemoveUploadedFile(item.id);
-                    }}
-                    title="إزالة الملف"
-                    className="p-1 rounded-md text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer shrink-0 transition-colors"
+                    onClick={() =>
+                      setDateFilter((prev) => ({ ...DEFAULT_DATE_FILTER, field: prev.field }))
+                    }
+                    className="text-xs font-bold text-rose-600 dark:text-rose-400 hover:underline inline-flex items-center gap-1 cursor-pointer"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>إلغاء فلتر التاريخ (عرض الكل)</span>
                   </button>
-                </div>
-              );
-            })}
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Global Cross-Projects KPI Strip */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+              <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                المشاريع والمواقع المسجلة
+              </div>
+              <div className="text-2xl font-extrabold font-mono tabular-nums text-slate-900 dark:text-white mt-1">
+                {allProjectsOverview.totals.projectsCount}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                {allProjectsOverview.totals.projectsWithLogs} موقع بها شيتات لوج محمّلة
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+              <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                ملفات اللوج والأوراق الداخلية
+              </div>
+              <div className="text-2xl font-extrabold font-mono tabular-nums text-slate-900 dark:text-white mt-1">
+                {allProjectsOverview.totals.filesCount}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                {allProjectsOverview.totals.sheetsCount} ورقة داخلية إجمالاً
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+              <div className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                إجمالي البنود المعتمدة (A / B)
+              </div>
+              <div className="text-2xl font-extrabold font-mono tabular-nums text-emerald-700 dark:text-emerald-300 mt-1">
+                {allProjectsOverview.totals.approvedCount}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 tabular-nums">
+                من أصل {allProjectsOverview.totals.totalRows} بند (آخر REV)
+                {dateFilterActive ? ' · ضمن الفترة' : ''}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+              <div className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                تحت المراجعة / إعادة تقديم
+              </div>
+              <div className="flex items-baseline gap-2.5 mt-1 font-mono tabular-nums">
+                <span className="text-2xl font-extrabold text-amber-700 dark:text-amber-300">
+                  {allProjectsOverview.totals.pendingCount}
+                </span>
+                <span className="text-xs font-bold text-rose-600 dark:text-rose-400">
+                  / {allProjectsOverview.totals.rejectedCount} مرفوض
+                </span>
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                {dateFilterActive ? `ضمن: ${activeDateFilterLabel}` : 'عبر جميع المواقع المحلّلة'}
+              </div>
+            </div>
+          </div>
+
+          {/* Cross-Project Recharts Comparison Chart */}
+          {allProjectsOverview.chartData.length > 0 ? (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span>
+                    مقارنة حالة التقديمات عبر المشاريع
+                    {dateFilterActive ? ` — ${activeDateFilterLabel}` : ''}
+                  </span>
+                </h3>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  اضغط على أي مشروع في الرسم البياني لفتح تبويبه الداخلي
+                </span>
+              </div>
+              <div className="h-64 w-full" dir="ltr">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart
+                    data={allProjectsOverview.chartData}
+                    margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" opacity={0.25} />
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fontSize: 11, fill: '#64748b' }}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis tick={{ fontSize: 11, fill: '#64748b' }} allowDecimals={false} />
+                    <Tooltip content={<ExcelChartTooltip />} />
+                    <Bar
+                      dataKey="معتمد"
+                      stackId="proj"
+                      fill="#16a34a"
+                      maxBarSize={48}
+                      className="cursor-pointer"
+                      onClick={(barData: { payload?: { projectId?: string } }) => {
+                        const pid = barData?.payload?.projectId;
+                        if (pid) selectProjectTab(pid);
+                      }}
+                    />
+                    <Bar
+                      dataKey="تحت المراجعة"
+                      stackId="proj"
+                      fill="#d97706"
+                      maxBarSize={48}
+                      className="cursor-pointer"
+                      onClick={(barData: { payload?: { projectId?: string } }) => {
+                        const pid = barData?.payload?.projectId;
+                        if (pid) selectProjectTab(pid);
+                      }}
+                    />
+                    <Bar
+                      dataKey="تعديل / مرفوض"
+                      stackId="proj"
+                      fill="#dc2626"
+                      maxBarSize={48}
+                      className="cursor-pointer"
+                      onClick={(barData: { payload?: { projectId?: string } }) => {
+                        const pid = barData?.payload?.projectId;
+                        if (pid) selectProjectTab(pid);
+                      }}
+                    />
+                    <Bar
+                      dataKey="أخرى"
+                      stackId="proj"
+                      fill="#64748b"
+                      radius={[4, 4, 0, 0]}
+                      maxBarSize={48}
+                      className="cursor-pointer"
+                      onClick={(barData: { payload?: { projectId?: string } }) => {
+                        const pid = barData?.payload?.projectId;
+                        if (pid) selectProjectTab(pid);
+                      }}
+                    />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          ) : (
+            uploadedFiles.length > 0 &&
+            dateFilterActive && (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2.5">
+                <p className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                  لا توجد بنود مطابقة للفترة الزمنية المحددة ({activeDateFilterLabel}) عبر المشاريع المحمّلة.
+                </p>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setDateFilter((prev) => ({ ...DEFAULT_DATE_FILTER, field: prev.field }))
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>عرض كل الفترات</span>
+                </button>
+              </div>
+            )
+          )}
+
+          {/* Directory Cards of All Website Projects */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span>دليل تبويبات المواقع ({allProjectsOverview.perProject.length})</span>
+              </h3>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                اختر أي موقع للدخول إلى تبويب شيتات اللوج الخاص به
+              </span>
+            </div>
+
+            {allProjectsOverview.perProject.length === 0 ? (
+              <div className="py-10 text-center text-xs font-bold text-slate-500 dark:text-slate-400 rounded-xl border border-dashed border-slate-300 dark:border-slate-700">
+                لا توجد مشاريع مسجلة على الموقع حالياً. أضف مشاريعك من تبويب «المشاريع» لتظهر هنا تلقائياً.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                {allProjectsOverview.perProject.map((item) => (
+                  <div
+                    key={item.project.id}
+                    onClick={() => selectProjectTab(item.project.id)}
+                    className="group rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/40 dark:bg-slate-800/30 hover:border-blue-400 dark:hover:border-blue-600 transition-colors p-4 flex flex-col justify-between gap-3 cursor-pointer"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <h4 className="text-sm font-extrabold text-slate-900 dark:text-white group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors leading-snug">
+                          {item.project.name}
+                        </h4>
+                        <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400 shrink-0">
+                          {item.project.code}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-1.5 tabular-nums">
+                        <span>{item.project.status === 'active' ? 'مشروع نشط' : 'مكتمل'}</span>
+                        <span aria-hidden="true">·</span>
+                        <span>{item.filesCount} ملف لوج</span>
+                        {item.sheetsCount > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>{item.sheetsCount} ورقة</span>
+                          </>
+                        )}
+                        {item.remoteCount > 0 && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                              {item.remoteCount} Excel مرفوع بالموقع
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {item.totalRows > 0 ? (
+                      <div className="pt-2.5 border-t border-slate-200/70 dark:border-slate-800 flex items-center justify-between text-xs font-mono tabular-nums">
+                        <div className="flex items-center gap-2.5">
+                          <span className="font-bold text-slate-800 dark:text-slate-200">
+                            {item.totalRows} بند
+                          </span>
+                          <span className="text-emerald-700 dark:text-emerald-400 font-bold">
+                            معتمد: {item.approvedCount}
+                          </span>
+                          <span className="text-amber-700 dark:text-amber-400 font-bold">
+                            W: {item.pendingCount}
+                          </span>
+                        </div>
+                        <span className="font-extrabold text-slate-900 dark:text-white">
+                          {item.approvalRate}%
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="pt-2.5 border-t border-slate-200/70 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
+                        {item.filesCount > 0 && dateFilterActive
+                          ? 'لا توجد بنود في الفترة الزمنية المحددة'
+                          : 'لم يتم رفع شيتات لوج لهذا الموقع بعد'}
+                      </div>
+                    )}
+
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectProjectTab(item.project.id);
+                        }}
+                        className="flex-1 min-h-[36px] px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-blue-950/50 text-slate-800 dark:text-slate-200 hover:text-blue-700 dark:hover:text-blue-300 border border-slate-200 dark:border-slate-700 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <span>فتح التبويب</span>
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          triggerUploadForProject(item.project.id);
+                        }}
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>رفع Excel</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
 
       {/* =====================================================================
+          SINGLE PROJECT WORKSPACE (selectedProjectTab === project.id)
+          ===================================================================== */}
+      {selectedProjectTab !== 'all' && (
+        <>
+          {/* Site-Uploaded Excel Files Available on the Website for This Project */}
+          {activeProjectRemoteSources.length > 0 && (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-800 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
+                  <CloudDownload className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span>
+                    ملفات Excel مرفوعة على الموقع لمشروع «{activeProject?.name}» (
+                    {activeProjectRemoteSources.length})
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
+                  اضغط لفتحها وتحليلها مباشرة داخل هذا التبويب
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                {activeProjectRemoteSources.map((src) => {
+                  const isLoadingThis = loadingRemoteKey === src.key;
+                  const alreadyImported = projectUploadedFiles.some(
+                    (f) => f.remoteKey === src.key
+                  );
+                  return (
+                    <button
+                      key={src.key}
+                      type="button"
+                      disabled={isLoadingThis}
+                      onClick={() => handleLoadRemoteProjectExcel(src)}
+                      className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 hover:border-emerald-400 dark:hover:border-emerald-600 transition-colors flex items-center gap-2.5 cursor-pointer shrink-0 max-w-[300px] text-right disabled:opacity-60"
+                    >
+                      {isLoadingThis ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-emerald-600 shrink-0" />
+                      ) : (
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <div
+                          className="text-xs font-bold text-slate-900 dark:text-white truncate"
+                          title={src.fileName}
+                        >
+                          {src.fileName}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                          {src.sourceLabel} · {src.senderName}
+                        </div>
+                      </div>
+                      <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 shrink-0 whitespace-nowrap">
+                        {alreadyImported ? 'مفتوح' : 'تحليل'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Empty State Dropzone OR Compact Uploaded Workbooks Bar for This Project */}
+          {isHydratingSaved && projectUploadedFiles.length === 0 ? (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 border border-slate-200 dark:border-slate-800 flex items-center justify-center gap-2.5 text-xs font-bold text-slate-500 dark:text-slate-400">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
+              <span>جاري تحميل شيتات اللوج المحفوظة للموقع...</span>
+            </div>
+          ) : projectUploadedFiles.length === 0 ? (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800">
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDragging(true);
+                }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setIsDragging(false);
+                  if (e.dataTransfer.files?.length) {
+                    handleLocalFilesSelected(e.dataTransfer.files, selectedProjectTab);
+                  }
+                }}
+                onClick={() => {
+                  if (!isParsing) triggerUploadForProject(selectedProjectTab);
+                }}
+                className={`border-2 border-dashed rounded-xl p-8 sm:p-12 text-center transition-colors cursor-pointer ${
+                  isDragging
+                    ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40'
+                    : 'border-slate-300 dark:border-slate-700 hover:border-blue-400 dark:hover:border-blue-500 bg-slate-50/60 dark:bg-slate-800/30'
+                }`}
+              >
+                {isParsing ? (
+                  <div className="flex items-center justify-center gap-2 text-blue-600 dark:text-blue-400 font-bold text-sm py-4">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    <span>جاري قراءة جميع الأوراق الداخلية وتحليل البيانات...</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-w-lg mx-auto">
+                    <div className="w-12 h-12 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
+                      <Upload className="w-6 h-6" />
+                    </div>
+                    <div className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">
+                      {activeProject
+                        ? `ارفع شيت اللوج الخاص بموقع «${activeProject.name}» هنا`
+                        : 'اختر ملف Excel من جهازك أو اسحبه وأفلته هنا'}
+                    </div>
+                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                      سيتم ربط الملف وحفظه داخل تبويب هذا الموقع، وقراءة كل شيت داخلي باسمه الحقيقي
+                      وتحليل آخر كود وحالات الاعتماد على آخر Revision فقط.
+                    </p>
+                    <div
+                      className="text-[11px] font-mono text-slate-500 dark:text-slate-400 pt-1"
+                      dir="ltr"
+                    >
+                      .xlsx · .xls · .xlsm · .csv
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Compact Uploaded Files Bar + Drag-and-Drop Support (Scoped to Active Project) */
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDragging(true);
+              }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                if (e.dataTransfer.files?.length) {
+                  handleLocalFilesSelected(e.dataTransfer.files, selectedProjectTab);
+                }
+              }}
+              className={`bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 border transition-colors ${
+                isDragging
+                  ? 'border-blue-500 bg-blue-50/40 dark:bg-blue-950/30'
+                  : 'border-slate-200 dark:border-slate-800'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                  ملفات لوج «{activeProject?.name || 'الموقع'}» ({projectUploadedFiles.length})
+                </span>
+                <span className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:inline">
+                  اسحب وأفلت ملفات إضافية هنا لإضافتها لهذا الموقع
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                {projectUploadedFiles.map((item) => {
+                  const isSelected = activeEntry?.id === item.id;
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => selectWorkbookEntry(item)}
+                      className={`px-3 py-2 rounded-xl border transition-colors flex items-center gap-2.5 cursor-pointer shrink-0 max-w-[280px] ${
+                        isSelected
+                          ? 'bg-blue-50/90 dark:bg-blue-950/50 border-blue-500 dark:border-blue-600'
+                          : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
+                      }`}
+                    >
+                      <FileSpreadsheet
+                        className={`w-4 h-4 shrink-0 ${
+                          isSelected
+                            ? 'text-blue-600 dark:text-blue-400'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }`}
+                      />
+                      <div className="min-w-0">
+                        <div
+                          className="text-xs font-bold text-slate-900 dark:text-white truncate"
+                          title={item.fileName}
+                        >
+                          {item.fileName}
+                        </div>
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400 font-mono tabular-nums whitespace-nowrap">
+                          {item.workbook.sheets.length - item.excludedSheetIndices.length} ورقة ·{' '}
+                          {formatFileSize(item.fileSize)}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveUploadedFile(item.id);
+                        }}
+                        title="إزالة الملف"
+                        className="p-1 rounded-md text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer shrink-0 transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* =====================================================================
           MULTI-SHEET WORKBOOK ANALYTICS WORKBENCH
           ===================================================================== */}
-      {activeEntry && workbookAnalysis && (
+      {selectedProjectTab !== 'all' && activeEntry && workbookAnalysis && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
           {/* Workbook Top Bar + Internal Sheet Tabs */}
           <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 space-y-3.5">
@@ -2116,7 +3353,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
                                   : 'text-slate-600 dark:text-slate-400'
                               }`}
                             >
-                              الملفات ({uploadedFiles.length})
+                              الملفات ({projectUploadedFiles.length})
                             </button>
                           </div>
                         )}
@@ -2173,9 +3410,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
                               fill="#2563eb"
                               radius={[4, 4, 0, 0]}
                               className="cursor-pointer"
-                              onClick={(barData: { payload?: { fileId?: string }; fileId?: string }) => {
-                                const fid = barData?.payload?.fileId || barData?.fileId;
-                                const found = uploadedFiles.find((f) => f.id === fid);
+                              onClick={(barData: { payload?: { fileId?: string } }) => {
+                                const fid = barData?.payload?.fileId;
+                                const found = projectUploadedFiles.find((f) => f.id === fid);
                                 if (found) selectWorkbookEntry(found);
                               }}
                             />
@@ -2184,9 +3421,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({ currentUser }) => {
                               fill="#16a34a"
                               radius={[4, 4, 0, 0]}
                               className="cursor-pointer"
-                              onClick={(barData: { payload?: { fileId?: string }; fileId?: string }) => {
-                                const fid = barData?.payload?.fileId || barData?.fileId;
-                                const found = uploadedFiles.find((f) => f.id === fid);
+                              onClick={(barData: { payload?: { fileId?: string } }) => {
+                                const fid = barData?.payload?.fileId;
+                                const found = projectUploadedFiles.find((f) => f.id === fid);
                                 if (found) selectWorkbookEntry(found);
                               }}
                             />

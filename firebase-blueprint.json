@@ -47,13 +47,18 @@
     },
     "Project": {
       "title": "Project",
-      "description": "Construction site / project tracked by Document Control.",
+      "description": "Construction site / project tracked by Document Control including scope of work.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "name": { "type": "string", "minLength": 1, "maxLength": 200 },
         "code": { "type": "string", "minLength": 1, "maxLength": 80 },
         "description": { "type": "string", "maxLength": 1000 },
+        "workScope": { "type": "string", "maxLength": 2000 },
+        "scopeDisciplines": { "type": "array" },
+        "plannedWorksCount": { "type": "number" },
+        "location": { "type": "string", "maxLength": 200 },
+        "clientName": { "type": "string", "maxLength": 200 },
         "status": { "type": "string", "enum": ["active", "completed"] },
         "createdAt": { "type": "string", "maxLength": 64 },
         "updatedAt": { "type": "string", "maxLength": 64 }
@@ -302,6 +307,19 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "userId", "noteDate", "text", "isCompleted", "createdAt", "updatedAt"]
+    },
+    "AppBrandingSettings": {
+      "title": "AppBrandingSettings",
+      "description": "Global application branding settings (custom primary brand color) managed by admins.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "enum": ["branding"], "maxLength": 32 },
+        "brandColor": { "type": "string", "minLength": 7, "maxLength": 7, "pattern": "^#[0-9a-fA-F]{6}$" },
+        "updatedBy": { "type": "string", "maxLength": 128 },
+        "updatedByName": { "type": "string", "maxLength": 150 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "brandColor", "updatedAt"]
     }
   },
   "firestore": {
@@ -360,6 +378,10 @@
     "/notifications/{notificationId}": {
       "schema": { "$ref": "#/entities/AppNotification" },
       "description": "Real-time in-app and browser push notifications between site engineers and management."
+    },
+    "/appSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/AppBrandingSettings" },
+      "description": "Global application settings such as custom Brand Color readable by all active users and writable only by admins."
     }
   }
 }

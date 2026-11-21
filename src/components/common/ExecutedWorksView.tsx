@@ -1157,7 +1157,18 @@ export const ExecutedWorksView: React.FC<Props> = ({
                   <select
                     disabled={Boolean(editingWork)}
                     value={projectId}
-                    onChange={(e) => setProjectId(e.target.value)}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      setProjectId(nextId);
+                      const nextProj = accessibleProjects.find((p) => p.id === nextId);
+                      if (
+                        nextProj?.scopeDisciplines &&
+                        nextProj.scopeDisciplines.length > 0 &&
+                        !nextProj.scopeDisciplines.includes(discipline)
+                      ) {
+                        setDiscipline(nextProj.scopeDisciplines[0]);
+                      }
+                    }}
                     className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-bold dark:text-white disabled:opacity-60"
                   >
                     {accessibleProjects.map((p) => (
@@ -1182,6 +1193,31 @@ export const ExecutedWorksView: React.FC<Props> = ({
                 </div>
               </div>
 
+              {(() => {
+                const selectedProj = accessibleProjects.find((p) => p.id === projectId);
+                if (!selectedProj || (!selectedProj.workScope && !selectedProj.scopeDisciplines?.length)) {
+                  return null;
+                }
+                return (
+                  <div className="p-2.5 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/60 text-[11px] text-blue-900 dark:text-blue-200 space-y-1">
+                    <div className="font-bold">نطاق عمل المشروع المحدد:</div>
+                    {selectedProj.workScope && (
+                      <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                        {selectedProj.workScope}
+                      </p>
+                    )}
+                    {selectedProj.scopeDisciplines && selectedProj.scopeDisciplines.length > 0 && (
+                      <div className="text-[10px] font-semibold text-blue-700 dark:text-blue-300">
+                        التخصصات المعتمدة:{' '}
+                        {selectedProj.scopeDisciplines
+                          .map((d) => WORK_DISCIPLINE_CONFIG[d]?.labelAr || d)
+                          .join(' · ')}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold mb-1 dark:text-slate-200">
@@ -1192,11 +1228,16 @@ export const ExecutedWorksView: React.FC<Props> = ({
                     onChange={(e) => setDiscipline(e.target.value as WorkDiscipline)}
                     className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-bold dark:text-white"
                   >
-                    {(Object.keys(WORK_DISCIPLINE_CONFIG) as WorkDiscipline[]).map((key) => (
-                      <option key={key} value={key}>
-                        {WORK_DISCIPLINE_CONFIG[key].labelAr}
-                      </option>
-                    ))}
+                    {(Object.keys(WORK_DISCIPLINE_CONFIG) as WorkDiscipline[]).map((key) => {
+                      const selectedProj = accessibleProjects.find((p) => p.id === projectId);
+                      const inScope = selectedProj?.scopeDisciplines?.includes(key);
+                      return (
+                        <option key={key} value={key}>
+                          {WORK_DISCIPLINE_CONFIG[key].labelAr}
+                          {inScope ? ' (ضمن نطاق المشروع)' : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 

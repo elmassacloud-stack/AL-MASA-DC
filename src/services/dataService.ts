@@ -28,11 +28,13 @@ import {
   NotificationPreferences,
   AppNotification,
   ExecutedWork,
+  WorkDiscipline,
   SiteDeliverable,
   SiteDeliverableChunk,
   SiteDeliverableType,
   SiteDeliverableStatus,
-  PersonalNote
+  PersonalNote,
+  AppBrandingSettings
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -98,6 +100,11 @@ import {
   normalizeNotificationPreferences,
   isNotificationAllowedForUser
 } from '../utils/notificationPreferences';
+import {
+  DEFAULT_BRAND_COLOR,
+  isValidHexColor,
+  normalizeHexColor
+} from '../utils/brandTheme';
 
 const STORAGE_KEYS = {
   PROJECTS: 'dc_projects_v2',
@@ -113,7 +120,8 @@ const STORAGE_KEYS = {
   CURRENT_USER: 'dc_active_user_v2',
   REPORT_DRAFT_PREFIX: 'dc_report_draft_',
   STALLED_DAYS_LIMIT: 'dc_stalled_days_limit',
-  CUTOFF_HOUR: 'dc_cutoff_hour'
+  CUTOFF_HOUR: 'dc_cutoff_hour',
+  BRAND_COLOR: 'dc_brand_color_v1'
 };
 
 function normalizeEmail(email?: string | null): string {
@@ -602,6 +610,25 @@ class DataService {
       }
     );
 
+    // 2b. Global App Branding Settings sync (Custom Brand Color managed by Admins)
+    this.firestoreUnsubs.push(
+      onSnapshot(
+        doc(db, 'appSettings', 'branding'),
+        (snap) => {
+          if (!snap.exists()) return;
+          const data = snap.data() as Partial<AppBrandingSettings>;
+          if (typeof data.brandColor === 'string' && isValidHexColor(data.brandColor)) {
+            const normalized = normalizeHexColor(data.brandColor);
+            if (localStorage.getItem(STORAGE_KEYS.BRAND_COLOR) !== normalized) {
+              localStorage.setItem(STORAGE_KEYS.BRAND_COLOR, normalized);
+              this.notify();
+            }
+          }
+        },
+        (error) => handleFirestoreError(error, OperationType.GET, 'appSettings/branding')
+      )
+    );
+
     // 3. Reports sync
     this.subscribeToScopedCollection<DailyReport>(
       'reports',
@@ -925,12 +952,43 @@ class DataService {
   ): Promise<Project> {
     const projects = this.getProjects();
     const now = new Date().toISOString();
+    const validDisciplines: WorkDiscipline[] = [
+      'civil_structural',
+      'architectural',
+      'electrical',
+      'mechanical',
+      'finishing',
+      'infrastructure',
+      'other'
+    ];
     const cleanedDescription = project.description?.trim().slice(0, 1000);
+    const cleanedWorkScope = project.workScope?.trim().slice(0, 2000);
+    const cleanedLocation = project.location?.trim().slice(0, 200);
+    const cleanedClientName = project.clientName?.trim().slice(0, 200);
+    const cleanedDisciplines = Array.isArray(project.scopeDisciplines)
+      ? Array.from(
+          new Set(project.scopeDisciplines.filter((d) => validDisciplines.includes(d)))
+        ).slice(0, 10)
+      : [];
+
+    const cleanedPlannedWorks =
+      typeof project.plannedWorksCount === 'number' && Number.isFinite(project.plannedWorksCount)
+        ? Math.max(0, Math.min(100000, Math.round(project.plannedWorksCount)))
+        : undefined;
+
     const newProj: Project = stripUndefined({
       id: 'proj-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5),
       name: project.name.trim().slice(0, 200),
       code: project.code.trim().toUpperCase().slice(0, 80),
       description: cleanedDescription ? cleanedDescription : undefined,
+      workScope: cleanedWorkScope ? cleanedWorkScope : undefined,
+      scopeDisciplines: cleanedDisciplines.length > 0 ? cleanedDisciplines : undefined,
+      plannedWorksCount:
+        cleanedPlannedWorks !== undefined && cleanedPlannedWorks > 0
+          ? cleanedPlannedWorks
+          : undefined,
+      location: cleanedLocation ? cleanedLocation : undefined,
+      clientName: cleanedClientName ? cleanedClientName : undefined,
       status: project.status === 'completed' ? 'completed' : 'active',
       createdAt: now,
       updatedAt: now
@@ -948,11 +1006,46 @@ class DataService {
 
   public async updateProject(
     projectId: string,
-    updates: Partial<Pick<Project, 'name' | 'code' | 'description' | 'status'>>
+    updates: Partial<
+      Pick<
+        Project,
+        | 'name'
+        | 'code'
+        | 'description'
+        | 'workScope'
+        | 'scopeDisciplines'
+        | 'plannedWorksCount'
+        | 'location'
+        | 'clientName'
+        | 'status'
+      >
+    >
   ): Promise<boolean> {
     const projects = this.getProjects();
     const idx = projects.findIndex((p) => p.id === projectId);
     if (idx === -1) return false;
+
+    const validDisciplines: WorkDiscipline[] = [
+      'civil_structural',
+      'architectural',
+      'electrical',
+      'mechanical',
+      'finishing',
+      'infrastructure',
+      'other'
+    ];
+    const sanitizedDisciplines =
+      updates.scopeDisciplines !== undefined
+        ? Array.from(
+            new Set(updates.scopeDisciplines.filter((d) => validDisciplines.includes(d)))
+          ).slice(0, 10)
+        : undefined;
+    const sanitizedPlannedWorks =
+      updates.plannedWorksCount !== undefined
+        ? Number.isFinite(updates.plannedWorksCount)
+          ? Math.max(0, Math.min(100000, Math.round(updates.plannedWorksCount)))
+          : 0
+        : undefined;
 
     const updatedAt = new Date().toISOString();
     const nextProject: Project = stripUndefined({
@@ -961,6 +1054,17 @@ class DataService {
       ...(updates.code !== undefined ? { code: updates.code.trim().toUpperCase().slice(0, 80) } : {}),
       ...(updates.description !== undefined
         ? { description: updates.description.trim().slice(0, 1000) }
+        : {}),
+      ...(updates.workScope !== undefined
+        ? { workScope: updates.workScope.trim().slice(0, 2000) }
+        : {}),
+      ...(sanitizedDisciplines !== undefined ? { scopeDisciplines: sanitizedDisciplines } : {}),
+      ...(sanitizedPlannedWorks !== undefined ? { plannedWorksCount: sanitizedPlannedWorks } : {}),
+      ...(updates.location !== undefined
+        ? { location: updates.location.trim().slice(0, 200) }
+        : {}),
+      ...(updates.clientName !== undefined
+        ? { clientName: updates.clientName.trim().slice(0, 200) }
         : {}),
       ...(updates.status !== undefined ? { status: updates.status } : {}),
       updatedAt
@@ -973,6 +1077,11 @@ class DataService {
       ...(updates.name !== undefined ? { name: nextProject.name } : {}),
       ...(updates.code !== undefined ? { code: nextProject.code } : {}),
       ...(updates.description !== undefined ? { description: nextProject.description } : {}),
+      ...(updates.workScope !== undefined ? { workScope: nextProject.workScope } : {}),
+      ...(sanitizedDisciplines !== undefined ? { scopeDisciplines: sanitizedDisciplines } : {}),
+      ...(sanitizedPlannedWorks !== undefined ? { plannedWorksCount: sanitizedPlannedWorks } : {}),
+      ...(updates.location !== undefined ? { location: nextProject.location } : {}),
+      ...(updates.clientName !== undefined ? { clientName: nextProject.clientName } : {}),
       ...(updates.status !== undefined ? { status: nextProject.status } : {}),
       updatedAt
     });
@@ -4417,6 +4526,41 @@ class DataService {
     this.notify();
   }
 
+  public getBrandColor(): string {
+    const val = localStorage.getItem(STORAGE_KEYS.BRAND_COLOR);
+    return val && isValidHexColor(val) ? normalizeHexColor(val) : DEFAULT_BRAND_COLOR;
+  }
+
+  public async saveBrandColor(hex: string): Promise<boolean> {
+    if (!isValidHexColor(hex)) return false;
+    const normalized = normalizeHexColor(hex);
+    const activeUser = this.getCurrentUser();
+    const now = new Date().toISOString();
+
+    localStorage.setItem(STORAGE_KEYS.BRAND_COLOR, normalized);
+    this.notify();
+
+    if (!auth.currentUser || !activeUser || activeUser.role !== 'admin') {
+      return true;
+    }
+
+    const payload: AppBrandingSettings = stripUndefined({
+      id: 'branding' as const,
+      brandColor: normalized,
+      updatedBy: activeUser.id.slice(0, 128),
+      updatedByName: activeUser.displayName.slice(0, 150),
+      updatedAt: now
+    });
+
+    try {
+      await setDoc(doc(db, 'appSettings', 'branding'), payload);
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, 'appSettings/branding');
+      return false;
+    }
+  }
+
   // Reset sample project/report data
   public async resetToSeed() {
     localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(SEED_PROJECTS));
@@ -4464,7 +4608,8 @@ class DataService {
       users: this.getUsers(),
       notifications: this.getNotifications(),
       stalledDays: this.getStalledDaysThreshold(),
-      cutoffHour: this.getCutoffHour()
+      cutoffHour: this.getCutoffHour(),
+      brandColor: this.getBrandColor()
     };
     return JSON.stringify(backup, null, 2);
   }
@@ -4483,6 +4628,9 @@ class DataService {
       if (Array.isArray(data.notifications)) localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(data.notifications));
       if (typeof data.stalledDays === 'number') localStorage.setItem(STORAGE_KEYS.STALLED_DAYS_LIMIT, String(data.stalledDays));
       if (typeof data.cutoffHour === 'number') localStorage.setItem(STORAGE_KEYS.CUTOFF_HOUR, String(data.cutoffHour));
+      if (typeof data.brandColor === 'string' && isValidHexColor(data.brandColor)) {
+        localStorage.setItem(STORAGE_KEYS.BRAND_COLOR, normalizeHexColor(data.brandColor));
+      }
       this.notify();
       return true;
     } catch (e) {

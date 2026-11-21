@@ -26,7 +26,6 @@ import { AdminTasksView } from './components/admin/AdminTasksView';
 import { AdminAnnouncementsView } from './components/admin/AdminAnnouncementsView';
 import { AdminProjectsView } from './components/admin/AdminProjectsView';
 import { AdminUsersView } from './components/admin/AdminUsersView';
-import { ExportCenterView } from './components/admin/ExportCenterView';
 import { AdminExcelLogsView } from './components/admin/AdminExcelLogsView';
 
 import { dataService } from './services/dataService';
@@ -40,6 +39,7 @@ import {
   showBrowserNotification,
   playSubtleNotificationChime
 } from './utils/browserNotifications';
+import { applyBrandColorToDocument } from './utils/brandTheme';
 import {
   UserProfile,
   NotificationPreferences,
@@ -98,6 +98,11 @@ export default function App() {
   const [cutoffHour, setCutoffHour] = useState<number>(() =>
     dataService.getCutoffHour()
   );
+  const [brandColor, setBrandColor] = useState<string>(() => {
+    const initial = dataService.getBrandColor();
+    applyBrandColorToDocument(initial);
+    return initial;
+  });
 
   // Modals & Live Toast state
   const [isNotificationsOpen, setIsNotificationsOpen] = useState<boolean>(false);
@@ -116,6 +121,11 @@ export default function App() {
       localStorage.setItem('dc_theme', 'light');
     }
   }, [darkMode]);
+
+  // Sync custom Brand Color CSS variables globally across buttons & menus
+  useEffect(() => {
+    applyBrandColorToDocument(brandColor);
+  }, [brandColor]);
 
   // Listen to Firebase Auth State
   useEffect(() => {
@@ -178,6 +188,7 @@ export default function App() {
       setPersonalNotes(dataService.getPersonalNotes(activeUser?.id));
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
+      setBrandColor(dataService.getBrandColor());
       setCurrentUser((prev) => {
         if (prev && !activeUser) {
           // Session was revoked (disabled or deleted in real-time)
@@ -268,6 +279,14 @@ export default function App() {
     prefs: NotificationPreferences
   ): Promise<boolean> => {
     return dataService.updateMyNotificationPreferences(prefs);
+  };
+
+  const handleUpdateBrandColor = async (hex: string): Promise<boolean> => {
+    const ok = await dataService.saveBrandColor(hex);
+    if (ok) {
+      setBrandColor(dataService.getBrandColor());
+    }
+    return ok;
   };
 
   // Loading Screen while resolving Firebase Auth session
@@ -453,7 +472,12 @@ export default function App() {
             )}
 
             {activeTab === 'excel-logs' && (
-              <AdminExcelLogsView currentUser={currentUser} />
+              <AdminExcelLogsView
+                currentUser={currentUser}
+                projects={projects}
+                siteDeliverables={siteDeliverables}
+                reports={reports}
+              />
             )}
 
             {activeTab === 'issues' && (
@@ -488,6 +512,9 @@ export default function App() {
                 issues={issues}
                 tasks={tasks}
                 users={users}
+                siteDeliverables={siteDeliverables}
+                executedWorks={executedWorks}
+                onNavigateTab={setActiveTab}
               />
             )}
 
@@ -496,14 +523,6 @@ export default function App() {
                 users={users}
                 projects={projects}
                 currentUser={currentUser}
-              />
-            )}
-
-            {activeTab === 'export' && (
-              <ExportCenterView
-                reports={reports}
-                issues={issues}
-                projects={projects}
               />
             )}
           </>
@@ -540,6 +559,8 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         currentUser={currentUser}
         onUpdateNotificationPreferences={handleUpdateNotificationPreferences}
+        brandColor={brandColor}
+        onUpdateBrandColor={handleUpdateBrandColor}
         stalledDays={stalledDays}
         onUpdateStalledDays={handleUpdateStalledDays}
         cutoffHour={cutoffHour}

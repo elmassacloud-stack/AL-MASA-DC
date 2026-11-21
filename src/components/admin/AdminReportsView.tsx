@@ -1,12 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   FileText,
-  Filter,
   Calendar,
   Building,
   User,
   Eye,
   FileSpreadsheet,
+  FileDown,
+  Share2,
+  Printer,
+  Loader2,
+  AlertCircle,
   CheckCircle2,
   Clock,
   X,
@@ -22,6 +26,14 @@ import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ReportAttachmentList } from '../common/ReportAttachmentList';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
+import {
+  generateReportsPdfBlob,
+  triggerPdfDownload,
+  shareOrDownloadPdf,
+  printReportsViaHiddenIframe,
+  formatArabicMonthLabel,
+  PdfExportPeriodMode
+} from '../../utils/pdfReportExporter';
 import { getReportIdentityAudit } from '../../utils/identityAudit';
 import { dataService } from '../../services/dataService';
 import { EditDailyReportModal } from '../site/EditDailyReportModal';
@@ -51,6 +63,182 @@ export const AdminReportsView: React.FC<Props> = ({
   const [feedbackErrorMsg, setFeedbackErrorMsg] = useState<string | null>(null);
   const [isSavingFeedback, setIsSavingFeedback] = useState<boolean>(false);
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
+
+  // PDF Export Modal & single-report export state
+  const latestReportDate = useMemo(() => {
+    if (reports.length === 0) return new Date().toISOString().slice(0, 10);
+    return [...reports]
+      .map((r) => r.reportDate)
+      .sort()
+      .reverse()[0];
+  }, [reports]);
+
+  const [isPdfModalOpen, setIsPdfModalOpen] = useState<boolean>(false);
+  const [pdfMode, setPdfMode] = useState<'daily' | 'monthly' | 'range'>('daily');
+  const [pdfDate, setPdfDate] = useState<string>(() => latestReportDate);
+  const [pdfMonth, setPdfMonth] = useState<string>(() => latestReportDate.slice(0, 7));
+  const [pdfFromDate, setPdfFromDate] = useState<string>(() => `${latestReportDate.slice(0, 7)}-01`);
+  const [pdfToDate, setPdfToDate] = useState<string>(() => latestReportDate);
+  const [pdfProjectId, setPdfProjectId] = useState<string>('all');
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState<boolean>(false);
+  const [exportingSinglePdfId, setExportingSinglePdfId] = useState<string | null>(null);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfSuccessMsg, setPdfSuccessMsg] = useState<string | null>(null);
+
+  const openPdfExportModal = () => {
+    setPdfError(null);
+    setPdfProjectId(filterProjectId);
+    if (filterDate) {
+      setPdfMode('daily');
+      setPdfDate(filterDate);
+      setPdfMonth(filterDate.slice(0, 7));
+    } else {
+      setPdfDate(latestReportDate);
+      setPdfMonth(latestReportDate.slice(0, 7));
+      setPdfFromDate(`${latestReportDate.slice(0, 7)}-01`);
+      setPdfToDate(latestReportDate);
+    }
+    setIsPdfModalOpen(true);
+  };
+
+  const pdfMatchingReports = useMemo(() => {
+    return reports.filter((r) => {
+      if (pdfProjectId !== 'all' && r.projectId !== pdfProjectId) return false;
+      if (pdfMode === 'daily') {
+        return !pdfDate || r.reportDate === pdfDate;
+      }
+      if (pdfMode === 'monthly') {
+        return !pdfMonth || r.reportDate.startsWith(pdfMonth);
+      }
+      // range
+      if (pdfFromDate && r.reportDate < pdfFromDate) return false;
+      if (pdfToDate && r.reportDate > pdfToDate) return false;
+      return true;
+    });
+  }, [reports, pdfProjectId, pdfMode, pdfDate, pdfMonth, pdfFromDate, pdfToDate]);
+
+  const pdfStatsPreview = useMemo(() => {
+    const projectIds = new Set<string>();
+    let submitted = 0;
+    let received = 0;
+    for (const rep of pdfMatchingReports) {
+      projectIds.add(rep.projectId);
+      submitted += rep.submittedWorks.length;
+      received += rep.receivedWorks.length;
+    }
+    return {
+      reportsCount: pdfMatchingReports.length,
+      projectsCount: projectIds.size,
+      submitted,
+      received
+    };
+  }, [pdfMatchingReports]);
+
+  const buildPdfExportPayload = () => {
+    const projectObj =
+      pdfProjectId !== 'all' ? projects.find((p) => p.id === pdfProjectId) : null;
+    const projectLabel = projectObj ? `${projectObj.name} (${projectObj.code})` : 'كافة المشاريع';
+
+    let title = 'تقرير الأعمال اليومي';
+    let periodLabel = pdfDate || 'كافة التواريخ';
+    let mode: PdfExportPeriodMode = pdfMode;
+
+    if (pdfMode === 'monthly') {
+      title = 'التقرير الشهري لأعمال المواقع';
+      periodLabel = pdfMonth ? formatArabicMonthLabel(pdfMonth) : 'كافة الشهور';
+    } else if (pdfMode === 'range') {
+      title = 'تقرير أعمال المواقع خلال فترة محددة';
+      periodLabel = `من ${pdfFromDate || 'البداية'} إلى ${pdfToDate || 'النهاية'}`;
+    } else {
+      title = 'تقرير الأعمال اليومي للمواقع';
+      periodLabel = pdfDate || latestReportDate;
+    }
+
+    return {
+      mode,
+      title,
+      periodLabel,
+      projectLabel,
+      reports: pdfMatchingReports,
+      projects,
+      users
+    };
+  };
+
+  const handleRunBatchPdfExport = async (action: 'download' | 'share' | 'print') => {
+    setPdfError(null);
+    if (pdfMatchingReports.length === 0) {
+      setPdfError('لا توجد تقارير مطابقة للفترة أو المشروع المحدد.');
+      return;
+    }
+
+    const payload = buildPdfExportPayload();
+
+    if (action === 'print') {
+      printReportsViaHiddenIframe(payload);
+      return;
+    }
+
+    setIsGeneratingPdf(true);
+    try {
+      const result = await generateReportsPdfBlob(payload);
+      if (action === 'share') {
+        const outcome = await shareOrDownloadPdf(result.blob, result.fileName, payload.title);
+        setPdfSuccessMsg(
+          outcome === 'shared'
+            ? `تم تجهيز ومشاركة ملف PDF (${result.pageCount} صفحة).`
+            : `تم تحميل ملف PDF بنجاح (${result.pageCount} صفحة) ويمكنك مشاركته مباشرة.`
+        );
+      } else {
+        triggerPdfDownload(result.blob, result.fileName);
+        setPdfSuccessMsg(
+          `تم استخراج وتحميل ملف PDF بنجاح (${pdfMatchingReports.length} تقرير · ${result.pageCount} صفحة).`
+        );
+      }
+      setIsPdfModalOpen(false);
+      window.setTimeout(() => setPdfSuccessMsg(null), 4500);
+    } catch (err) {
+      setPdfError(
+        err instanceof Error ? err.message : 'تعذر إنشاء ملف PDF. يرجى المحاولة مرة أخرى.'
+      );
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
+  const handleExportSingleReportPdf = async (
+    report: DailyReport,
+    action: 'download' | 'share' = 'download'
+  ) => {
+    if (exportingSinglePdfId) return;
+    setExportingSinglePdfId(report.id);
+    setPdfError(null);
+    try {
+      const proj = projects.find((p) => p.id === report.projectId);
+      const result = await generateReportsPdfBlob({
+        mode: 'single',
+        title: `تقرير الأعمال اليومي — ${report.projectName}`,
+        periodLabel: report.reportDate,
+        projectLabel: proj ? `${report.projectName} (${proj.code})` : report.projectName,
+        reports: [report],
+        projects,
+        users,
+        fileName: `تقرير_أعمال_${report.projectName}_${report.reportDate}.pdf`
+      });
+      if (action === 'share') {
+        await shareOrDownloadPdf(result.blob, result.fileName, `تقرير أعمال ${report.projectName} (${report.reportDate})`);
+      } else {
+        triggerPdfDownload(result.blob, result.fileName);
+      }
+      setPdfSuccessMsg(`تم تصدير تقرير «${report.projectName}» (${report.reportDate}) إلى PDF بنجاح.`);
+      window.setTimeout(() => setPdfSuccessMsg(null), 4000);
+    } catch (err) {
+      setEditSuccessMsg(null);
+      setPdfError(err instanceof Error ? err.message : 'تعذر تصدير التقرير إلى PDF.');
+    } finally {
+      setExportingSinglePdfId(null);
+    }
+  };
 
   const handleCopyReportSummary = (report: DailyReport) => {
     const audit = getReportIdentityAudit(report, users);
@@ -151,10 +339,19 @@ export const AdminReportsView: React.FC<Props> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-800">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300 font-bold border border-blue-200 dark:border-blue-800 tabular-nums">
             {filteredReports.length} تقرير مطابق للبحث
           </span>
+          <button
+            type="button"
+            onClick={openPdfExportModal}
+            disabled={reports.length === 0}
+            className="min-h-[38px] px-4 py-2 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white flex items-center gap-1.5 cursor-pointer transition-colors shadow-xs whitespace-nowrap"
+          >
+            <FileDown className="w-4 h-4" />
+            <span>تصدير إلى PDF</span>
+          </button>
         </div>
       </div>
 
@@ -249,6 +446,40 @@ export const AdminReportsView: React.FC<Props> = ({
             onClick={() => setEditSuccessMsg(null)}
             className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
             aria-label="إغلاق الرسالة"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {pdfSuccessMsg && (
+        <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200 text-xs sm:text-sm font-bold flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{pdfSuccessMsg}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPdfSuccessMsg(null)}
+            className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+            aria-label="إغلاق"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {pdfError && !isPdfModalOpen && (
+        <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-xs sm:text-sm font-bold flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{pdfError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setPdfError(null)}
+            className="p-1 opacity-70 hover:opacity-100 cursor-pointer"
+            aria-label="إغلاق"
           >
             <X className="w-4 h-4" />
           </button>
@@ -368,6 +599,20 @@ export const AdminReportsView: React.FC<Props> = ({
                 >
                   <Copy className="w-3.5 h-3.5 text-blue-500" />
                   <span>نسخ الملخص</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={exportingSinglePdfId === report.id}
+                  onClick={() => handleExportSingleReportPdf(report, 'download')}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-50 text-rose-700 dark:bg-rose-950/80 dark:text-rose-300 border border-rose-200 dark:border-rose-800 hover:bg-rose-100 dark:hover:bg-rose-900/60 disabled:opacity-60 transition-colors flex items-center gap-1.5 cursor-pointer"
+                  title="تصدير التقرير بصيغة PDF جاهز للمشاركة"
+                >
+                  {exportingSinglePdfId === report.id ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <FileDown className="w-4 h-4" />
+                  )}
+                  <span>تصدير PDF</span>
                 </button>
                 <button
                   onClick={() => exportDailyReportToExcel(report)}
@@ -631,7 +876,20 @@ export const AdminReportsView: React.FC<Props> = ({
 
             {/* Modal Footer */}
             <div className="p-4 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={exportingSinglePdfId === selectedReport.id}
+                  onClick={() => handleExportSingleReportPdf(selectedReport, 'download')}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-60 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                >
+                  {exportingSinglePdfId === selectedReport.id ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <FileDown className="w-4 h-4" />
+                  )}
+                  <span>تصدير إلى PDF</span>
+                </button>
                 <button
                   onClick={() => exportDailyReportToExcel(selectedReport)}
                   className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
@@ -664,6 +922,236 @@ export const AdminReportsView: React.FC<Props> = ({
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl text-xs sm:text-sm font-semibold cursor-pointer transition-colors"
               >
                 إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          PDF EXPORT MODAL (DAILY / MONTHLY / CUSTOM RANGE)
+          ========================================================================= */}
+      {isPdfModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-xl rounded-3xl p-5 sm:p-6 shadow-2xl border border-slate-200 dark:border-slate-800 my-auto space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/70 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-900 flex items-center justify-center">
+                  <FileDown className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 dark:text-white text-base">
+                    تصدير تقارير الأعمال إلى PDF
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    استخراج تقارير يومية أو شهرية منسقة وجاهزة للطباعة والمشاركة
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsPdfModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                aria-label="إغلاق"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {pdfError && (
+              <div className="p-3 bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 rounded-xl text-rose-700 dark:text-rose-300 text-xs font-bold flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{pdfError}</span>
+              </div>
+            )}
+
+            {/* Period Mode Selector */}
+            <div className="space-y-1.5 text-xs">
+              <label className="block font-bold text-slate-700 dark:text-slate-200">
+                نوع التقرير المطلوب
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: 'daily', label: 'تقرير يومي', sub: 'يوم محدد' },
+                    { id: 'monthly', label: 'تقرير شهري', sub: 'ملخص شهر كامل' },
+                    { id: 'range', label: 'فترة مخصصة', sub: 'من تاريخ إلى تاريخ' }
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => {
+                      setPdfMode(opt.id);
+                      setPdfError(null);
+                    }}
+                    className={`p-2.5 rounded-xl border text-right cursor-pointer transition-colors ${
+                      pdfMode === opt.id
+                        ? 'bg-rose-600 text-white border-rose-600'
+                        : 'bg-slate-50 dark:bg-slate-800/70 text-slate-800 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:border-rose-400'
+                    }`}
+                  >
+                    <div className="font-bold text-xs">{opt.label}</div>
+                    <div
+                      className={`text-[10px] mt-0.5 ${
+                        pdfMode === opt.id ? 'text-rose-100' : 'text-slate-500 dark:text-slate-400'
+                      }`}
+                    >
+                      {opt.sub}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Period Inputs */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              {pdfMode === 'daily' && (
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-200 mb-1">
+                    تاريخ التقرير اليومي
+                  </label>
+                  <input
+                    type="date"
+                    value={pdfDate}
+                    onChange={(e) => setPdfDate(e.target.value)}
+                    className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                  />
+                </div>
+              )}
+
+              {pdfMode === 'monthly' && (
+                <div>
+                  <label className="block font-bold text-slate-700 dark:text-slate-200 mb-1">
+                    الشهر والسنة
+                  </label>
+                  <input
+                    type="month"
+                    value={pdfMonth}
+                    onChange={(e) => setPdfMonth(e.target.value)}
+                    className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                  />
+                </div>
+              )}
+
+              {pdfMode === 'range' && (
+                <>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-200 mb-1">
+                      من تاريخ
+                    </label>
+                    <input
+                      type="date"
+                      value={pdfFromDate}
+                      onChange={(e) => setPdfFromDate(e.target.value)}
+                      className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-700 dark:text-slate-200 mb-1">
+                      إلى تاريخ
+                    </label>
+                    <input
+                      type="date"
+                      value={pdfToDate}
+                      onChange={(e) => setPdfToDate(e.target.value)}
+                      className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-mono font-bold dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className={pdfMode === 'range' ? 'sm:col-span-2' : ''}>
+                <label className="block font-bold text-slate-700 dark:text-slate-200 mb-1">
+                  نطاق المشروع
+                </label>
+                <select
+                  value={pdfProjectId}
+                  onChange={(e) => setPdfProjectId(e.target.value)}
+                  className="w-full h-11 px-3 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-xl font-bold dark:text-white outline-none focus:ring-2 focus:ring-rose-500"
+                >
+                  <option value="all">كافة المشاريع ({projects.length})</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Live Match Summary Box */}
+            <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-slate-700 dark:text-slate-200">
+                  ملخص المحتوى الذي سيتم استخراجه:
+                </span>
+                <span
+                  className={`font-mono font-extrabold tabular-nums ${
+                    pdfStatsPreview.reportsCount > 0
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-rose-600 dark:text-rose-400'
+                  }`}
+                >
+                  {pdfStatsPreview.reportsCount} تقرير مطابق
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-2 text-center text-[11px] font-mono tabular-nums">
+                <div className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700">
+                  <div className="text-slate-500 dark:text-slate-400 font-sans">المشاريع</div>
+                  <div className="text-sm font-extrabold text-slate-900 dark:text-white mt-0.5">
+                    {pdfStatsPreview.projectsCount}
+                  </div>
+                </div>
+                <div className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700">
+                  <div className="text-slate-500 dark:text-slate-400 font-sans">الأعمال المقدمة</div>
+                  <div className="text-sm font-extrabold text-blue-600 dark:text-blue-400 mt-0.5">
+                    {pdfStatsPreview.submitted}
+                  </div>
+                </div>
+                <div className="p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700">
+                  <div className="text-slate-500 dark:text-slate-400 font-sans">الأعمال المستلمة</div>
+                  <div className="text-sm font-extrabold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                    {pdfStatsPreview.received}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isGeneratingPdf || pdfStatsPreview.reportsCount === 0}
+                onClick={() => handleRunBatchPdfExport('download')}
+                className="flex-1 min-h-[44px] px-4 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                {isGeneratingPdf ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <FileDown className="w-4 h-4" />
+                )}
+                <span>{isGeneratingPdf ? 'جاري إنشاء ملف PDF...' : 'تحميل ملف PDF'}</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isGeneratingPdf || pdfStatsPreview.reportsCount === 0}
+                onClick={() => handleRunBatchPdfExport('share')}
+                className="min-h-[44px] px-3.5 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Share2 className="w-4 h-4" />
+                <span>مشاركة</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isGeneratingPdf || pdfStatsPreview.reportsCount === 0}
+                onClick={() => handleRunBatchPdfExport('print')}
+                className="min-h-[44px] px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-50 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Printer className="w-4 h-4" />
+                <span>طباعة</span>
               </button>
             </div>
           </div>
