@@ -378,12 +378,12 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
 
       {/* Hero Profile Card & Photo Upload */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-        <div className="h-20 sm:h-24 bg-gradient-to-l from-blue-700 via-blue-600 to-indigo-700 relative" />
+        <div className="h-16 sm:h-20 bg-gradient-to-l from-blue-700 via-blue-600 to-indigo-700" />
         <div className="px-4 sm:px-6 pb-5 sm:pb-6">
-          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 -mt-12 sm:-mt-14">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             {/* Avatar + Identity */}
-            <div className="flex flex-col sm:flex-row items-center sm:items-end gap-3.5 text-center sm:text-right">
-              <div className="relative shrink-0">
+            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-3.5 sm:gap-4 text-center sm:text-right min-w-0">
+              <div className="relative z-10 -mt-12 sm:-mt-12 shrink-0">
                 <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full border-4 border-white dark:border-slate-900 bg-slate-100 dark:bg-slate-800 shadow-md overflow-hidden flex items-center justify-center">
                   {currentUser.photoUrl ? (
                     <img
@@ -422,7 +422,7 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
                 />
               </div>
 
-              <div className="sm:pb-1 space-y-1">
+              <div className="pt-1 sm:pt-3.5 space-y-1 min-w-0">
                 <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
                   <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
                     {currentUser.displayName}
@@ -450,7 +450,7 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
             </div>
 
             {/* Avatar Actions */}
-            <div className="flex items-center justify-center sm:justify-end gap-2">
+            <div className="flex items-center justify-center sm:justify-end gap-2 sm:pt-3 shrink-0">
               <button
                 type="button"
                 disabled={isUpdatingPhoto}
