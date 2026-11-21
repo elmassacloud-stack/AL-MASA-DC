@@ -65,6 +65,7 @@ import {
   handleFirestoreError,
   stripUndefined,
   createFirebaseUserByAdmin,
+  updateCurrentAuthDisplayName,
   isDeliverableExpired,
   deleteDeliverableFromFirebase,
   purgeExpiredSiteDeliverablesFromFirebase,
@@ -150,6 +151,10 @@ function normalizeUserProfile(raw: Partial<UserProfile>, docId: string, fallback
     assignedProjects: normalizeAssignedProjectsList(raw.assignedProjects),
     status: raw.status === 'disabled' ? 'disabled' : 'active',
     phone: raw.phone ? String(raw.phone).trim().slice(0, 40) : undefined,
+    photoUrl:
+      typeof raw.photoUrl === 'string' && raw.photoUrl.trim().length > 0
+        ? raw.photoUrl.trim().slice(0, 350000)
+        : undefined,
     notificationPreferences: raw.notificationPreferences
       ? normalizeNotificationPreferences(raw.notificationPreferences)
       : undefined,
@@ -350,6 +355,7 @@ class DataService {
         assignedProjects: profile?.assignedProjects?.length ? profile.assignedProjects : allProjectIds,
         status: 'active',
         phone: profile?.phone || '',
+        photoUrl: profile?.photoUrl,
         notificationPreferences: profile?.notificationPreferences,
         createdAt: profile?.createdAt || now,
         updatedAt: now
@@ -375,6 +381,17 @@ class DataService {
 
     if (profile.status === 'disabled') {
       throw new Error('ACCOUNT_DISABLED');
+    }
+
+    // Sync Firestore email if Firebase Auth email was updated (e.g. after verifyBeforeUpdateEmail link)
+    if (email && normalizeEmail(profile.email) !== email) {
+      const syncedAt = new Date().toISOString();
+      profile = { ...profile, email, updatedAt: syncedAt };
+      try {
+        await updateDoc(userDocRef, { email, updatedAt: syncedAt });
+      } catch {
+        // Keep local resolved profile even if transient network/rules sync fails
+      }
     }
 
     this.upsertLocalUser(profile);
@@ -3310,6 +3327,83 @@ class DataService {
     this.setCurrentUser(updatedUser);
     this.notify();
     return true;
+  }
+
+  public async updateMyProfile(updates: {
+    displayName?: string;
+    jobTitle?: string;
+    phone?: string;
+    photoUrl?: string | null;
+    email?: string;
+  }): Promise<UserProfile | null> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser) return null;
+
+    const updatedAt = new Date().toISOString();
+    const firestorePatch: Record<string, string> = { updatedAt };
+    const nextUserDraft: Partial<UserProfile> = {
+      ...activeUser,
+      updatedAt
+    };
+
+    if (updates.displayName !== undefined) {
+      const cleanName = updates.displayName.trim().slice(0, 150);
+      if (cleanName.length === 0) {
+        throw new Error('يرجى إدخال الاسم الكامل.');
+      }
+      firestorePatch.displayName = cleanName;
+      nextUserDraft.displayName = cleanName;
+    }
+
+    if (updates.jobTitle !== undefined) {
+      const cleanJob = updates.jobTitle.trim().slice(0, 150);
+      firestorePatch.jobTitle = cleanJob;
+      nextUserDraft.jobTitle = cleanJob || undefined;
+    }
+
+    if (updates.phone !== undefined) {
+      const cleanPhone = updates.phone.trim().slice(0, 40);
+      firestorePatch.phone = cleanPhone;
+      nextUserDraft.phone = cleanPhone || undefined;
+    }
+
+    if (updates.photoUrl !== undefined) {
+      const cleanPhoto =
+        updates.photoUrl === null ? '' : updates.photoUrl.trim().slice(0, 350000);
+      firestorePatch.photoUrl = cleanPhoto;
+      nextUserDraft.photoUrl = cleanPhoto || undefined;
+    }
+
+    if (updates.email !== undefined) {
+      const cleanEmail = normalizeEmail(updates.email);
+      if (cleanEmail.length >= 3 && cleanEmail.length <= 200) {
+        if (!isSuperAdminEmail(activeUser.email) && isSuperAdminEmail(cleanEmail)) {
+          throw new Error('لا يمكن استخدام هذا البريد الإلكتروني.');
+        }
+        firestorePatch.email = cleanEmail;
+        nextUserDraft.email = cleanEmail;
+      }
+    }
+
+    try {
+      await updateDoc(doc(db, 'users', activeUser.id), firestorePatch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${activeUser.id}`);
+    }
+
+    if (firestorePatch.displayName && firestorePatch.displayName !== activeUser.displayName) {
+      await updateCurrentAuthDisplayName(firestorePatch.displayName).catch(() => undefined);
+    }
+
+    const updatedUser = normalizeUserProfile(
+      nextUserDraft,
+      activeUser.id,
+      nextUserDraft.email || activeUser.email
+    );
+    this.upsertLocalUser(updatedUser);
+    this.setCurrentUser(updatedUser);
+    this.notify();
+    return updatedUser;
   }
 
   // --- In-App Notifications ---

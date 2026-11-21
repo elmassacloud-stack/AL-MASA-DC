@@ -8,7 +8,8 @@ import {
   LogOut,
   Share2,
   Users,
-  MoreVertical
+  MoreVertical,
+  UserCircle2
 } from 'lucide-react';
 import { UserProfile, AppNotification } from '../../types';
 
@@ -169,10 +170,27 @@ export const Header: React.FC<Props> = ({
 
           <div className="h-6 w-px bg-slate-200 dark:bg-slate-800 mx-0.5 hidden md:block" />
 
-          {/* Current User Info (Desktop/Tablet) */}
-          <div className="hidden md:flex items-center gap-2 py-1 px-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 shrink-0">
-            <div className="w-7 h-7 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
-              <UserCheck className="w-4 h-4" />
+          {/* Current User Profile Button (Desktop/Tablet) */}
+          <button
+            type="button"
+            onClick={() => onNavigateTab('profile')}
+            className={`hidden md:flex items-center gap-2 py-1 px-2.5 rounded-xl border transition-all shrink-0 cursor-pointer touch-manipulation ${
+              activeTab === 'profile'
+                ? 'bg-blue-50 dark:bg-blue-950/70 border-blue-400 dark:border-blue-600 ring-1 ring-blue-500/30'
+                : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+            title="فتح ملفي الشخصي وتعديل البيانات وكلمة المرور"
+          >
+            <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0 overflow-hidden border border-blue-200/70 dark:border-blue-800/70">
+              {currentUser.photoUrl ? (
+                <img
+                  src={currentUser.photoUrl}
+                  alt={formattedDisplayName}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <UserCheck className="w-4 h-4" />
+              )}
             </div>
             <div className="text-right leading-tight">
               <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[200px]">
@@ -182,7 +200,7 @@ export const Header: React.FC<Props> = ({
                 {currentUser.jobTitle || (isAdmin ? 'مسؤول النظام (Admin)' : 'مهندس موقع')}
               </div>
             </div>
-          </div>
+          </button>
 
           {/* Desktop/Tablet Logout Button */}
           <button
@@ -201,7 +219,7 @@ export const Header: React.FC<Props> = ({
               type="button"
               onClick={() => setMobileMenuOpen((prev) => !prev)}
               className={`w-10 h-10 flex items-center justify-center rounded-xl transition-colors touch-manipulation cursor-pointer ${
-                mobileMenuOpen
+                mobileMenuOpen || activeTab === 'profile'
                   ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400'
                   : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 active:bg-slate-200 dark:active:bg-slate-700'
               }`}
@@ -212,13 +230,28 @@ export const Header: React.FC<Props> = ({
             </button>
 
             {mobileMenuOpen && (
-              <div className="absolute left-0 mt-2 w-60 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden z-50">
-                {/* User Account Card */}
-                <div className="px-3.5 py-3 bg-slate-50 dark:bg-slate-800/70 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
-                    <UserCheck className="w-4 h-4" />
+              <div className="absolute left-0 mt-2 w-64 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-2xl overflow-hidden z-50">
+                {/* User Account Card (tappable to open profile) */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onNavigateTab('profile');
+                  }}
+                  className="w-full px-3.5 py-3 bg-slate-50 dark:bg-slate-800/70 hover:bg-slate-100 dark:hover:bg-slate-800 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2.5 text-right transition-colors cursor-pointer"
+                >
+                  <div className="w-9 h-9 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0 overflow-hidden border border-blue-200/70 dark:border-blue-800/70">
+                    {currentUser.photoUrl ? (
+                      <img
+                        src={currentUser.photoUrl}
+                        alt={formattedDisplayName}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <UserCheck className="w-4 h-4" />
+                    )}
                   </div>
-                  <div className="min-w-0 text-right">
+                  <div className="min-w-0 flex-1 text-right">
                     <div className="text-xs font-bold text-slate-900 dark:text-white truncate">
                       {formattedDisplayName}
                     </div>
@@ -226,10 +259,26 @@ export const Header: React.FC<Props> = ({
                       {currentUser.jobTitle || (isAdmin ? 'مسؤول النظام (Admin)' : 'مهندس موقع')}
                     </div>
                   </div>
-                </div>
+                </button>
 
                 {/* Menu Actions */}
                 <div className="p-1.5 space-y-0.5 text-xs font-bold">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      onNavigateTab('profile');
+                    }}
+                    className={`w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer ${
+                      activeTab === 'profile'
+                        ? 'bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300'
+                        : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 active:bg-slate-200'
+                    }`}
+                  >
+                    <UserCircle2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
+                    <span>ملفي الشخصي وكلمة المرور</span>
+                  </button>
+
                   {isAdmin && (
                     <button
                       type="button"

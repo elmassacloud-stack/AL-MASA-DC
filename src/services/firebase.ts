@@ -7,6 +7,11 @@ import {
   onAuthStateChanged,
   createUserWithEmailAndPassword,
   updateProfile,
+  updatePassword,
+  updateEmail,
+  verifyBeforeUpdateEmail,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
   User,
   Auth
 } from 'firebase/auth';
@@ -182,6 +187,53 @@ export async function createFirebaseUserByAdmin(
   }
 }
 
+export async function updateCurrentAuthDisplayName(displayName: string): Promise<void> {
+  const user = auth.currentUser;
+  if (!user) return;
+  const trimmed = displayName.trim();
+  if (trimmed && user.displayName !== trimmed) {
+    await updateProfile(user, { displayName: trimmed });
+  }
+}
+
+export async function changeCurrentUserPassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    throw new Error('لم يتم العثور على جلسة مستخدم نشطة.');
+  }
+  const credential = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, credential);
+  await updatePassword(user, newPassword);
+}
+
+export async function changeCurrentUserEmail(
+  currentPassword: string,
+  newEmail: string
+): Promise<{ status: 'updated' | 'verification_sent'; email: string }> {
+  const user = auth.currentUser;
+  if (!user || !user.email) {
+    throw new Error('لم يتم العثور على جلسة مستخدم نشطة.');
+  }
+  const normalizedEmail = newEmail.trim().toLowerCase();
+  const credential = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, credential);
+
+  try {
+    await updateEmail(user, normalizedEmail);
+    return { status: 'updated', email: normalizedEmail };
+  } catch (error) {
+    const code = (error as { code?: string })?.code || '';
+    if (code === 'auth/operation-not-allowed') {
+      await verifyBeforeUpdateEmail(user, normalizedEmail);
+      return { status: 'verification_sent', email: normalizedEmail };
+    }
+    throw error;
+  }
+}
+
 export function translateFirebaseAuthError(error: unknown): string {
   const code = (error as { code?: string })?.code || '';
   const message = (error as { message?: string })?.message || '';
@@ -192,16 +244,19 @@ export function translateFirebaseAuthError(error: unknown): string {
     code === 'auth/user-not-found' ||
     message.includes('invalid-credential')
   ) {
-    return 'البريد الإلكتروني أو كلمة المرور غير صحيحة.';
+    return 'البريد الإلكتروني أو كلمة المرور الحالية غير صحيحة.';
   }
   if (code === 'auth/invalid-email') {
     return 'صيغة البريد الإلكتروني غير صحيحة.';
   }
   if (code === 'auth/email-already-in-use') {
-    return 'هذا البريد الإلكتروني مسجل مسبقاً في نظام المصادقة.';
+    return 'هذا البريد الإلكتروني مسجل مسبقاً لحساب آخر.';
   }
   if (code === 'auth/weak-password') {
     return 'كلمة المرور ضعيفة جداً؛ يجب أن تتكون من 6 أحرف على الأقل.';
+  }
+  if (code === 'auth/requires-recent-login') {
+    return 'لأسباب أمنية، يرجى تسجيل الخروج وإعادة الدخول ثم المحاولة مرة أخرى.';
   }
   if (code === 'auth/too-many-requests') {
     return 'تم حظر المحاولات مؤقتاً لكثرة المحاولات الخاطئة. يرجى المحاولة بعد قليل.';
@@ -210,7 +265,7 @@ export function translateFirebaseAuthError(error: unknown): string {
     return 'تم تعطيل هذا الحساب. يرجى التواصل مع مسؤول النظام.';
   }
   if (code === 'auth/operation-not-allowed') {
-    return 'تسجيل الدخول بالبريد وكلمة المرور غير مفعل حالياً في إعدادات Firebase Console.';
+    return 'تتطلب هذه العملية التحقق من البريد الإلكتروني أو تفعيلها من إعدادات Firebase.';
   }
   if (code === 'auth/network-request-failed') {
     return 'تعذر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى.';

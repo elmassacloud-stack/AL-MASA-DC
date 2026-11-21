@@ -15,6 +15,7 @@ import {
   FileUp,
   NotebookPen,
   FileSpreadsheet,
+  UserCircle2,
   X
 } from 'lucide-react';
 import { UserRole } from '../../types';
@@ -70,7 +71,8 @@ export const Navigation: React.FC<Props> = ({
       mobileLabel: 'الشخصية',
       icon: NotebookPen,
       badge: personalNotesPendingCount
-    }
+    },
+    { id: 'profile', label: 'ملفي الشخصي', mobileLabel: 'حسابي', icon: UserCircle2 }
   ];
 
   // Navigation tabs for Admin (DC Manager)
@@ -98,7 +100,8 @@ export const Navigation: React.FC<Props> = ({
     { id: 'announcements', label: 'التعاميم', icon: BellRing },
     { id: 'projects', label: 'إدارة المشاريع', icon: Building2 },
     { id: 'users', label: 'إدارة المستخدمين', icon: Users },
-    { id: 'export', label: 'التصدير', icon: Download }
+    { id: 'export', label: 'التصدير', icon: Download },
+    { id: 'profile', label: 'ملفي الشخصي', mobileLabel: 'حسابي', icon: UserCircle2 }
   ];
 
   const items = role === 'admin' ? adminNavItems : siteNavItems;

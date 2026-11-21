@@ -16,6 +16,7 @@
         "assignedProjects": { "type": "array" },
         "status": { "type": "string", "enum": ["active", "disabled"] },
         "phone": { "type": "string", "maxLength": 40 },
+        "photoUrl": { "type": "string", "maxLength": 350000 },
         "notificationPreferences": {
           "type": "object",
           "properties": {

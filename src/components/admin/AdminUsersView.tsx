@@ -292,23 +292,31 @@ export const AdminUsersView: React.FC<Props> = ({
               <div className="space-y-3">
                 {/* User Header */}
                 <div className="flex items-start justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <h3 className="font-bold text-base text-slate-900 dark:text-white truncate">
-                        {user.displayName}
-                      </h3>
-                      {isMe && (
-                        <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-bold">
-                          أنت
-                        </span>
-                      )}
-                      {isSuper && (
-                        <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800 px-2 py-0.5 rounded-full font-bold inline-flex items-center gap-1">
-                          <ShieldCheck className="w-3 h-3" />
-                          <span>المسؤول الرئيسي</span>
-                        </span>
-                      )}
-                    </div>
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    {user.photoUrl && (
+                      <img
+                        src={user.photoUrl}
+                        alt={user.displayName}
+                        className="w-10 h-10 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0 mt-0.5"
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h3 className="font-bold text-base text-slate-900 dark:text-white truncate">
+                          {user.displayName}
+                        </h3>
+                        {isMe && (
+                          <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-bold">
+                            أنت
+                          </span>
+                        )}
+                        {isSuper && (
+                          <span className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-800 px-2 py-0.5 rounded-full font-bold inline-flex items-center gap-1">
+                            <ShieldCheck className="w-3 h-3" />
+                            <span>المسؤول الرئيسي</span>
+                          </span>
+                        )}
+                      </div>
 
                     {user.jobTitle && (
                       <div className="flex items-center gap-1.5 text-xs text-slate-700 dark:text-slate-300 mt-1 font-semibold">
@@ -328,6 +336,7 @@ export const AdminUsersView: React.FC<Props> = ({
                         <span dir="ltr">{user.phone}</span>
                       </div>
                     )}
+                    </div>
                   </div>
 
                   {/* Role Badge */}

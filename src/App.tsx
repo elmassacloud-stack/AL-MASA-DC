@@ -9,6 +9,7 @@ import { ShareAppModal } from './components/common/ShareAppModal';
 import { ExecutedWorksView } from './components/common/ExecutedWorksView';
 import { SiteDeliverablesView } from './components/common/SiteDeliverablesView';
 import { PersonalNotesView } from './components/common/PersonalNotesView';
+import { UserProfileView } from './components/common/UserProfileView';
 
 // Site User Views
 import { DailyReportForm } from './components/site/DailyReportForm';
@@ -513,6 +514,14 @@ export default function App() {
           <PersonalNotesView
             currentUser={currentUser}
             personalNotes={personalNotes}
+          />
+        )}
+
+        {/* SHARED USER PROFILE SCREEN (FOR EVERY USER) */}
+        {activeTab === 'profile' && (
+          <UserProfileView
+            currentUser={currentUser}
+            projects={projects}
           />
         )}
       </main>

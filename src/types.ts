@@ -166,6 +166,7 @@ export interface UserProfile {
   assignedProjects: string[]; // array of project IDs
   status: 'active' | 'disabled';
   phone?: string;
+  photoUrl?: string;
   notificationPreferences?: NotificationPreferences;
   createdAt: string;
   updatedAt: string;
