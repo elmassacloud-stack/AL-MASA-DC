@@ -26,6 +26,7 @@ import { AdminAnnouncementsView } from './components/admin/AdminAnnouncementsVie
 import { AdminProjectsView } from './components/admin/AdminProjectsView';
 import { AdminUsersView } from './components/admin/AdminUsersView';
 import { ExportCenterView } from './components/admin/ExportCenterView';
+import { AdminExcelLogsView } from './components/admin/AdminExcelLogsView';
 
 import { dataService } from './services/dataService';
 import { subscribeToAuthState, signOutUser } from './services/firebase';
@@ -191,7 +192,9 @@ export default function App() {
   // Redirect away from restricted tabs immediately if permission is revoked
   useEffect(() => {
     if (!currentUser) return;
-    if (!canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
+    if (currentUser.role !== 'admin' && activeTab === 'excel-logs') {
+      setActiveTab('daily-report');
+    } else if (!canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
       setActiveTab('daily-report');
     } else if (!canAccessSiteDeliverablesTab(currentUser) && activeTab === 'site-deliverables') {
       setActiveTab('daily-report');
@@ -317,7 +320,7 @@ export default function App() {
   ).length;
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
+    <div className="min-h-[100dvh] flex flex-col overflow-x-clip bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
       {/* Top Application Header */}
       <Header
         currentUser={currentUser}
@@ -446,6 +449,10 @@ export default function App() {
                 stalledDaysThreshold={stalledDays}
                 onUpdateStalledDays={handleUpdateStalledDays}
               />
+            )}
+
+            {activeTab === 'excel-logs' && (
+              <AdminExcelLogsView currentUser={currentUser} />
             )}
 
             {activeTab === 'issues' && (

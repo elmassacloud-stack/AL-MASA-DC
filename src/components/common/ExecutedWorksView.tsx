@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Hammer,
   Plus,
@@ -16,20 +16,34 @@ import {
   FileText,
   UserCheck,
   ShieldCheck,
-  BarChart3
+  BarChart3,
+  Upload,
+  Paperclip,
+  Image as ImageIcon,
+  Eye,
+  Download
 } from 'lucide-react';
 import {
   ExecutedWork,
   Project,
   UserProfile,
   WorkDiscipline,
-  ExecutedWorkReviewStatus
+  ExecutedWorkReviewStatus,
+  ReportAttachment
 } from '../../types';
-import { WORK_DISCIPLINE_CONFIG } from '../../config';
-import { dataService } from '../../services/dataService';
+import { WORK_DISCIPLINE_CONFIG, MAX_REPORT_ATTACHMENTS } from '../../config';
+import { dataService, ReportUploadProgress } from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
 import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 import { exportExecutedWorksToExcel } from '../../utils/exportUtils';
+import {
+  prepareReportAttachmentFile,
+  PreparedReportAttachment,
+  getReportAttachmentKind,
+  formatFileSize,
+  parseExcelPreviewFromBlobUrl,
+  ExcelPreviewSheet
+} from '../../utils/pdfUtils';
 
 interface Props {
   currentUser: UserProfile;
@@ -73,6 +87,27 @@ export const ExecutedWorksView: React.FC<Props> = ({
   const [notes, setNotes] = useState<string>('');
   const [adminNote, setAdminNote] = useState<string>('');
   const [reviewStatus, setReviewStatus] = useState<ExecutedWorkReviewStatus>('pending');
+
+  // Daily report attachments (Image / PDF / Excel)
+  const [existingAttachments, setExistingAttachments] = useState<ReportAttachment[]>([]);
+  const [pendingAttachments, setPendingAttachments] = useState<PreparedReportAttachment[]>([]);
+  const [isPreparingFiles, setIsPreparingFiles] = useState<boolean>(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<ReportUploadProgress | null>(null);
+  const [isDraggingFiles, setIsDraggingFiles] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentsSectionRef = useRef<HTMLDivElement | null>(null);
+
+  // Attachment preview & download state
+  const [loadingAttachmentKey, setLoadingAttachmentKey] = useState<string | null>(null);
+  const [previewAttachment, setPreviewAttachment] = useState<{
+    workId: string;
+    attachment: ReportAttachment;
+    url: string;
+    kind: 'pdf' | 'image' | 'excel' | 'other';
+    excelSheets?: ExcelPreviewSheet[];
+    activeSheetIndex?: number;
+  } | null>(null);
 
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -123,7 +158,8 @@ export const ExecutedWorksView: React.FC<Props> = ({
           w.locationArea || '',
           w.relatedSubmittalNumber || '',
           w.notes || '',
-          w.authorName
+          w.authorName,
+          ...(w.attachments || []).map((a) => a.name)
         ]
           .join(' ')
           .toLowerCase();
@@ -178,12 +214,13 @@ export const ExecutedWorksView: React.FC<Props> = ({
     });
   }, [accessibleProjects, filterProjectId, scopedWorks, progressDate]);
 
-  const openCreateModal = () => {
+  const openCreateModal = (prefillDailyReport = false) => {
+    const today = getTodayDateStr();
     setEditingWork(null);
     setProjectId(accessibleProjects[0]?.id || '');
-    setWorkDate(getTodayDateStr());
+    setWorkDate(today);
     setDiscipline('civil_structural');
-    setWorkDescription('');
+    setWorkDescription(prefillDailyReport ? `تقرير الأعمال المنفذة اليومي — ${today}` : '');
     setLocationArea('');
     setQuantity('');
     setUnit('');
@@ -192,8 +229,18 @@ export const ExecutedWorksView: React.FC<Props> = ({
     setNotes('');
     setAdminNote('');
     setReviewStatus(isAdmin ? 'approved' : 'pending');
+    setExistingAttachments([]);
+    setPendingAttachments([]);
+    setAttachmentError(null);
+    setUploadProgress(null);
     setFormError(null);
     setIsModalOpen(true);
+
+    if (prefillDailyReport) {
+      setTimeout(() => {
+        attachmentsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 120);
+    }
   };
 
   const openEditModal = (work: ExecutedWork) => {
@@ -210,8 +257,117 @@ export const ExecutedWorksView: React.FC<Props> = ({
     setNotes(work.notes || '');
     setAdminNote(work.adminNote || '');
     setReviewStatus(work.reviewStatus);
+    setExistingAttachments(work.attachments || []);
+    setPendingAttachments([]);
+    setAttachmentError(null);
+    setUploadProgress(null);
     setFormError(null);
     setIsModalOpen(true);
+  };
+
+  const handleFilesSelected = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
+    setAttachmentError(null);
+    const currentTotal = existingAttachments.length + pendingAttachments.length;
+    const remainingSlots = MAX_REPORT_ATTACHMENTS - currentTotal;
+
+    if (remainingSlots <= 0) {
+      setAttachmentError(`الحد الأقصى للمرفقات هو ${MAX_REPORT_ATTACHMENTS} ملفات لكل بند.`);
+      return;
+    }
+
+    const filesToProcess = files.slice(0, remainingSlots);
+    if (files.length > remainingSlots) {
+      setAttachmentError(
+        `تم اختيار ${filesToProcess.length} ملفات فقط لأن الحد الأقصى هو ${MAX_REPORT_ATTACHMENTS} ملفات.`
+      );
+    }
+
+    setIsPreparingFiles(true);
+    const preparedList: PreparedReportAttachment[] = [];
+    const errors: string[] = [];
+
+    for (const file of filesToProcess) {
+      try {
+        const prepared = await prepareReportAttachmentFile(file);
+        preparedList.push(prepared);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : `تعذر تجهيز الملف «${file.name}».`);
+      }
+    }
+
+    if (preparedList.length > 0) {
+      setPendingAttachments((prev) => [...prev, ...preparedList]);
+    }
+    if (errors.length > 0) {
+      setAttachmentError(errors.join(' '));
+    }
+    setIsPreparingFiles(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const handleRemoveExistingAttachment = (attId?: string, index?: number) => {
+    setExistingAttachments((prev) =>
+      prev.filter((att, idx) => (attId ? att.id !== attId : idx !== index))
+    );
+  };
+
+  const handleRemovePendingAttachment = (attachmentId: string) => {
+    setPendingAttachments((prev) => prev.filter((item) => item.attachmentId !== attachmentId));
+  };
+
+  const handlePreviewAttachment = async (workId: string, attachment: ReportAttachment) => {
+    const key = `preview-${workId}-${attachment.id || attachment.name}`;
+    setLoadingAttachmentKey(key);
+    try {
+      const url = await dataService.fetchExecutedWorkAttachmentUrl(workId, attachment);
+      const kind = getReportAttachmentKind(attachment);
+      let excelSheets: ExcelPreviewSheet[] | undefined;
+
+      if (kind === 'excel') {
+        try {
+          excelSheets = await parseExcelPreviewFromBlobUrl(url);
+        } catch {
+          excelSheets = [];
+        }
+      }
+
+      setPreviewAttachment({
+        workId,
+        attachment,
+        url,
+        kind,
+        excelSheets,
+        activeSheetIndex: 0
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'تعذر فتح المرفق للمعاينة.');
+    } finally {
+      setLoadingAttachmentKey(null);
+    }
+  };
+
+  const handleDownloadAttachment = async (workId: string, attachment: ReportAttachment) => {
+    const key = `download-${workId}-${attachment.id || attachment.name}`;
+    setLoadingAttachmentKey(key);
+    try {
+      const url = await dataService.fetchExecutedWorkAttachmentUrl(workId, attachment);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = attachment.name || 'daily-report';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      showToast(`جاري تحميل الملف: ${attachment.name}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'تعذر تحميل المرفق.');
+    } finally {
+      setLoadingAttachmentKey(null);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -230,22 +386,29 @@ export const ExecutedWorksView: React.FC<Props> = ({
     }
 
     setIsSubmitting(true);
+    setUploadProgress(null);
     try {
       if (editingWork) {
-        await dataService.updateExecutedWork(editingWork.id, {
-          workDate,
-          discipline,
-          workDescription: workDescription.trim(),
-          locationArea: locationArea.trim(),
-          quantity: parsedQty,
-          unit: unit.trim(),
-          completionPercent,
-          relatedSubmittalNumber: relatedSubmittalNumber.trim(),
-          notes: notes.trim(),
-          ...(isAdmin ? { reviewStatus, adminNote: adminNote.trim() } : {})
-        });
+        await dataService.updateExecutedWork(
+          editingWork.id,
+          {
+            workDate,
+            discipline,
+            workDescription: workDescription.trim(),
+            locationArea: locationArea.trim(),
+            quantity: parsedQty,
+            unit: unit.trim(),
+            completionPercent,
+            relatedSubmittalNumber: relatedSubmittalNumber.trim(),
+            notes: notes.trim(),
+            attachments: existingAttachments,
+            ...(isAdmin ? { reviewStatus, adminNote: adminNote.trim() } : {})
+          },
+          pendingAttachments,
+          (progress) => setUploadProgress(progress)
+        );
         setIsModalOpen(false);
-        showToast('تم تحديث سجل العمل المنفذ بنجاح.');
+        showToast('تم تحديث سجل العمل المنفذ ومرفقاته بنجاح.');
       } else {
         const selectedProj = accessibleProjects.find((p) => p.id === projectId);
         if (!selectedProj) {
@@ -253,30 +416,43 @@ export const ExecutedWorksView: React.FC<Props> = ({
           setIsSubmitting(false);
           return;
         }
-        await dataService.addExecutedWork({
-          projectId: selectedProj.id,
-          projectName: selectedProj.name,
-          workDate,
-          workDescription: workDescription.trim(),
-          discipline,
-          locationArea: locationArea.trim() || undefined,
-          quantity: parsedQty,
-          unit: unit.trim() || undefined,
-          completionPercent,
-          relatedSubmittalNumber: relatedSubmittalNumber.trim() || undefined,
-          notes: notes.trim() || undefined,
-          authorId: currentUser.id,
-          authorName: currentUser.displayName,
-          reviewStatus: isAdmin ? reviewStatus : 'pending',
-          adminNote: isAdmin && adminNote.trim() ? adminNote.trim() : undefined
-        });
+        await dataService.addExecutedWork(
+          {
+            projectId: selectedProj.id,
+            projectName: selectedProj.name,
+            workDate,
+            workDescription: workDescription.trim(),
+            discipline,
+            locationArea: locationArea.trim() || undefined,
+            quantity: parsedQty,
+            unit: unit.trim() || undefined,
+            completionPercent,
+            relatedSubmittalNumber: relatedSubmittalNumber.trim() || undefined,
+            notes: notes.trim() || undefined,
+            authorId: currentUser.id,
+            authorName: currentUser.displayName,
+            reviewStatus: isAdmin ? reviewStatus : 'pending',
+            adminNote: isAdmin && adminNote.trim() ? adminNote.trim() : undefined
+          },
+          pendingAttachments,
+          (progress) => setUploadProgress(progress)
+        );
         setIsModalOpen(false);
-        showToast('تم تسجيل العمل المنفذ بالموقع وحفظه بنجاح.');
+        showToast(
+          pendingAttachments.length > 0
+            ? 'تم حفظ العمل المنفذ ورفع التقرير اليومي المرفق بنجاح.'
+            : 'تم تسجيل العمل المنفذ بالموقع وحفظه بنجاح.'
+        );
       }
-    } catch {
-      setFormError('تعذر حفظ البيانات في قاعدة البيانات. يرجى المحاولة مرة أخرى.');
+    } catch (err) {
+      setFormError(
+        err instanceof Error && err.message && !err.message.includes('Firestore')
+          ? err.message
+          : 'تعذر حفظ البيانات أو رفع المرفقات في قاعدة البيانات. يرجى المحاولة مرة أخرى.'
+      );
     } finally {
       setIsSubmitting(false);
+      setUploadProgress(null);
     }
   };
 
@@ -349,7 +525,17 @@ export const ExecutedWorksView: React.FC<Props> = ({
           <button
             type="button"
             disabled={accessibleProjects.length === 0}
-            onClick={openCreateModal}
+            onClick={() => openCreateModal(true)}
+            className="px-3.5 py-2.5 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 disabled:opacity-50 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors"
+          >
+            <Upload className="w-4 h-4" />
+            <span>رفع تقرير يومي</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={accessibleProjects.length === 0}
+            onClick={() => openCreateModal(false)}
             className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
           >
             <Plus className="w-4 h-4" />
@@ -609,14 +795,24 @@ export const ExecutedWorksView: React.FC<Props> = ({
             لا توجد أعمال منفذة مسجلة مطابقة للبحث الحالي
           </p>
           {accessibleProjects.length > 0 && (
-            <button
-              type="button"
-              onClick={openCreateModal}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              <span>تسجيل عمل منفذ بالموقع</span>
-            </button>
+            <div className="flex items-center justify-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => openCreateModal(true)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/60 dark:hover:bg-amber-900/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 rounded-xl text-xs font-bold cursor-pointer transition-colors"
+              >
+                <Upload className="w-4 h-4" />
+                <span>رفع تقرير يومي (صورة / PDF / Excel)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openCreateModal(false)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold cursor-pointer transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                <span>تسجيل عمل منفذ بالموقع</span>
+              </button>
+            </div>
           )}
         </div>
       ) : (
@@ -797,6 +993,102 @@ export const ExecutedWorksView: React.FC<Props> = ({
                     </span>
                   </div>
                 </div>
+
+                {/* Daily Report Attachments (Images / PDF / Excel) */}
+                {work.attachments && work.attachments.length > 0 && (
+                  <div className="pt-2.5 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-300">
+                      <Paperclip className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+                      <span>مرفقات التقرير اليومي ({work.attachments.length})</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {work.attachments.map((att, attIdx) => {
+                        const kind = getReportAttachmentKind(att);
+                        const previewKey = `preview-${work.id}-${att.id || att.name}`;
+                        const downloadKey = `download-${work.id}-${att.id || att.name}`;
+                        const isLoadingPreview = loadingAttachmentKey === previewKey;
+                        const isLoadingDownload = loadingAttachmentKey === downloadKey;
+
+                        const badgeStyle =
+                          kind === 'pdf'
+                            ? 'bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                            : kind === 'excel'
+                            ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                            : 'bg-sky-50 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300 border-sky-200 dark:border-sky-800';
+
+                        const kindLabel =
+                          kind === 'pdf' ? 'PDF' : kind === 'excel' ? 'Excel' : 'صورة';
+
+                        return (
+                          <div
+                            key={att.id || `${work.id}-att-${attIdx}`}
+                            className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700/80"
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div
+                                className={`w-8 h-8 rounded-lg border flex items-center justify-center shrink-0 ${badgeStyle}`}
+                              >
+                                {kind === 'pdf' ? (
+                                  <FileText className="w-4 h-4" />
+                                ) : kind === 'excel' ? (
+                                  <FileSpreadsheet className="w-4 h-4" />
+                                ) : (
+                                  <ImageIcon className="w-4 h-4" />
+                                )}
+                              </div>
+                              <div className="min-w-0">
+                                <div
+                                  className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate"
+                                  title={att.name}
+                                >
+                                  {att.name}
+                                </div>
+                                <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                  <span className="font-bold">{kindLabel}</span>
+                                  {att.size ? (
+                                    <>
+                                      <span>•</span>
+                                      <span className="font-mono">{formatFileSize(att.size)}</span>
+                                    </>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={Boolean(loadingAttachmentKey)}
+                                onClick={() => handlePreviewAttachment(work.id, att)}
+                                className="px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 text-blue-700 dark:text-blue-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-50 transition-colors"
+                              >
+                                {isLoadingPreview ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Eye className="w-3.5 h-3.5" />
+                                )}
+                                <span>معاينة</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={Boolean(loadingAttachmentKey)}
+                                onClick={() => handleDownloadAttachment(work.id, att)}
+                                title="تحميل الملف"
+                                className="p-1.5 rounded-lg bg-white hover:bg-slate-100 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-200 border border-slate-200 dark:border-slate-600 cursor-pointer disabled:opacity-50 transition-colors"
+                              >
+                                {isLoadingDownload ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <Download className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
 
                 {/* Notes / Admin Note */}
                 {(work.notes || work.adminNote) && (
@@ -1013,6 +1305,184 @@ export const ExecutedWorksView: React.FC<Props> = ({
                 />
               </div>
 
+              {/* Daily Report File Upload (Image / PDF / Excel) */}
+              <div
+                ref={attachmentsSectionRef}
+                className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-100">
+                    <Paperclip className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>رفع تقرير يومي (صورة / PDF / Excel)</span>
+                  </div>
+                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                    {existingAttachments.length + pendingAttachments.length} / {MAX_REPORT_ATTACHMENTS} ملفات
+                  </span>
+                </div>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/*,.pdf,.xlsx,.xls,.xlsm,.xlsb,.csv"
+                  onChange={(e) => {
+                    if (e.target.files) {
+                      handleFilesSelected(e.target.files);
+                    }
+                  }}
+                  className="hidden"
+                />
+
+                <div
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setIsDraggingFiles(true);
+                  }}
+                  onDragLeave={() => setIsDraggingFiles(false)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setIsDraggingFiles(false);
+                    if (e.dataTransfer.files?.length) {
+                      handleFilesSelected(e.dataTransfer.files);
+                    }
+                  }}
+                  onClick={() => {
+                    if (
+                      !isPreparingFiles &&
+                      existingAttachments.length + pendingAttachments.length < MAX_REPORT_ATTACHMENTS
+                    ) {
+                      fileInputRef.current?.click();
+                    }
+                  }}
+                  className={`border-2 border-dashed rounded-xl p-4 text-center transition-colors cursor-pointer ${
+                    isDraggingFiles
+                      ? 'border-blue-500 bg-blue-50/70 dark:bg-blue-950/40'
+                      : 'border-slate-300 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500 bg-white dark:bg-slate-900/60'
+                  } ${
+                    existingAttachments.length + pendingAttachments.length >= MAX_REPORT_ATTACHMENTS
+                      ? 'opacity-50 cursor-not-allowed'
+                      : ''
+                  }`}
+                >
+                  {isPreparingFiles ? (
+                    <div className="flex items-center justify-center gap-2 text-blue-600 dark:text-blue-400 font-bold py-1">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>جاري تجهيز وضغط الملفات...</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <Upload className="w-5 h-5 mx-auto text-blue-600 dark:text-blue-400" />
+                      <div className="font-bold text-slate-700 dark:text-slate-200">
+                        اضغط لاختيار ملفات التقرير اليومي أو اسحبها هنا
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                        يدعم الصور (JPG / PNG / WebP)، ملفات PDF، وجداول Excel (.xlsx / .xls / .csv) حتى 5MB لكل ملف
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {attachmentError && (
+                  <div className="p-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-[11px] font-bold flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{attachmentError}</span>
+                  </div>
+                )}
+
+                {/* Existing + Pending Attachment Chips */}
+                {(existingAttachments.length > 0 || pendingAttachments.length > 0) && (
+                  <div className="space-y-1.5">
+                    {existingAttachments.map((att, idx) => {
+                      const kind = getReportAttachmentKind(att);
+                      return (
+                        <div
+                          key={att.id || `existing-${idx}`}
+                          className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            {kind === 'pdf' ? (
+                              <FileText className="w-4 h-4 text-rose-600 shrink-0" />
+                            ) : kind === 'excel' ? (
+                              <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                            ) : (
+                              <ImageIcon className="w-4 h-4 text-sky-600 shrink-0" />
+                            )}
+                            <span className="truncate font-bold text-slate-800 dark:text-slate-200">
+                              {att.name}
+                            </span>
+                            {att.size ? (
+                              <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                                ({formatFileSize(att.size)})
+                              </span>
+                            ) : null}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveExistingAttachment(att.id, idx)}
+                            title="إزالة المرفق"
+                            className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer shrink-0"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    {pendingAttachments.map((item) => (
+                      <div
+                        key={item.attachmentId}
+                        className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {item.kind === 'pdf' ? (
+                            <FileText className="w-4 h-4 text-rose-600 shrink-0" />
+                          ) : item.kind === 'excel' ? (
+                            <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                          ) : (
+                            <ImageIcon className="w-4 h-4 text-sky-600 shrink-0" />
+                          )}
+                          <span className="truncate font-bold text-slate-800 dark:text-slate-100">
+                            {item.name}
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 shrink-0">
+                            ({formatFileSize(item.size)})
+                          </span>
+                          <span className="text-[10px] font-bold text-blue-700 dark:text-blue-300 bg-blue-100 dark:bg-blue-900/60 px-1.5 py-0.5 rounded shrink-0">
+                            جديد
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePendingAttachment(item.attachmentId)}
+                          title="إزالة المرفق"
+                          className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer shrink-0"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {uploadProgress && (
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex items-center justify-between text-[11px] font-bold text-blue-700 dark:text-blue-300">
+                      <span className="truncate">
+                        جاري رفع ({uploadProgress.currentFileIndex}/{uploadProgress.totalFiles}):{' '}
+                        {uploadProgress.currentFileName}
+                      </span>
+                      <span className="font-mono">{uploadProgress.percent}%</span>
+                    </div>
+                    <div className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-blue-600 rounded-full transition-all duration-200"
+                        style={{ width: `${uploadProgress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {isAdmin && (
                 <div className="p-3.5 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 space-y-2.5">
                   <div className="font-bold text-blue-900 dark:text-blue-200">مراجعة واعتماد DC:</div>
@@ -1046,21 +1516,202 @@ export const ExecutedWorksView: React.FC<Props> = ({
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || isPreparingFiles}
                   className="flex-1 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white rounded-xl font-bold cursor-pointer flex items-center justify-center gap-2 transition-colors"
                 >
                   {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <span>{editingWork ? 'حفظ التعديلات' : 'حفظ العمل المنفذ'}</span>
+                  <span>
+                    {isSubmitting && pendingAttachments.length > 0
+                      ? 'جاري الرفع والحفظ...'
+                      : editingWork
+                      ? 'حفظ التعديلات'
+                      : 'حفظ العمل المنفذ'}
+                  </span>
                 </button>
                 <button
                   type="button"
+                  disabled={isSubmitting}
                   onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-3 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl font-bold cursor-pointer"
+                  className="px-4 py-3 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl font-bold cursor-pointer disabled:opacity-50"
                 >
                   إلغاء
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          ATTACHMENT PREVIEW MODAL (IMAGE / PDF / EXCEL)
+          ===================================================================== */}
+      {previewAttachment && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6"
+          onClick={() => setPreviewAttachment(null)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 w-full max-w-5xl max-h-[92vh] rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Preview Header */}
+            <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-900">
+              <div className="flex items-center gap-2.5 min-w-0">
+                {previewAttachment.kind === 'pdf' ? (
+                  <FileText className="w-5 h-5 text-rose-600 shrink-0" />
+                ) : previewAttachment.kind === 'excel' ? (
+                  <FileSpreadsheet className="w-5 h-5 text-emerald-600 shrink-0" />
+                ) : (
+                  <ImageIcon className="w-5 h-5 text-sky-600 shrink-0" />
+                )}
+                <div className="min-w-0">
+                  <div className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                    {previewAttachment.attachment.name}
+                  </div>
+                  {previewAttachment.attachment.size ? (
+                    <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
+                      {formatFileSize(previewAttachment.attachment.size)}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <a
+                  href={previewAttachment.url}
+                  download={previewAttachment.attachment.name || 'daily-report'}
+                  className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 transition-colors"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>تحميل الملف</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewAttachment(null)}
+                  className="p-2 rounded-xl text-slate-500 hover:text-slate-800 dark:hover:text-white hover:bg-slate-200/70 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Preview Body */}
+            <div className="flex-1 overflow-auto p-4 sm:p-5 bg-slate-100/70 dark:bg-slate-950/60">
+              {previewAttachment.kind === 'image' && (
+                <div className="flex items-center justify-center min-h-[40vh]">
+                  <img
+                    src={previewAttachment.url}
+                    alt={previewAttachment.attachment.name}
+                    className="max-w-full max-h-[75vh] object-contain rounded-xl shadow-md bg-white dark:bg-slate-900"
+                  />
+                </div>
+              )}
+
+              {previewAttachment.kind === 'pdf' && (
+                <iframe
+                  src={previewAttachment.url}
+                  title={previewAttachment.attachment.name}
+                  className="w-full h-[74vh] rounded-xl border border-slate-200 dark:border-slate-700 bg-white"
+                />
+              )}
+
+              {previewAttachment.kind === 'excel' && (
+                <div className="space-y-3">
+                  {previewAttachment.excelSheets && previewAttachment.excelSheets.length > 0 ? (
+                    <>
+                      {previewAttachment.excelSheets.length > 1 && (
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {previewAttachment.excelSheets.map((sheet, sIdx) => (
+                            <button
+                              key={sheet.name}
+                              type="button"
+                              onClick={() =>
+                                setPreviewAttachment((prev) =>
+                                  prev ? { ...prev, activeSheetIndex: sIdx } : prev
+                                )
+                              }
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-colors ${
+                                (previewAttachment.activeSheetIndex ?? 0) === sIdx
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700'
+                              }`}
+                            >
+                              {sheet.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {(() => {
+                        const activeSheet =
+                          previewAttachment.excelSheets[previewAttachment.activeSheetIndex ?? 0];
+                        if (!activeSheet || activeSheet.rows.length === 0) {
+                          return (
+                            <div className="p-8 text-center text-xs font-bold text-slate-500">
+                              ورقة العمل فارغة.
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="space-y-2">
+                            {activeSheet.truncated && (
+                              <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 border border-amber-200 dark:border-amber-800 rounded-xl px-3 py-2">
+                                يتم عرض أول {activeSheet.rows.length} صف من إجمالي{' '}
+                                {activeSheet.totalRows} صف. يمكنك تحميل الملف لعرض الجدول بالكامل.
+                              </div>
+                            )}
+                            <div className="overflow-auto max-h-[65vh] rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
+                              <table className="w-full text-xs border-collapse">
+                                <tbody>
+                                  {activeSheet.rows.map((row, rIdx) => (
+                                    <tr
+                                      key={rIdx}
+                                      className={
+                                        rIdx === 0
+                                          ? 'bg-slate-100 dark:bg-slate-800 font-bold text-slate-900 dark:text-white'
+                                          : 'border-t border-slate-100 dark:border-slate-800 text-slate-700 dark:text-slate-300'
+                                      }
+                                    >
+                                      {row.map((cell, cIdx) => (
+                                        <td
+                                          key={cIdx}
+                                          className="px-3 py-2 border-l border-slate-100 dark:border-slate-800 whitespace-nowrap"
+                                        >
+                                          {cell}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  ) : (
+                    <div className="p-10 text-center space-y-2 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
+                      <FileSpreadsheet className="w-10 h-10 mx-auto text-emerald-600" />
+                      <div className="text-sm font-bold text-slate-800 dark:text-white">
+                        تعذر معاينة هذا الملف مباشرة
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        يمكنك تحميل ملف Excel من الزر بالأعلى وفتحه مباشرة على جهازك.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {previewAttachment.kind === 'other' && (
+                <div className="p-10 text-center space-y-2 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
+                  <FileText className="w-10 h-10 mx-auto text-slate-400" />
+                  <div className="text-sm font-bold text-slate-800 dark:text-white">
+                    هذا النوع من الملفات جاهز للتحميل
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}

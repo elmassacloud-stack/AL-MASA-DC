@@ -988,11 +988,133 @@ class DataService {
     }
   }
 
+  private async uploadExecutedWorkAttachmentChunks(
+    workId: string,
+    preparedFiles: { item: PreparedReportAttachment; chunks: string[] }[],
+    onProgress?: (progress: ReportUploadProgress) => void
+  ): Promise<string[]> {
+    const writtenChunkIds: string[] = [];
+    const totalFiles = preparedFiles.length;
+    const totalChunks = preparedFiles.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    const totalBytes = Math.max(
+      1,
+      preparedFiles.reduce((sum, entry) => sum + entry.item.size, 0)
+    );
+    let uploadedChunks = 0;
+    const BATCH_CONCURRENCY = 5;
+
+    for (let fileIdx = 0; fileIdx < preparedFiles.length; fileIdx++) {
+      const { item, chunks } = preparedFiles[fileIdx];
+      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
+        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
+        const batchPromises: Promise<void>[] = [];
+
+        for (let chunkIdx = start; chunkIdx < end; chunkIdx++) {
+          const chunkId = `${item.attachmentId}_${chunkIdx}`;
+          const chunkDoc: ReportAttachmentChunk = {
+            attachmentId: item.attachmentId,
+            index: chunkIdx,
+            data: chunks[chunkIdx]
+          };
+
+          batchPromises.push(
+            setDoc(doc(db, 'executedWorks', workId, 'chunks', chunkId), chunkDoc).then(() => {
+              writtenChunkIds.push(chunkId);
+              uploadedChunks += 1;
+              const isAllDone = uploadedChunks === totalChunks;
+              const percent = isAllDone
+                ? 96
+                : Math.min(95, Math.round(12 + (uploadedChunks / Math.max(1, totalChunks)) * 83));
+              const uploadedBytes = Math.min(
+                totalBytes,
+                Math.round((uploadedChunks / Math.max(1, totalChunks)) * totalBytes)
+              );
+              onProgress?.({
+                percent,
+                currentFileIndex: fileIdx + 1,
+                totalFiles,
+                currentFileName: item.name,
+                uploadedChunks,
+                totalChunks,
+                uploadedBytes,
+                totalBytes,
+                stage: isAllDone ? 'finalizing' : 'uploading'
+              });
+            })
+          );
+        }
+
+        await Promise.all(batchPromises);
+      }
+    }
+
+    return writtenChunkIds;
+  }
+
+  private async deleteExecutedWorkChunksByIds(workId: string, chunkIds: string[]) {
+    for (const chunkId of chunkIds) {
+      await deleteDoc(doc(db, 'executedWorks', workId, 'chunks', chunkId)).catch(() => undefined);
+    }
+  }
+
+  private async deleteExecutedWorkAttachmentChunks(workId: string, attachmentId: string) {
+    if (!attachmentId) return;
+    try {
+      const snap = await getDocs(
+        query(
+          collection(db, 'executedWorks', workId, 'chunks'),
+          where('attachmentId', '==', attachmentId)
+        )
+      );
+      await Promise.allSettled(
+        snap.docs.map((d) => deleteDoc(doc(db, 'executedWorks', workId, 'chunks', d.id)))
+      );
+      revokePdfBlobUrl(`exec-${workId}-${attachmentId}`);
+    } catch {
+      // Ignore background cleanup errors
+    }
+  }
+
   public async addExecutedWork(
-    work: Omit<ExecutedWork, 'id' | 'createdAt' | 'updatedAt'>
+    work: Omit<ExecutedWork, 'id' | 'createdAt' | 'updatedAt'>,
+    pendingAttachments: PreparedReportAttachment[] = [],
+    onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<ExecutedWork> {
+    const existingStaticAttachments = (work.attachments || []).filter(
+      (att) => att.storageMode !== 'firestore_chunks' && att.url && !att.url.startsWith('blob:')
+    );
+    if (existingStaticAttachments.length + pendingAttachments.length > MAX_REPORT_ATTACHMENTS) {
+      throw new Error(`الحد الأقصى للمرفقات هو ${MAX_REPORT_ATTACHMENTS} ملفات.`);
+    }
+
+    const preparedChunked = pendingAttachments.map((item) => {
+      if (item.size <= 0 || item.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+        throw new Error(`حجم المرفق «${item.name}» يتجاوز الحد الأقصى المسموح (5 ميجابايت).`);
+      }
+      const chunks = splitBase64IntoChunks(item.base64, REPORT_ATTACHMENT_CHUNK_SIZE_CHARS);
+      if (chunks.length === 0 || chunks.length >= 20) {
+        throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+      }
+      return { item, chunks };
+    });
+
     const list = this.getExecutedWorks();
     const now = new Date().toISOString();
+    const chunkedMeta: ReportAttachment[] = preparedChunked.map(({ item, chunks }) => ({
+      id: item.attachmentId,
+      name: item.name,
+      url: 'firestore://chunked',
+      size: item.size,
+      type: item.type,
+      chunkCount: chunks.length,
+      storageMode: 'firestore_chunks',
+      uploadedAt: now
+    }));
+    const finalAttachments = [...existingStaticAttachments, ...chunkedMeta].slice(
+      0,
+      MAX_REPORT_ATTACHMENTS
+    );
+
     const newWork: ExecutedWork = stripUndefined({
       id: 'exec-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5),
       projectId: work.projectId,
@@ -1009,6 +1131,7 @@ class DataService {
       completionPercent: Math.max(0, Math.min(100, Math.round(work.completionPercent))),
       relatedSubmittalNumber: work.relatedSubmittalNumber?.trim().slice(0, 120) || undefined,
       notes: work.notes?.trim().slice(0, 2000) || undefined,
+      attachments: finalAttachments.length > 0 ? finalAttachments : undefined,
       authorId: auth.currentUser?.uid || work.authorId,
       authorName: work.authorName.trim().slice(0, 150),
       reviewStatus: work.reviewStatus,
@@ -1017,8 +1140,21 @@ class DataService {
       updatedAt: now
     });
 
-    list.unshift(newWork);
-    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+    const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.size, 0);
+    const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+    if (preparedChunked.length > 0) {
+      onProgress?.({
+        percent: 8,
+        currentFileIndex: 1,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[0].item.name,
+        uploadedChunks: 0,
+        totalChunks,
+        uploadedBytes: 0,
+        totalBytes,
+        stage: 'metadata'
+      });
+    }
 
     try {
       await setDoc(doc(db, 'executedWorks', newWork.id), stripUndefined(newWork));
@@ -1026,9 +1162,39 @@ class DataService {
       handleFirestoreError(error, OperationType.CREATE, `executedWorks/${newWork.id}`);
     }
 
+    if (preparedChunked.length > 0) {
+      let writtenChunkIds: string[] = [];
+      try {
+        writtenChunkIds = await this.uploadExecutedWorkAttachmentChunks(
+          newWork.id,
+          preparedChunked,
+          onProgress
+        );
+      } catch (error) {
+        await this.deleteExecutedWorkChunksByIds(newWork.id, writtenChunkIds);
+        await deleteDoc(doc(db, 'executedWorks', newWork.id)).catch(() => undefined);
+        handleFirestoreError(error, OperationType.CREATE, `executedWorks/${newWork.id}/chunks`);
+      }
+
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: preparedChunked.length,
+        totalFiles: preparedChunked.length,
+        currentFileName: preparedChunked[preparedChunked.length - 1].item.name,
+        uploadedChunks: totalChunks,
+        totalChunks,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
+    }
+
+    list.unshift(newWork);
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+
     this.addNotification({
       title: `عمل منفذ جديد: ${newWork.projectName}`,
-      message: `سجّل ${newWork.authorName}: ${newWork.workDescription.slice(0, 80)} (${newWork.completionPercent}%)`,
+      message: `سجّل ${newWork.authorName}: ${newWork.workDescription.slice(0, 80)} (${newWork.completionPercent}%)${finalAttachments.length > 0 ? ` — ${finalAttachments.length} مرفق` : ''}`,
       type: 'work_logged',
       targetRole: 'admin',
       projectId: newWork.projectId,
@@ -1055,18 +1221,88 @@ class DataService {
         | 'completionPercent'
         | 'relatedSubmittalNumber'
         | 'notes'
+        | 'attachments'
         | 'reviewStatus'
         | 'adminNote'
       >
-    >
+    >,
+    pendingAttachments: PreparedReportAttachment[] = [],
+    onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<boolean> {
     const list = this.getExecutedWorks();
     const idx = list.findIndex((w) => w.id === workId);
     if (idx === -1) return false;
 
+    const existing = list[idx];
     const updatedAt = new Date().toISOString();
+    const shouldTouchAttachments =
+      updates.attachments !== undefined || pendingAttachments.length > 0;
+
+    let nextAttachments: ReportAttachment[] | undefined = existing.attachments;
+    let writtenChunkIds: string[] = [];
+
+    if (shouldTouchAttachments) {
+      const keptAttachments = (updates.attachments ?? existing.attachments ?? []).filter(
+        (att) => att && att.name && att.url && !att.url.startsWith('blob:')
+      );
+      if (keptAttachments.length + pendingAttachments.length > MAX_REPORT_ATTACHMENTS) {
+        throw new Error(`الحد الأقصى للمرفقات هو ${MAX_REPORT_ATTACHMENTS} ملفات.`);
+      }
+
+      const preparedChunked = pendingAttachments.map((item) => {
+        if (item.size <= 0 || item.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
+          throw new Error(`حجم المرفق «${item.name}» يتجاوز الحد الأقصى المسموح (5 ميجابايت).`);
+        }
+        const chunks = splitBase64IntoChunks(item.base64, REPORT_ATTACHMENT_CHUNK_SIZE_CHARS);
+        if (chunks.length === 0 || chunks.length >= 20) {
+          throw new Error(`تعذر تجهيز المرفق «${item.name}» للرفع.`);
+        }
+        return { item, chunks };
+      });
+
+      if (preparedChunked.length > 0) {
+        const totalBytes = preparedChunked.reduce((sum, entry) => sum + entry.item.size, 0);
+        const totalChunks = preparedChunked.reduce((sum, entry) => sum + entry.chunks.length, 0);
+        onProgress?.({
+          percent: 10,
+          currentFileIndex: 1,
+          totalFiles: preparedChunked.length,
+          currentFileName: preparedChunked[0].item.name,
+          uploadedChunks: 0,
+          totalChunks,
+          uploadedBytes: 0,
+          totalBytes,
+          stage: 'uploading'
+        });
+
+        try {
+          writtenChunkIds = await this.uploadExecutedWorkAttachmentChunks(
+            workId,
+            preparedChunked,
+            onProgress
+          );
+        } catch (error) {
+          await this.deleteExecutedWorkChunksByIds(workId, writtenChunkIds);
+          handleFirestoreError(error, OperationType.CREATE, `executedWorks/${workId}/chunks`);
+        }
+      }
+
+      const newlyUploadedMeta: ReportAttachment[] = preparedChunked.map(({ item, chunks }) => ({
+        id: item.attachmentId,
+        name: item.name,
+        url: 'firestore://chunked',
+        size: item.size,
+        type: item.type,
+        chunkCount: chunks.length,
+        storageMode: 'firestore_chunks',
+        uploadedAt: updatedAt
+      }));
+
+      nextAttachments = [...keptAttachments, ...newlyUploadedMeta].slice(0, MAX_REPORT_ATTACHMENTS);
+    }
+
     const merged: ExecutedWork = stripUndefined({
-      ...list[idx],
+      ...existing,
       ...(updates.workDate !== undefined ? { workDate: updates.workDate.trim().slice(0, 20) } : {}),
       ...(updates.workDescription !== undefined
         ? { workDescription: updates.workDescription.trim().slice(0, 1000) }
@@ -1084,15 +1320,13 @@ class DataService {
         ? { relatedSubmittalNumber: updates.relatedSubmittalNumber.trim().slice(0, 120) }
         : {}),
       ...(updates.notes !== undefined ? { notes: updates.notes.trim().slice(0, 2000) } : {}),
+      ...(shouldTouchAttachments ? { attachments: nextAttachments ?? [] } : {}),
       ...(updates.reviewStatus !== undefined ? { reviewStatus: updates.reviewStatus } : {}),
       ...(updates.adminNote !== undefined
         ? { adminNote: updates.adminNote.trim().slice(0, 1000) }
         : {}),
       updatedAt
     });
-
-    list[idx] = merged;
-    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
 
     const patch = stripUndefined({
       ...(updates.workDate !== undefined ? { workDate: merged.workDate } : {}),
@@ -1106,6 +1340,7 @@ class DataService {
         ? { relatedSubmittalNumber: merged.relatedSubmittalNumber }
         : {}),
       ...(updates.notes !== undefined ? { notes: merged.notes } : {}),
+      ...(shouldTouchAttachments ? { attachments: nextAttachments ?? [] } : {}),
       ...(updates.reviewStatus !== undefined ? { reviewStatus: merged.reviewStatus } : {}),
       ...(updates.adminNote !== undefined ? { adminNote: merged.adminNote } : {}),
       updatedAt
@@ -1114,8 +1349,42 @@ class DataService {
     try {
       await updateDoc(doc(db, 'executedWorks', workId), patch);
     } catch (error) {
+      if (writtenChunkIds.length > 0) {
+        await this.deleteExecutedWorkChunksByIds(workId, writtenChunkIds);
+      }
       handleFirestoreError(error, OperationType.UPDATE, `executedWorks/${workId}`);
     }
+
+    // Delete orphaned chunks for any removed attachment
+    if (shouldTouchAttachments) {
+      const keptIds = new Set((nextAttachments || []).map((a) => a.id).filter(Boolean));
+      const removedChunkedIds = (existing.attachments || [])
+        .filter((a) => a.storageMode === 'firestore_chunks' && a.id && !keptIds.has(a.id))
+        .map((a) => a.id!);
+      if (removedChunkedIds.length > 0) {
+        Promise.allSettled(
+          removedChunkedIds.map((attId) => this.deleteExecutedWorkAttachmentChunks(workId, attId))
+        ).catch(() => undefined);
+      }
+    }
+
+    if (pendingAttachments.length > 0) {
+      const totalBytes = pendingAttachments.reduce((sum, item) => sum + item.size, 0);
+      onProgress?.({
+        percent: 100,
+        currentFileIndex: pendingAttachments.length,
+        totalFiles: pendingAttachments.length,
+        currentFileName: pendingAttachments[pendingAttachments.length - 1].name,
+        uploadedChunks: writtenChunkIds.length,
+        totalChunks: writtenChunkIds.length,
+        uploadedBytes: totalBytes,
+        totalBytes,
+        stage: 'finalizing'
+      });
+    }
+
+    list[idx] = merged;
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
 
     this.notify();
     return true;
@@ -1123,10 +1392,25 @@ class DataService {
 
   public async deleteExecutedWork(workId: string): Promise<boolean> {
     const list = this.getExecutedWorks();
-    if (!list.some((w) => w.id === workId)) return false;
+    const target = list.find((w) => w.id === workId);
+    if (!target) return false;
 
-    const remaining = list.filter((w) => w.id !== workId);
-    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(remaining));
+    // Delete chunked attachments first while parent doc still exists for security rule verification
+    try {
+      const chunkSnap = await getDocs(collection(db, 'executedWorks', workId, 'chunks'));
+      if (!chunkSnap.empty) {
+        await Promise.allSettled(
+          chunkSnap.docs.map((d) => deleteDoc(doc(db, 'executedWorks', workId, 'chunks', d.id)))
+        );
+      }
+      for (const att of target.attachments || []) {
+        if (att.id) {
+          revokePdfBlobUrl(`exec-${workId}-${att.id}`);
+        }
+      }
+    } catch {
+      // Ignore cleanup errors if no chunks exist
+    }
 
     try {
       await deleteDoc(doc(db, 'executedWorks', workId));
@@ -1134,8 +1418,68 @@ class DataService {
       handleFirestoreError(error, OperationType.DELETE, `executedWorks/${workId}`);
     }
 
+    const remaining = list.filter((w) => w.id !== workId);
+    localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(remaining));
+
     this.notify();
     return true;
+  }
+
+  public async fetchExecutedWorkAttachmentUrl(
+    workId: string,
+    attachment: ReportAttachment
+  ): Promise<string> {
+    if (
+      attachment.storageMode === 'firestore_chunks' ||
+      (attachment.id && attachment.chunkCount && attachment.chunkCount > 0)
+    ) {
+      const cacheKey = `exec-${workId}-${attachment.id}`;
+      const cached = getCachedPdfBlobUrl(cacheKey);
+      if (cached) return cached;
+
+      let chunkDocs: ReportAttachmentChunk[] = [];
+      try {
+        const snap = await getDocs(
+          query(
+            collection(db, 'executedWorks', workId, 'chunks'),
+            where('attachmentId', '==', attachment.id)
+          )
+        );
+        chunkDocs = snap.docs.map((d) => d.data() as ReportAttachmentChunk);
+      } catch (error) {
+        handleFirestoreError(error, OperationType.LIST, `executedWorks/${workId}/chunks`);
+      }
+
+      if (chunkDocs.length === 0) {
+        throw new Error('تعذر العثور على بيانات المرفق في قاعدة البيانات.');
+      }
+
+      chunkDocs.sort((a, b) => a.index - b.index);
+      const fullBase64 = chunkDocs.map((c) => c.data).join('');
+      const resolvedMime =
+        attachment.type ||
+        (isExcelFileName(attachment.name)
+          ? getExcelMimeType(attachment.name)
+          : attachment.name.toLowerCase().endsWith('.pdf')
+            ? 'application/pdf'
+            : 'application/octet-stream');
+
+      const blob = base64ToBlob(fullBase64, resolvedMime);
+      const url = URL.createObjectURL(blob);
+      cachePdfBlobUrl(cacheKey, url);
+      return url;
+    }
+
+    if (
+      attachment.url &&
+      (attachment.url.startsWith('http://') ||
+        attachment.url.startsWith('https://') ||
+        attachment.url.startsWith('data:'))
+    ) {
+      return attachment.url;
+    }
+
+    throw new Error('تعذر فتح هذا المرفق. يرجى إعادة رفعه من جديد.');
   }
 
   // --- Site PDF Deliverables (تسليمات الموقع - حذف تلقائي من Firebase بعد 48 ساعة) ---

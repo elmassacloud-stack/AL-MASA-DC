@@ -195,6 +195,7 @@ export interface ExecutedWork {
   completionPercent: number; // 0..100
   relatedSubmittalNumber?: string;
   notes?: string;
+  attachments?: ReportAttachment[];
   authorId: string;
   authorName: string;
   reviewStatus: ExecutedWorkReviewStatus;

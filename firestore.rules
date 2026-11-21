@@ -305,6 +305,63 @@ service cloud.firestore {
       return isSuperAdmin() || (userDocExists() && userDataCanDeleteExecutedWork(currentUserData(), ext));
     }
 
+    function userDataCanReadExecutedWorkDoc(u, workData) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u) &&
+        userDataHasProjectAccess(u, workData.projectId)
+      );
+    }
+
+    function canReadExecutedWorkChunks(workId) {
+      return exists(/databases/$(database)/documents/executedWorks/$(workId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanReadExecutedWorkDoc(
+            currentUserData(),
+            get(/databases/$(database)/documents/executedWorks/$(workId)).data
+          )
+        )
+      );
+    }
+
+    function userDataCanWriteExecutedWorkChunk(u, workData) {
+      return userDataIsAdmin(u) || (
+        userDataHasExecutedWorksAccess(u) &&
+        userDataHasProjectAccess(u, workData.projectId) &&
+        workData.authorId == request.auth.uid &&
+        workData.reviewStatus == 'pending'
+      );
+    }
+
+    function canCreateExecutedWorkChunk(workId) {
+      return exists(/databases/$(database)/documents/executedWorks/$(workId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanWriteExecutedWorkChunk(
+            currentUserData(),
+            get(/databases/$(database)/documents/executedWorks/$(workId)).data
+          )
+        )
+      );
+    }
+
+    function userDataCanDeleteExecutedWorkChunkByWorkId(u, workId) {
+      return userDataIsAdmin(u) || (
+        exists(/databases/$(database)/documents/executedWorks/$(workId)) &&
+        userDataCanWriteExecutedWorkChunk(
+          u,
+          get(/databases/$(database)/documents/executedWorks/$(workId)).data
+        )
+      );
+    }
+
+    function canDeleteExecutedWorkChunk(workId) {
+      return isSuperAdmin() || (
+        userDocExists() &&
+        userDataCanDeleteExecutedWorkChunkByWorkId(currentUserData(), workId)
+      );
+    }
+
     function userDataCanReadDeliverableData(u, delData) {
       return userDataIsAdmin(u) || (
         userDataIsActive(u) && (
@@ -565,7 +622,7 @@ service cloud.firestore {
 
     function isValidExecutedWork(data) {
       return data.keys().hasAll(['id', 'projectId', 'projectName', 'workDate', 'workDescription', 'discipline', 'completionPercent', 'authorId', 'authorName', 'reviewStatus', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'workDate', 'workDescription', 'discipline', 'locationArea', 'quantity', 'unit', 'completionPercent', 'relatedSubmittalNumber', 'notes', 'authorId', 'authorName', 'reviewStatus', 'adminNote', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'workDate', 'workDescription', 'discipline', 'locationArea', 'quantity', 'unit', 'completionPercent', 'relatedSubmittalNumber', 'notes', 'attachments', 'authorId', 'authorName', 'reviewStatus', 'adminNote', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && isValidId(data.projectId)
         && data.projectName is string && data.projectName.size() <= 200
@@ -578,6 +635,7 @@ service cloud.firestore {
         && data.completionPercent is number && data.completionPercent >= 0 && data.completionPercent <= 100
         && (!('relatedSubmittalNumber' in data) || (data.relatedSubmittalNumber is string && data.relatedSubmittalNumber.size() <= 120))
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
+        && (!('attachments' in data) || data.attachments == null || (data.attachments is list && data.attachments.size() <= 5 && (data.attachments.size() == 0 || data.attachments[0] is map)))
         && data.authorId is string && data.authorId.size() <= 128
         && data.authorName is string && data.authorName.size() <= 150
         && data.reviewStatus in ['pending', 'approved']
@@ -830,6 +888,21 @@ service cloud.firestore {
         && incoming().projectId == existing().projectId
         && canUpdateExecutedWork(incoming(), existing());
       allow delete: if isValidId(workId) && canDeleteExecutedWork(existing());
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(workId)
+          && isValidId(chunkId)
+          && canReadExecutedWorkChunks(workId);
+        allow list: if isValidId(workId)
+          && canReadExecutedWorkChunks(workId);
+        allow create: if isValidId(workId)
+          && isValidId(chunkId)
+          && isValidReportAttachmentChunk(incoming())
+          && canCreateExecutedWorkChunk(workId);
+        allow delete: if isValidId(workId)
+          && isValidId(chunkId)
+          && canDeleteExecutedWorkChunk(workId);
+      }
     }
 
     // Site PDF Deliverables (48-hour retention - upload enabled for all active authenticated emails)

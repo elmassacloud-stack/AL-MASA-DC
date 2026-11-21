@@ -22,15 +22,40 @@ import {
   writeBatch,
   Firestore
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import firebaseAppletConfig from '../../firebase-applet-config.json';
 import { SITE_DELIVERABLE_RETENTION_MS, TASK_ATTACHMENT_RETENTION_MS } from '../config';
 import { SiteDeliverable, ProjectTask, TaskAttachment } from '../types';
+
+// Primary Firestore & App Authentication configuration (gen-lang-client-0751190379)
+const PRIMARY_FIRESTORE_FALLBACK_CONFIG = {
+  projectId: 'gen-lang-client-0751190379',
+  appId: '1:561086494322:web:c38590b93c0f953da034eb',
+  apiKey: 'AIzaSyABFi68TFq4rMVnvgNZiIkGROEMRS0J9Dk',
+  authDomain: 'gen-lang-client-0751190379.firebaseapp.com',
+  firestoreDatabaseId: 'ai-studio-dc-731fa181-7511-4cbc-af75-e665ff0247af',
+  storageBucket: 'gen-lang-client-0751190379.firebasestorage.app',
+  messagingSenderId: '561086494322',
+  measurementId: '',
+  oAuthClientId: '561086494322-rtp5k7ptajd1dl5ggreuultel4olcjn2.apps.googleusercontent.com',
+  recaptchaSiteKey: ''
+};
+
+const appletConfigWithDb = firebaseAppletConfig as typeof firebaseAppletConfig & {
+  firestoreDatabaseId?: string;
+};
+
+// Use firebase-applet-config.json directly when it contains the Firestore database ID;
+// otherwise preserve the existing Firestore project while dedicating firebase-applet-config.json
+// to the provisioned Google Workspace OAuth project.
+const firebaseConfig = appletConfigWithDb.firestoreDatabaseId
+  ? appletConfigWithDb
+  : PRIMARY_FIRESTORE_FALLBACK_CONFIG;
 
 // Primary Firebase Application
 const primaryApp: FirebaseApp =
   getApps().find((a) => a.name === '[DEFAULT]') || initializeApp(firebaseConfig);
 
-const firestoreDatabaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
+const firestoreDatabaseId = firebaseConfig.firestoreDatabaseId;
 export const auth: Auth = getAuth(primaryApp);
 export const db: Firestore = firestoreDatabaseId
   ? getFirestore(primaryApp, firestoreDatabaseId)

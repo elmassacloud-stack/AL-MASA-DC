@@ -163,6 +163,7 @@
         "completionPercent": { "type": "number" },
         "relatedSubmittalNumber": { "type": "string", "maxLength": 120 },
         "notes": { "type": "string", "maxLength": 2000 },
+        "attachments": { "type": "array" },
         "authorId": { "type": "string", "maxLength": 128 },
         "authorName": { "type": "string", "maxLength": 150 },
         "reviewStatus": { "type": "string", "enum": ["pending", "approved"] },
@@ -339,6 +340,10 @@
     "/executedWorks/{workId}": {
       "schema": { "$ref": "#/entities/ExecutedWork" },
       "description": "Site executed construction works logs."
+    },
+    "/executedWorks/{workId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/ReportAttachmentChunk" },
+      "description": "Chunked Base64 daily report attachment payload (image, PDF, or Excel) belonging to an ExecutedWork."
     },
     "/siteDeliverables/{deliverableId}": {
       "schema": { "$ref": "#/entities/SiteDeliverable" },
