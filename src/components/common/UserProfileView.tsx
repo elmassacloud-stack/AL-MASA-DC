@@ -155,6 +155,19 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
     .join('')
     .toUpperCase();
 
+  const formatProfileError = (err: unknown, fallback: string): string => {
+    if (err instanceof Error) {
+      const msg = err.message || '';
+      if (msg.includes('Missing or insufficient permissions') || msg.includes('permission-denied')) {
+        return 'لا توجد صلاحية كافية لحفظ التعديل في قاعدة البيانات. يرجى تحديث الصفحة والمحاولة مجدداً.';
+      }
+      if (!msg.trim().startsWith('{')) {
+        return msg;
+      }
+    }
+    return fallback;
+  };
+
   const handlePhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -169,7 +182,7 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
     } catch (err) {
       setPhotoFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'تعذر رفع الصورة الشخصية. يرجى المحاولة مرة أخرى.'
+        text: formatProfileError(err, 'تعذر رفع الصورة الشخصية. يرجى المحاولة مرة أخرى.')
       });
     } finally {
       setIsUpdatingPhoto(false);
@@ -183,10 +196,10 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
     try {
       await dataService.updateMyProfile({ photoUrl: null });
       setPhotoFeedback({ type: 'success', text: 'تم إزالة الصورة الشخصية.' });
-    } catch {
+    } catch (err) {
       setPhotoFeedback({
         type: 'error',
-        text: 'تعذر إزالة الصورة الشخصية. يرجى المحاولة مرة أخرى.'
+        text: formatProfileError(err, 'تعذر إزالة الصورة الشخصية. يرجى المحاولة مرة أخرى.')
       });
     } finally {
       setIsUpdatingPhoto(false);
@@ -214,7 +227,7 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
     } catch (err) {
       setProfileFeedback({
         type: 'error',
-        text: err instanceof Error ? err.message : 'تعذر حفظ البيانات. يرجى المحاولة مرة أخرى.'
+        text: formatProfileError(err, 'تعذر حفظ البيانات. يرجى المحاولة مرة أخرى.')
       });
     } finally {
       setIsSavingProfile(false);
