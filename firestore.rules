@@ -141,6 +141,11 @@ service cloud.firestore {
     function userDataCanUpdateReport(u, inc, ext) {
       return userDataIsAdmin(u) || (
         userDataIsActive(u)
+        && userDataIsReportOwner(u, ext)
+        && (!('senderId' in ext) || inc.senderId == ext.senderId)
+        && inc.diff(ext).affectedKeys().hasOnly(['senderName', 'senderEmail', 'updatedAt'])
+      ) || (
+        userDataIsActive(u)
         && (
           (
             userDataIsReportOwner(u, ext)
@@ -221,6 +226,25 @@ service cloud.firestore {
       return isSuperAdmin() || (userDocExists() && userDataCanCreateIssue(currentUserData(), inc));
     }
 
+    function userDataCanUpdateIssue(u, inc, ext) {
+      return (
+        userDataIsAdmin(u)
+        && inc.diff(ext).affectedKeys().hasOnly(['status', 'adminComment', 'resolvedAt', 'authorName', 'updatedAt'])
+      ) || (
+        userDataIsActive(u)
+        && ext.authorId == request.auth.uid
+        && inc.authorId == ext.authorId
+        && inc.diff(ext).affectedKeys().hasOnly(['authorName', 'updatedAt'])
+      );
+    }
+
+    function canUpdateIssue(inc, ext) {
+      return (
+        isSuperAdmin()
+        && inc.diff(ext).affectedKeys().hasOnly(['status', 'adminComment', 'resolvedAt', 'authorName', 'updatedAt'])
+      ) || (userDocExists() && userDataCanUpdateIssue(currentUserData(), inc, ext));
+    }
+
     function userDataCanUpdateTask(u, inc, ext) {
       return userDataIsAdmin(u) || (
         userDataHasProjectAccess(u, ext.projectId)
@@ -280,6 +304,11 @@ service cloud.firestore {
 
     function userDataCanUpdateExecutedWork(u, inc, ext) {
       return userDataIsAdmin(u) || (
+        userDataIsActive(u)
+        && ext.authorId == request.auth.uid
+        && inc.authorId == ext.authorId
+        && inc.diff(ext).affectedKeys().hasOnly(['authorName', 'updatedAt'])
+      ) || (
         userDataHasExecutedWorksAccess(u)
         && userDataHasProjectAccess(u, ext.projectId)
         && ext.authorId == request.auth.uid
@@ -386,6 +415,25 @@ service cloud.firestore {
 
     function canCreateDeliverable(inc) {
       return isSuperAdmin() || (userDocExists() && userDataCanCreateDeliverable(currentUserData(), inc));
+    }
+
+    function userDataCanUpdateDeliverable(u, inc, ext) {
+      return (
+        userDataIsAdmin(u)
+        && inc.diff(ext).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'senderName', 'senderEmail', 'updatedAt'])
+      ) || (
+        userDataIsActive(u)
+        && ext.senderId == request.auth.uid
+        && inc.senderId == ext.senderId
+        && inc.diff(ext).affectedKeys().hasOnly(['senderName', 'senderEmail', 'updatedAt'])
+      );
+    }
+
+    function canUpdateDeliverable(inc, ext) {
+      return (
+        isSuperAdmin()
+        && inc.diff(ext).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'senderName', 'senderEmail', 'updatedAt'])
+      ) || (userDocExists() && userDataCanUpdateDeliverable(currentUserData(), inc, ext));
     }
 
     function userDataCanDeleteDeliverable(u, ext) {
@@ -830,8 +878,7 @@ service cloud.firestore {
       allow update: if isValidId(issueId)
         && isValidIssueReport(incoming())
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminComment', 'resolvedAt', 'updatedAt'])
-        && isAdmin();
+        && canUpdateIssue(incoming(), existing());
       allow delete: if isValidId(issueId) && isAdmin();
     }
 
@@ -920,8 +967,7 @@ service cloud.firestore {
         && incoming().projectId == existing().projectId
         && incoming().senderId == existing().senderId
         && incoming().expiresAtMs == existing().expiresAtMs
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'adminNote', 'receivedAt', 'updatedAt'])
-        && isAdmin();
+        && canUpdateDeliverable(incoming(), existing());
       allow delete: if isValidId(deliverableId) && canDeleteDeliverable(existing());
 
       match /chunks/{chunkId} {

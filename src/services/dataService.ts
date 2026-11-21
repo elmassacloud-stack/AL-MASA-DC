@@ -9,6 +9,7 @@ import {
   onSnapshot,
   query,
   where,
+  writeBatch,
   Unsubscribe
 } from 'firebase/firestore';
 import { User as FirebaseUser } from 'firebase/auth';
@@ -3273,6 +3274,17 @@ class DataService {
       this.setCurrentUser(updatedUser);
     }
 
+    // Propagate user displayName/email to any historical reports & records that still carry an older value
+    if (updates.displayName !== undefined || updates.email !== undefined) {
+      await this.propagateUserIdentityToHistoricalRecords({
+        userId: updatedUser.id,
+        previousEmail: target.email,
+        displayName: updatedUser.displayName,
+        email: updatedUser.email,
+        includeAnnouncements: updatedUser.role === 'admin'
+      });
+    }
+
     this.notify();
     return true;
   }
@@ -3402,8 +3414,186 @@ class DataService {
     );
     this.upsertLocalUser(updatedUser);
     this.setCurrentUser(updatedUser);
+
+    // Propagate displayName / email to any previous reports & submissions by this user that still carry an older name/email
+    if (updates.displayName !== undefined || updates.email !== undefined) {
+      await this.propagateUserIdentityToHistoricalRecords({
+        userId: updatedUser.id,
+        previousEmail: activeUser.email,
+        displayName: updatedUser.displayName,
+        email: updatedUser.email,
+        includeAnnouncements: updatedUser.role === 'admin'
+      });
+    }
+
     this.notify();
     return updatedUser;
+  }
+
+  /**
+   * Synchronizes a user's updated displayName (and email) across all historical
+   * Daily Reports, Executed Works, Site Deliverables, Issue Reports, and Announcements
+   * owned by that user in Firestore and local caches.
+   */
+  private async commitIdentityPatchList(
+    collectionName: string,
+    entries: Array<{ id: string; patch: Record<string, string> }>
+  ): Promise<number> {
+    if (entries.length === 0) return 0;
+    let updatedCount = 0;
+
+    for (const chunk of chunkArray(entries, 400)) {
+      try {
+        const batch = writeBatch(db);
+        chunk.forEach(({ id, patch }) => {
+          batch.update(doc(db, collectionName, id), patch);
+        });
+        await batch.commit();
+        updatedCount += chunk.length;
+      } catch {
+        // Fallback per-document so a single legacy or out-of-scope doc never blocks other updates
+        for (const { id, patch } of chunk) {
+          try {
+            await updateDoc(doc(db, collectionName, id), patch);
+            updatedCount += 1;
+          } catch {
+            // Skip individual doc if not writable under current rules
+          }
+        }
+      }
+    }
+
+    return updatedCount;
+  }
+
+  private async propagateUserIdentityToHistoricalRecords(params: {
+    userId: string;
+    previousEmail?: string;
+    displayName: string;
+    email?: string;
+    includeAnnouncements?: boolean;
+  }): Promise<number> {
+    const { userId, displayName, includeAnnouncements } = params;
+    const prevEmail = normalizeEmail(params.previousEmail);
+    const nextEmail = normalizeEmail(params.email);
+    const now = new Date().toISOString();
+    let totalUpdated = 0;
+
+    const isMatchingSender = (senderId?: string, senderEmail?: string) => {
+      if (senderId && senderId === userId) return true;
+      const clean = normalizeEmail(senderEmail);
+      return Boolean(clean && ((prevEmail && clean === prevEmail) || (nextEmail && clean === nextEmail)));
+    };
+
+    // 1. Daily Reports (`reports`)
+    const reports = this.getReports();
+    const reportEntries: Array<{ id: string; patch: Record<string, string> }> = [];
+    const updatedReports = reports.map((rep) => {
+      if (!isMatchingSender(rep.senderId, rep.senderEmail)) return rep;
+      const needsName = rep.senderName !== displayName;
+      const needsEmail = Boolean(nextEmail && normalizeEmail(rep.senderEmail) !== nextEmail);
+      if (!needsName && !needsEmail) return rep;
+
+      const patch: Record<string, string> = {
+        senderName: displayName,
+        updatedAt: now
+      };
+      if (needsEmail) {
+        patch.senderEmail = nextEmail;
+      }
+      reportEntries.push({ id: rep.id, patch });
+      return {
+        ...rep,
+        senderName: displayName,
+        senderEmail: needsEmail ? nextEmail : rep.senderEmail,
+        updatedAt: now
+      };
+    });
+    if (reportEntries.length > 0) {
+      localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(updatedReports));
+      totalUpdated += await this.commitIdentityPatchList('reports', reportEntries);
+    }
+
+    // 2. Executed Works (`executedWorks`)
+    const executedWorks = this.getExecutedWorks();
+    const workEntries: Array<{ id: string; patch: Record<string, string> }> = [];
+    const updatedWorks = executedWorks.map((work) => {
+      if (work.authorId !== userId || work.authorName === displayName) return work;
+      workEntries.push({
+        id: work.id,
+        patch: { authorName: displayName, updatedAt: now }
+      });
+      return { ...work, authorName: displayName, updatedAt: now };
+    });
+    if (workEntries.length > 0) {
+      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(updatedWorks));
+      totalUpdated += await this.commitIdentityPatchList('executedWorks', workEntries);
+    }
+
+    // 3. Site Deliverables (`siteDeliverables`)
+    const deliverables = this.getSiteDeliverables();
+    const deliverableEntries: Array<{ id: string; patch: Record<string, string> }> = [];
+    const updatedDeliverables = deliverables.map((del) => {
+      if (!isMatchingSender(del.senderId, del.senderEmail)) return del;
+      const needsName = del.senderName !== displayName;
+      const needsEmail = Boolean(nextEmail && normalizeEmail(del.senderEmail) !== nextEmail);
+      if (!needsName && !needsEmail) return del;
+
+      const patch: Record<string, string> = {
+        senderName: displayName,
+        updatedAt: now
+      };
+      if (needsEmail) {
+        patch.senderEmail = nextEmail;
+      }
+      deliverableEntries.push({ id: del.id, patch });
+      return {
+        ...del,
+        senderName: displayName,
+        senderEmail: needsEmail ? nextEmail : del.senderEmail,
+        updatedAt: now
+      };
+    });
+    if (deliverableEntries.length > 0) {
+      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(updatedDeliverables));
+      totalUpdated += await this.commitIdentityPatchList('siteDeliverables', deliverableEntries);
+    }
+
+    // 4. Issue Reports (`issues`)
+    const issues = this.getIssues();
+    const issueEntries: Array<{ id: string; patch: Record<string, string> }> = [];
+    const updatedIssues = issues.map((issue) => {
+      if (issue.authorId !== userId || issue.authorName === displayName) return issue;
+      issueEntries.push({
+        id: issue.id,
+        patch: { authorName: displayName, updatedAt: now }
+      });
+      return { ...issue, authorName: displayName, updatedAt: now };
+    });
+    if (issueEntries.length > 0) {
+      localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(updatedIssues));
+      totalUpdated += await this.commitIdentityPatchList('issues', issueEntries);
+    }
+
+    // 5. Announcements (`announcements`) — Admin only
+    if (includeAnnouncements) {
+      const announcements = this.getAnnouncements();
+      const annEntries: Array<{ id: string; patch: Record<string, string> }> = [];
+      const updatedAnnouncements = announcements.map((ann) => {
+        if (ann.createdBy !== userId || ann.authorName === displayName) return ann;
+        annEntries.push({
+          id: ann.id,
+          patch: { authorName: displayName }
+        });
+        return { ...ann, authorName: displayName };
+      });
+      if (annEntries.length > 0) {
+        localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(updatedAnnouncements));
+        totalUpdated += await this.commitIdentityPatchList('announcements', annEntries);
+      }
+    }
+
+    return totalUpdated;
   }
 
   // --- In-App Notifications ---

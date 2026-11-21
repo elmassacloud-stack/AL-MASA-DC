@@ -223,7 +223,10 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
         jobTitle: jobTitle.trim(),
         phone: phone.trim()
       });
-      setProfileFeedback({ type: 'success', text: 'تم حفظ بياناتك الشخصية بنجاح.' });
+      setProfileFeedback({
+        type: 'success',
+        text: 'تم حفظ بياناتك الشخصية وتحديث اسمك في تقاريرك وسجلاتك السابقة بنجاح.'
+      });
     } catch (err) {
       setProfileFeedback({
         type: 'error',
