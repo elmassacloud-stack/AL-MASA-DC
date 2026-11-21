@@ -391,13 +391,13 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
 
       {/* Hero Profile Card & Photo Upload */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-        <div className="h-16 sm:h-20 bg-gradient-to-l from-blue-700 via-blue-600 to-indigo-700" />
-        <div className="px-4 sm:px-6 pb-5 sm:pb-6">
+        <div className="h-2 bg-gradient-to-l from-blue-700 via-blue-600 to-indigo-600" />
+        <div className="p-4 sm:p-6">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            {/* Avatar + Identity */}
-            <div className="flex flex-col sm:flex-row items-center sm:items-start gap-3.5 sm:gap-4 text-center sm:text-right min-w-0">
-              <div className="relative z-10 -mt-12 sm:-mt-12 shrink-0">
-                <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-full border-4 border-white dark:border-slate-900 bg-slate-100 dark:bg-slate-800 shadow-md overflow-hidden flex items-center justify-center">
+            {/* Avatar + Identity (Zero negative margins — guaranteed full visibility) */}
+            <div className="flex flex-col sm:flex-row items-center gap-4 text-center sm:text-right min-w-0">
+              <div className="relative shrink-0">
+                <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full border-4 border-blue-50 dark:border-slate-800 bg-slate-100 dark:bg-slate-800 shadow-md overflow-hidden flex items-center justify-center">
                   {currentUser.photoUrl ? (
                     <img
                       src={currentUser.photoUrl}
@@ -406,7 +406,7 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
                     />
                   ) : (
                     <div className="w-full h-full bg-gradient-to-br from-blue-600 to-indigo-700 text-white flex items-center justify-center text-2xl sm:text-3xl font-extrabold select-none">
-                      {userInitials || <UserCheck className="w-10 h-10" />}
+                      {userInitials || <UserCheck className="w-9 h-9" />}
                     </div>
                   )}
                 </div>
@@ -415,14 +415,14 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
                   type="button"
                   disabled={isUpdatingPhoto}
                   onClick={() => fileInputRef.current?.click()}
-                  className="absolute bottom-0.5 left-0.5 w-9 h-9 rounded-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white border-2 border-white dark:border-slate-900 shadow-md flex items-center justify-center transition-colors disabled:opacity-60 cursor-pointer touch-manipulation"
+                  className="absolute -bottom-0.5 -left-0.5 w-8 h-8 rounded-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white border-2 border-white dark:border-slate-900 shadow-md flex items-center justify-center transition-colors disabled:opacity-60 cursor-pointer touch-manipulation"
                   title="تغيير الصورة الشخصية"
                   aria-label="تغيير الصورة الشخصية"
                 >
                   {isUpdatingPhoto ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   ) : (
-                    <Camera className="w-4 h-4" />
+                    <Camera className="w-3.5 h-3.5" />
                   )}
                 </button>
 
@@ -435,9 +435,9 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
                 />
               </div>
 
-              <div className="pt-1 sm:pt-3.5 space-y-1 min-w-0">
+              <div className="space-y-1.5 min-w-0">
                 <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
-                  <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white">
+                  <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 dark:text-white leading-snug">
                     {currentUser.displayName}
                   </h3>
                   <span
@@ -452,18 +452,27 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
                   </span>
                 </div>
 
-                <p className="text-xs sm:text-sm font-semibold text-slate-600 dark:text-slate-300">
+                <p className="text-xs sm:text-sm font-semibold text-slate-700 dark:text-slate-300">
                   {currentUser.jobTitle || (isAdmin ? 'إدارة مراقبة الوثائق (DC)' : 'مهندس موقع')}
                 </p>
 
-                <p className="text-xs font-mono text-slate-500 dark:text-slate-400" dir="ltr">
-                  {currentUser.email}
-                </p>
+                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
+                  <span className="inline-flex items-center gap-1 font-mono" dir="ltr">
+                    <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                    <span>{currentUser.email}</span>
+                  </span>
+                  {currentUser.phone && (
+                    <span className="inline-flex items-center gap-1 font-mono" dir="ltr">
+                      <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                      <span>{currentUser.phone}</span>
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
             {/* Avatar Actions */}
-            <div className="flex items-center justify-center sm:justify-end gap-2 sm:pt-3 shrink-0">
+            <div className="flex items-center justify-center sm:justify-end gap-2 shrink-0">
               <button
                 type="button"
                 disabled={isUpdatingPhoto}
