@@ -200,6 +200,15 @@ export interface ReportUploadProgress {
 
 export type TaskUploadProgress = ReportUploadProgress;
 
+export interface HistoricalSyncSummary {
+  totalUpdated: number;
+  reportsUpdated: number;
+  executedWorksUpdated: number;
+  deliverablesUpdated: number;
+  issuesUpdated: number;
+  announcementsUpdated: number;
+}
+
 export interface CreateSiteDeliverablePayload {
   projectId: string;
   projectName: string;
@@ -225,6 +234,9 @@ class DataService {
   private notificationsInitialized = false;
   private firestoreUnsubs: Unsubscribe[] = [];
   private currentSyncSignature: string | null = null;
+  private autoIdentitySyncRunning = false;
+  private autoIdentitySyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private attemptedAutoSyncKeys: Set<string> = new Set();
 
   constructor() {
     this.ensureInitialized();
@@ -535,6 +547,7 @@ class DataService {
               localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(refreshedSelf));
             }
             this.notify();
+            this.scheduleAutoIdentitySync();
           }
         },
         (error) => handleFirestoreError(error, OperationType.LIST, 'users')
@@ -568,6 +581,7 @@ class DataService {
             this.startRealtimeSync(updatedProfile);
           } else {
             this.notify();
+            this.scheduleAutoIdentitySync();
           }
         },
         (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}`)
@@ -598,6 +612,7 @@ class DataService {
       (list) => {
         localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(list));
         this.notify();
+        this.scheduleAutoIdentitySync();
       },
       (a, b) => b.createdAt.localeCompare(a.createdAt)
     );
@@ -612,6 +627,7 @@ class DataService {
       (list) => {
         localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list));
         this.notify();
+        this.scheduleAutoIdentitySync();
       },
       (a, b) => b.createdAt.localeCompare(a.createdAt)
     );
@@ -647,6 +663,7 @@ class DataService {
             .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
           localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(list));
           this.notify();
+          this.scheduleAutoIdentitySync();
         },
         (error) => handleFirestoreError(error, OperationType.LIST, 'announcements')
       )
@@ -666,6 +683,7 @@ class DataService {
         (list) => {
           localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
           this.notify();
+          this.scheduleAutoIdentitySync();
         },
         (a, b) => b.createdAt.localeCompare(a.createdAt)
       );
@@ -681,6 +699,7 @@ class DataService {
 
       localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(activeList));
       this.notify();
+      this.scheduleAutoIdentitySync();
 
       if (expiredList.length > 0) {
         this.cleanupExpiredDeliverables(expiredList).catch(() => undefined);
@@ -871,6 +890,11 @@ class DataService {
     this.currentSyncSignature = null;
     this.seenNotificationIds.clear();
     this.notificationsInitialized = false;
+    if (this.autoIdentitySyncTimer !== null) {
+      clearTimeout(this.autoIdentitySyncTimer);
+      this.autoIdentitySyncTimer = null;
+    }
+    this.attemptedAutoSyncKeys.clear();
     stopFirebaseDeliverablesAutoCleanupScheduler();
     revokeAllPdfBlobUrls();
   }
@@ -1977,15 +2001,22 @@ class DataService {
         ? String(reportData.adminFeedback).trim().slice(0, 2000)
         : undefined;
 
+    const normalizedSenderEmail = normalizeEmail(
+      reportData.senderEmail || auth.currentUser?.email
+    ).slice(0, 200);
+    const normalizedSenderName = (reportData.senderName || auth.currentUser?.displayName || 'مستخدم')
+      .trim()
+      .slice(0, 150);
+
     const newReport: DailyReport = stripUndefined({
       ...reportData,
       projectName: (reportData.projectName || '').trim().slice(0, 200),
       reportDate: (reportData.reportDate || '').trim().slice(0, 20),
       senderId: (auth.currentUser?.uid || reportData.senderId || '').trim().slice(0, 128),
-      senderEmail: normalizeEmail(reportData.senderEmail || auth.currentUser?.email).slice(0, 200),
-      senderName: (reportData.senderName || auth.currentUser?.displayName || 'مستخدم')
-        .trim()
-        .slice(0, 150),
+      senderEmail: normalizedSenderEmail,
+      senderName: normalizedSenderName,
+      originalSenderName: normalizedSenderName,
+      originalSenderEmail: normalizedSenderEmail,
       submittedWorks: sanitizeRows(reportData.submittedWorks),
       receivedWorks: sanitizeRows(reportData.receivedWorks),
       notes: sanitizedNotes,
@@ -2275,6 +2306,8 @@ class DataService {
               senderId: fallbackSenderId,
               senderName: fallbackSenderName,
               senderEmail: fallbackSenderEmail,
+              originalSenderName: existing.originalSenderName || fallbackSenderName,
+              originalSenderEmail: existing.originalSenderEmail || fallbackSenderEmail,
               submittedWorks: nextSubmittedWorks,
               receivedWorks: nextReceivedWorks,
               notes: nextNotes || undefined,
@@ -3472,46 +3505,78 @@ class DataService {
     displayName: string;
     email?: string;
     includeAnnouncements?: boolean;
-  }): Promise<number> {
+  }): Promise<HistoricalSyncSummary> {
     const { userId, displayName, includeAnnouncements } = params;
     const prevEmail = normalizeEmail(params.previousEmail);
     const nextEmail = normalizeEmail(params.email);
     const now = new Date().toISOString();
-    let totalUpdated = 0;
 
-    const isMatchingSender = (senderId?: string, senderEmail?: string) => {
-      if (senderId && senderId === userId) return true;
-      const clean = normalizeEmail(senderEmail);
-      return Boolean(clean && ((prevEmail && clean === prevEmail) || (nextEmail && clean === nextEmail)));
+    const summary: HistoricalSyncSummary = {
+      totalUpdated: 0,
+      reportsUpdated: 0,
+      executedWorksUpdated: 0,
+      deliverablesUpdated: 0,
+      issuesUpdated: 0,
+      announcementsUpdated: 0
     };
 
-    // 1. Daily Reports (`reports`)
+    const isMatchingSender = (
+      senderId?: string,
+      senderEmail?: string,
+      originalSenderEmail?: string
+    ) => {
+      if (senderId && senderId === userId) return true;
+      const clean = normalizeEmail(senderEmail);
+      const cleanOrig = normalizeEmail(originalSenderEmail);
+      return Boolean(
+        (clean && ((prevEmail && clean === prevEmail) || (nextEmail && clean === nextEmail))) ||
+          (cleanOrig &&
+            ((prevEmail && cleanOrig === prevEmail) || (nextEmail && cleanOrig === nextEmail)))
+      );
+    };
+
+    // 1. Daily Reports (`reports`) — preserves immutable originalSenderName / originalSenderEmail
     const reports = this.getReports();
     const reportEntries: Array<{ id: string; patch: Record<string, string> }> = [];
     const updatedReports = reports.map((rep) => {
-      if (!isMatchingSender(rep.senderId, rep.senderEmail)) return rep;
+      if (!isMatchingSender(rep.senderId, rep.senderEmail, rep.originalSenderEmail)) return rep;
       const needsName = rep.senderName !== displayName;
       const needsEmail = Boolean(nextEmail && normalizeEmail(rep.senderEmail) !== nextEmail);
       if (!needsName && !needsEmail) return rep;
 
+      const preservedOriginalName = rep.originalSenderName || rep.senderName || displayName;
+      const preservedOriginalEmail = rep.originalSenderEmail || rep.senderEmail || nextEmail;
+
       const patch: Record<string, string> = {
         senderName: displayName,
+        identitySyncedAt: now,
         updatedAt: now
       };
+      if (!rep.originalSenderName && rep.senderName) {
+        patch.originalSenderName = rep.senderName;
+      }
+      if (!rep.originalSenderEmail && rep.senderEmail) {
+        patch.originalSenderEmail = rep.senderEmail;
+      }
       if (needsEmail) {
         patch.senderEmail = nextEmail;
       }
+
       reportEntries.push({ id: rep.id, patch });
       return {
         ...rep,
         senderName: displayName,
         senderEmail: needsEmail ? nextEmail : rep.senderEmail,
+        originalSenderName: preservedOriginalName,
+        originalSenderEmail: preservedOriginalEmail,
+        identitySyncedAt: now,
         updatedAt: now
       };
     });
     if (reportEntries.length > 0) {
       localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(updatedReports));
-      totalUpdated += await this.commitIdentityPatchList('reports', reportEntries);
+      summary.reportsUpdated = await this.commitIdentityPatchList('reports', reportEntries);
+      summary.totalUpdated += summary.reportsUpdated;
     }
 
     // 2. Executed Works (`executedWorks`)
@@ -3527,7 +3592,11 @@ class DataService {
     });
     if (workEntries.length > 0) {
       localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(updatedWorks));
-      totalUpdated += await this.commitIdentityPatchList('executedWorks', workEntries);
+      summary.executedWorksUpdated = await this.commitIdentityPatchList(
+        'executedWorks',
+        workEntries
+      );
+      summary.totalUpdated += summary.executedWorksUpdated;
     }
 
     // 3. Site Deliverables (`siteDeliverables`)
@@ -3556,7 +3625,11 @@ class DataService {
     });
     if (deliverableEntries.length > 0) {
       localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(updatedDeliverables));
-      totalUpdated += await this.commitIdentityPatchList('siteDeliverables', deliverableEntries);
+      summary.deliverablesUpdated = await this.commitIdentityPatchList(
+        'siteDeliverables',
+        deliverableEntries
+      );
+      summary.totalUpdated += summary.deliverablesUpdated;
     }
 
     // 4. Issue Reports (`issues`)
@@ -3572,7 +3645,8 @@ class DataService {
     });
     if (issueEntries.length > 0) {
       localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(updatedIssues));
-      totalUpdated += await this.commitIdentityPatchList('issues', issueEntries);
+      summary.issuesUpdated = await this.commitIdentityPatchList('issues', issueEntries);
+      summary.totalUpdated += summary.issuesUpdated;
     }
 
     // 5. Announcements (`announcements`) — Admin only
@@ -3589,11 +3663,259 @@ class DataService {
       });
       if (annEntries.length > 0) {
         localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(updatedAnnouncements));
-        totalUpdated += await this.commitIdentityPatchList('announcements', annEntries);
+        summary.announcementsUpdated = await this.commitIdentityPatchList(
+          'announcements',
+          annEntries
+        );
+        summary.totalUpdated += summary.announcementsUpdated;
       }
     }
 
-    return totalUpdated;
+    return summary;
+  }
+
+  /**
+   * Debounced background scheduler that silently syncs any historical reports or submissions
+   * whose stored sender/author metadata lags behind the user's current profile.
+   */
+  private scheduleAutoIdentitySync() {
+    if (this.autoIdentitySyncTimer !== null) {
+      clearTimeout(this.autoIdentitySyncTimer);
+    }
+    this.autoIdentitySyncTimer = setTimeout(() => {
+      this.autoIdentitySyncTimer = null;
+      void this.runSilentAutoIdentitySync();
+    }, 300);
+  }
+
+  private async runSilentAutoIdentitySync() {
+    if (this.autoIdentitySyncRunning) return;
+    const activeUser = this.getCurrentUser();
+    if (!activeUser) return;
+
+    this.autoIdentitySyncRunning = true;
+    try {
+      const isAdmin = activeUser.role === 'admin' || isSuperAdminEmail(activeUser.email);
+      const targetUsers: UserProfile[] = isAdmin
+        ? Array.from(
+            new Map<string, UserProfile>([
+              ...this.getUsers().map((u) => [u.id, u] as const),
+              [activeUser.id, activeUser]
+            ]).values()
+          )
+        : [activeUser];
+
+      const reports = this.getReports();
+      const executedWorks = this.getExecutedWorks();
+      const deliverables = this.getSiteDeliverables();
+      const issues = this.getIssues();
+      const announcements = isAdmin ? this.getAnnouncements() : [];
+
+      let anyUpdated = false;
+
+      for (const user of targetUsers) {
+        const displayName = (user.displayName || '').trim().slice(0, 150);
+        const email = normalizeEmail(user.email).slice(0, 200);
+        if (!displayName) continue;
+
+        const staleIds: string[] = [];
+
+        for (const rep of reports) {
+          const matches =
+            rep.senderId === user.id ||
+            (email && normalizeEmail(rep.senderEmail) === email) ||
+            (email && normalizeEmail(rep.originalSenderEmail) === email);
+          if (!matches) continue;
+          const needsName = rep.senderName !== displayName;
+          const needsEmail = Boolean(email && normalizeEmail(rep.senderEmail) !== email);
+          if (needsName || needsEmail) {
+            staleIds.push(`r:${rep.id}`);
+          }
+        }
+
+        for (const work of executedWorks) {
+          if (work.authorId === user.id && work.authorName !== displayName) {
+            staleIds.push(`w:${work.id}`);
+          }
+        }
+
+        for (const del of deliverables) {
+          const matches =
+            del.senderId === user.id || (email && normalizeEmail(del.senderEmail) === email);
+          if (!matches) continue;
+          const needsName = del.senderName !== displayName;
+          const needsEmail = Boolean(email && normalizeEmail(del.senderEmail) !== email);
+          if (needsName || needsEmail) {
+            staleIds.push(`d:${del.id}`);
+          }
+        }
+
+        for (const issue of issues) {
+          if (issue.authorId === user.id && issue.authorName !== displayName) {
+            staleIds.push(`i:${issue.id}`);
+          }
+        }
+
+        if (isAdmin && user.role === 'admin') {
+          for (const ann of announcements) {
+            if (ann.createdBy === user.id && ann.authorName !== displayName) {
+              staleIds.push(`a:${ann.id}`);
+            }
+          }
+        }
+
+        if (staleIds.length === 0) continue;
+
+        const attemptKey = `${user.id}|${displayName}|${email}|${staleIds.sort().join(',')}`;
+        if (this.attemptedAutoSyncKeys.has(attemptKey)) continue;
+        this.attemptedAutoSyncKeys.add(attemptKey);
+
+        const summary = await this.propagateUserIdentityToHistoricalRecords({
+          userId: user.id,
+          previousEmail: email,
+          displayName,
+          email,
+          includeAnnouncements: isAdmin && user.role === 'admin'
+        });
+        if (summary.totalUpdated > 0) {
+          anyUpdated = true;
+        }
+      }
+
+      if (anyUpdated) {
+        this.notify();
+      }
+    } catch {
+      // Auto-sync is strictly silent and non-blocking
+    } finally {
+      this.autoIdentitySyncRunning = false;
+    }
+  }
+
+  /**
+   * Explicitly re-syncs all historical reports & submissions owned by the currently signed-in user
+   * with their latest displayName and email, while preserving immutable original author metadata.
+   */
+  public async resyncMyHistoricalRecords(): Promise<HistoricalSyncSummary> {
+    const activeUser = this.getCurrentUser();
+    if (!activeUser) {
+      return {
+        totalUpdated: 0,
+        reportsUpdated: 0,
+        executedWorksUpdated: 0,
+        deliverablesUpdated: 0,
+        issuesUpdated: 0,
+        announcementsUpdated: 0
+      };
+    }
+
+    const summary = await this.propagateUserIdentityToHistoricalRecords({
+      userId: activeUser.id,
+      previousEmail: activeUser.email,
+      displayName: activeUser.displayName,
+      email: activeUser.email,
+      includeAnnouncements: activeUser.role === 'admin'
+    });
+    this.notify();
+    return summary;
+  }
+
+  /**
+   * Allows an Admin to explicitly re-sync all historical records for a specific user profile.
+   */
+  public async resyncUserHistoricalRecordsByAdmin(userId: string): Promise<HistoricalSyncSummary> {
+    const targetUser = this.getUsers().find((u) => u.id === userId);
+    if (!targetUser) {
+      return {
+        totalUpdated: 0,
+        reportsUpdated: 0,
+        executedWorksUpdated: 0,
+        deliverablesUpdated: 0,
+        issuesUpdated: 0,
+        announcementsUpdated: 0
+      };
+    }
+
+    const summary = await this.propagateUserIdentityToHistoricalRecords({
+      userId: targetUser.id,
+      previousEmail: targetUser.email,
+      displayName: targetUser.displayName,
+      email: targetUser.email,
+      includeAnnouncements: targetUser.role === 'admin'
+    });
+    this.notify();
+    return summary;
+  }
+
+  /**
+   * Allows an Admin (or report owner) to re-sync a single historical report's sender metadata
+   * against the author's latest UserProfile while preserving originalSenderName / originalSenderEmail.
+   */
+  public async resyncSingleReportIdentity(reportId: string): Promise<DailyReport | null> {
+    const reports = this.getReports();
+    const idx = reports.findIndex((r) => r.id === reportId);
+    if (idx === -1) return null;
+
+    const report = reports[idx];
+    const users = this.getUsers();
+    const activeUser = this.getCurrentUser();
+    const matchedUser =
+      users.find((u) => u.id === report.senderId) ||
+      users.find((u) => normalizeEmail(u.email) === normalizeEmail(report.senderEmail)) ||
+      (activeUser &&
+      (activeUser.id === report.senderId ||
+        normalizeEmail(activeUser.email) === normalizeEmail(report.senderEmail))
+        ? activeUser
+        : undefined);
+
+    if (!matchedUser) return report;
+
+    const nextName = matchedUser.displayName.trim().slice(0, 150);
+    const nextEmail = normalizeEmail(matchedUser.email).slice(0, 200);
+    const needsName = report.senderName !== nextName;
+    const needsEmail = Boolean(nextEmail && normalizeEmail(report.senderEmail) !== nextEmail);
+    if (!needsName && !needsEmail) return report;
+
+    const now = new Date().toISOString();
+    const preservedOriginalName = report.originalSenderName || report.senderName || nextName;
+    const preservedOriginalEmail = report.originalSenderEmail || report.senderEmail || nextEmail;
+
+    const patch: Record<string, string> = {
+      senderName: nextName,
+      identitySyncedAt: now,
+      updatedAt: now
+    };
+    if (!report.originalSenderName && report.senderName) {
+      patch.originalSenderName = report.senderName;
+    }
+    if (!report.originalSenderEmail && report.senderEmail) {
+      patch.originalSenderEmail = report.senderEmail;
+    }
+    if (needsEmail) {
+      patch.senderEmail = nextEmail;
+    }
+
+    try {
+      await updateDoc(doc(db, 'reports', report.id), patch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `reports/${report.id}`);
+    }
+
+    const updatedReport: DailyReport = {
+      ...report,
+      senderName: nextName,
+      senderEmail: needsEmail ? nextEmail : report.senderEmail,
+      originalSenderName: preservedOriginalName,
+      originalSenderEmail: preservedOriginalEmail,
+      identitySyncedAt: now,
+      updatedAt: now
+    };
+
+    const nextReports = [...reports];
+    nextReports[idx] = updatedReport;
+    localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(nextReports));
+    this.notify();
+    return updatedReport;
   }
 
   // --- In-App Notifications ---

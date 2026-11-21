@@ -47,6 +47,9 @@ export interface DailyReport {
   senderId: string;
   senderName: string;
   senderEmail: string;
+  originalSenderName?: string;
+  originalSenderEmail?: string;
+  identitySyncedAt?: string;
   submittedWorks: SubmittalItem[]; // الأعمال المقدمة
   receivedWorks: SubmittalItem[]; // الأعمال المستلمة
   notes?: string;

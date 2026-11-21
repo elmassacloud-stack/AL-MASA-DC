@@ -15,12 +15,14 @@ import {
   Check,
   Copy,
   Paperclip,
-  Pencil
+  Pencil,
+  History
 } from 'lucide-react';
 import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
 import { ReportAttachmentList } from '../common/ReportAttachmentList';
 import { exportDailyReportToExcel } from '../../utils/exportUtils';
+import { getReportIdentityAudit } from '../../utils/identityAudit';
 import { dataService } from '../../services/dataService';
 import { EditDailyReportModal } from '../site/EditDailyReportModal';
 
@@ -51,11 +53,12 @@ export const AdminReportsView: React.FC<Props> = ({
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
 
   const handleCopyReportSummary = (report: DailyReport) => {
+    const audit = getReportIdentityAudit(report, users);
     const lines = [
       `تقرير الأعمال اليومي - إدارة مراقبة الوثائق (DC)`,
       `المشروع: ${report.projectName}`,
       `التاريخ: ${report.reportDate}`,
-      `المرسل: ${report.senderName}`,
+      `المرسل: ${audit.currentName}`,
       `حالة التقرير: ${report.status}`,
       `الأعمال المقدمة (${report.submittedWorks.length}):`,
       ...report.submittedWorks.map(
@@ -82,8 +85,15 @@ export const AdminReportsView: React.FC<Props> = ({
     if (filterSender !== 'all' && report.senderId !== filterSender) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
+      const audit = getReportIdentityAudit(report, users);
       const inProject = report.projectName.toLowerCase().includes(q);
-      const inSender = report.senderName.toLowerCase().includes(q);
+      const inSender =
+        audit.currentName.toLowerCase().includes(q) ||
+        audit.currentEmail.toLowerCase().includes(q) ||
+        report.senderName.toLowerCase().includes(q) ||
+        report.senderEmail.toLowerCase().includes(q) ||
+        (report.originalSenderName || '').toLowerCase().includes(q) ||
+        (report.originalSenderEmail || '').toLowerCase().includes(q);
       const inNotes = (report.notes || '').toLowerCase().includes(q);
       const inSubmitted = report.submittedWorks.some(
         (s) => s.itemDescription.toLowerCase().includes(q) || s.submittalNumber.toLowerCase().includes(q)
@@ -255,26 +265,38 @@ export const AdminReportsView: React.FC<Props> = ({
             </p>
           </div>
         ) : (
-          filteredReports.map((report) => (
+          filteredReports.map((report) => {
+            const audit = getReportIdentityAudit(report, users);
+
+            return (
             <div
               key={report.id}
               className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs hover:border-blue-400 dark:hover:border-blue-700 transition-all space-y-3"
             >
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                <div className="flex items-center gap-2">
+                <div className="flex items-start gap-2.5 min-w-0">
                   <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
                     <Building className="w-5 h-5" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <h3 className="font-bold text-base text-slate-900 dark:text-white">
                       {report.projectName}
                     </h3>
-                    <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 mt-0.5">
-                      <Calendar className="w-3.5 h-3.5" />
-                      <span>{report.reportDate}</span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-700 dark:text-slate-300 mt-0.5">
+                      <span className="inline-flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5" />
+                        <span>{report.reportDate}</span>
+                      </span>
                       <span>•</span>
-                      <User className="w-3.5 h-3.5" />
-                      <span>المرسل: {report.senderName} ({report.senderEmail})</span>
+                      <span className="inline-flex items-center gap-1">
+                        <User className="w-3.5 h-3.5" />
+                        <span>
+                          المرسل: <strong>{audit.currentName}</strong>{' '}
+                          <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400" dir="ltr">
+                            ({audit.currentEmail})
+                          </span>
+                        </span>
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -364,7 +386,8 @@ export const AdminReportsView: React.FC<Props> = ({
                 </button>
               </div>
             </div>
-          ))
+            );
+          })
         )}
       </div>
 
@@ -384,7 +407,7 @@ export const AdminReportsView: React.FC<Props> = ({
                   </span>
                 </h3>
                 <p className="text-xs text-slate-700 dark:text-slate-300 font-medium mt-0.5">
-                  المرسل: {selectedReport.senderName} ({selectedReport.senderEmail})
+                  المرسل: {getReportIdentityAudit(selectedReport, users).currentName} ({getReportIdentityAudit(selectedReport, users).currentEmail})
                 </p>
               </div>
               <button
@@ -397,6 +420,46 @@ export const AdminReportsView: React.FC<Props> = ({
 
             {/* Modal Body */}
             <div className="p-4 sm:p-6 overflow-y-auto space-y-6 text-sm">
+              {/* Quiet Read-Only Administrative Sender Audit (shown only when author metadata changed since submission) */}
+              {(() => {
+                const modalAudit = getReportIdentityAudit(selectedReport, users);
+                if (!modalAudit.hasAuditDifference) return null;
+                return (
+                  <div className="p-3.5 rounded-xl border bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 text-xs space-y-2.5">
+                    <div className="flex items-center gap-1.5 font-bold text-slate-900 dark:text-white">
+                      <History className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
+                      <span>سجل هوية المرسل (التدقيق الإداري)</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="p-2.5 rounded-lg bg-white dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-700/70">
+                        <span className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-0.5">
+                          البيانات الأصلية وقت إرسال التقرير
+                        </span>
+                        <div className="font-bold text-slate-900 dark:text-white">
+                          {modalAudit.originalName}
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-600 dark:text-slate-400" dir="ltr">
+                          {modalAudit.originalEmail}
+                        </div>
+                      </div>
+
+                      <div className="p-2.5 rounded-lg bg-white dark:bg-slate-900/70 border border-slate-200/80 dark:border-slate-700/70">
+                        <span className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 mb-0.5">
+                          البيانات الحالية في الملف الشخصي
+                        </span>
+                        <div className="font-bold text-slate-900 dark:text-white">
+                          {modalAudit.currentName}
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-600 dark:text-slate-400" dir="ltr">
+                          {modalAudit.currentEmail}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* TABLE 1: Submitted Works */}
               <div>
                 <div className="flex items-center justify-between mb-2">

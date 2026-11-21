@@ -40,20 +40,23 @@ export const MySubmissionsView: React.FC<Props> = ({
   const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
 
-  const canEditReport = (report: DailyReport) =>
-    currentUser.role === 'admin' ||
+  const isOwnReport = (report: DailyReport) =>
     report.senderId === currentUser.id ||
-    report.senderEmail.toLowerCase() === currentUser.email.toLowerCase();
+    report.senderEmail.toLowerCase() === currentUser.email.toLowerCase() ||
+    (report.originalSenderEmail || '').toLowerCase() === currentUser.email.toLowerCase();
+
+  const getDisplaySenderName = (report: DailyReport) =>
+    isOwnReport(report) ? currentUser.displayName : report.senderName;
+
+  const canEditReport = (report: DailyReport) =>
+    currentUser.role === 'admin' || isOwnReport(report);
 
   // Filter strictly to user's assigned projects (or all if admin)
   const myReports =
     currentUser.role === 'admin'
       ? reports
       : reports.filter(
-          (r) =>
-            canAccessProject(currentUser, r.projectId) &&
-            (r.senderId === currentUser.id ||
-              r.senderEmail.toLowerCase() === currentUser.email.toLowerCase())
+          (r) => canAccessProject(currentUser, r.projectId) && isOwnReport(r)
         );
 
   const myIssues =
@@ -129,25 +132,25 @@ export const MySubmissionsView: React.FC<Props> = ({
 
         {/* Toggle Pills */}
         <div className="flex items-center gap-1.5 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl self-start sm:self-auto">
-          <button
-            onClick={() => setActiveTab('reports')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              activeTab === 'reports'
-                ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
-                : 'text-slate-600 dark:text-slate-400'
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            <span>التقارير اليومية ({myReports.length})</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('issues')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              activeTab === 'issues'
-                ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
-                : 'text-slate-600 dark:text-slate-400'
-            }`}
-          >
+            <button
+              onClick={() => setActiveTab('reports')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                activeTab === 'reports'
+                  ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              <span>التقارير اليومية ({myReports.length})</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('issues')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+                activeTab === 'issues'
+                  ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-blue-400 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400'
+              }`}
+            >
             <AlertTriangle className="w-4 h-4" />
             <span>البلاغات والعوائق ({myIssues.length})</span>
           </button>
@@ -188,25 +191,30 @@ export const MySubmissionsView: React.FC<Props> = ({
               </p>
             </div>
           ) : (
-            myReports.map((report) => (
+            myReports.map((report) => {
+              const displaySenderName = getDisplaySenderName(report);
+
+              return (
               <div
                 key={report.id}
                 className="bg-white dark:bg-slate-900 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-800 shadow-xs hover:border-blue-300 dark:hover:border-blue-700 transition-all space-y-3"
               >
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-3">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-start gap-2.5 min-w-0">
                     <div className="w-9 h-9 rounded-lg bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
                       <Building className="w-5 h-5" />
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">
                         {report.projectName}
                       </h3>
-                      <div className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 mt-0.5">
-                        <Calendar className="w-3.5 h-3.5" />
-                        <span>{report.reportDate}</span>
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-700 dark:text-slate-300 mt-0.5">
+                        <span className="inline-flex items-center gap-1">
+                          <Calendar className="w-3.5 h-3.5" />
+                          <span>{report.reportDate}</span>
+                        </span>
                         <span>•</span>
-                        <span>المرسل: {report.senderName}</span>
+                        <span>المرسل: <strong>{displaySenderName}</strong></span>
                       </div>
                     </div>
                   </div>
@@ -287,7 +295,8 @@ export const MySubmissionsView: React.FC<Props> = ({
                   </button>
                 </div>
               </div>
-            ))
+              );
+            })
           )}
         </div>
       )}
@@ -389,7 +398,7 @@ export const MySubmissionsView: React.FC<Props> = ({
                   تفاصيل تقرير الأعمال اليومي
                 </h3>
                 <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">
-                  {selectedReport.projectName} — {selectedReport.reportDate} (المرسل: {selectedReport.senderName})
+                  {selectedReport.projectName} — {selectedReport.reportDate} (المرسل: {getDisplaySenderName(selectedReport)})
                 </p>
               </div>
               <button

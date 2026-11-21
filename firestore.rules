@@ -143,7 +143,14 @@ service cloud.firestore {
         userDataIsActive(u)
         && userDataIsReportOwner(u, ext)
         && (!('senderId' in ext) || inc.senderId == ext.senderId)
-        && inc.diff(ext).affectedKeys().hasOnly(['senderName', 'senderEmail', 'updatedAt'])
+        && inc.diff(ext).affectedKeys().hasOnly([
+          'senderName',
+          'senderEmail',
+          'originalSenderName',
+          'originalSenderEmail',
+          'identitySyncedAt',
+          'updatedAt'
+        ])
       ) || (
         userDataIsActive(u)
         && (
@@ -574,7 +581,7 @@ service cloud.firestore {
 
     function isValidDailyReport(data) {
       return data.keys().hasAll(['id', 'projectId', 'projectName', 'reportDate', 'senderId', 'senderName', 'senderEmail', 'submittedWorks', 'receivedWorks', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'reportDate', 'senderId', 'senderName', 'senderEmail', 'submittedWorks', 'receivedWorks', 'notes', 'attachments', 'status', 'adminFeedback', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'reportDate', 'senderId', 'senderName', 'senderEmail', 'originalSenderName', 'originalSenderEmail', 'identitySyncedAt', 'submittedWorks', 'receivedWorks', 'notes', 'attachments', 'status', 'adminFeedback', 'createdAt', 'updatedAt'])
         && isValidId(data.id)
         && isValidId(data.projectId)
         && data.projectName is string && data.projectName.size() <= 200
@@ -582,6 +589,9 @@ service cloud.firestore {
         && data.senderId is string && data.senderId.size() <= 128
         && data.senderName is string && data.senderName.size() <= 150
         && data.senderEmail is string && data.senderEmail.size() <= 200
+        && (!('originalSenderName' in data) || data.originalSenderName == null || (data.originalSenderName is string && data.originalSenderName.size() <= 150))
+        && (!('originalSenderEmail' in data) || data.originalSenderEmail == null || (data.originalSenderEmail is string && data.originalSenderEmail.size() <= 200))
+        && (!('identitySyncedAt' in data) || data.identitySyncedAt == null || (data.identitySyncedAt is string && data.identitySyncedAt.size() <= 64))
         && data.submittedWorks is list && data.submittedWorks.size() <= 200
         && (data.submittedWorks.size() == 0 || data.submittedWorks[0] is map)
         && data.receivedWorks is list && data.receivedWorks.size() <= 200
@@ -844,10 +854,22 @@ service cloud.firestore {
       allow create: if isValidId(reportId)
         && isValidDailyReport(incoming())
         && incoming().status == 'submitted'
+        && (!('originalSenderName' in incoming()) || incoming().originalSenderName == incoming().senderName)
+        && (!('originalSenderEmail' in incoming()) || incoming().originalSenderEmail == incoming().senderEmail)
         && canCreateReport(reportId, incoming());
       allow update: if isValidId(reportId)
         && isValidDailyReport(incoming())
         && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
+        && (!('originalSenderName' in incoming()) || (
+          ('originalSenderName' in existing() && existing().originalSenderName != null)
+            ? incoming().originalSenderName == existing().originalSenderName
+            : incoming().originalSenderName == existing().senderName
+        ))
+        && (!('originalSenderEmail' in incoming()) || (
+          ('originalSenderEmail' in existing() && existing().originalSenderEmail != null)
+            ? incoming().originalSenderEmail == existing().originalSenderEmail
+            : incoming().originalSenderEmail == existing().senderEmail
+        ))
         && canUpdateReport(incoming(), existing());
       allow delete: if isValidId(reportId) && isAdmin();
 
