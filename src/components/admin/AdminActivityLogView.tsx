@@ -67,6 +67,13 @@ const ACTION_META: Record<ActivityActionType, ActionMeta> = {
       'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/70 dark:text-indigo-300',
     icon: ClipboardCheck
   },
+  report_deleted: {
+    label: 'حذف تقرير يومي',
+    badgeClass:
+      'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/60 dark:text-rose-300 dark:border-rose-800',
+    iconBgClass: 'bg-rose-100 text-rose-700 dark:bg-rose-950/70 dark:text-rose-300',
+    icon: Trash2
+  },
   task_created: {
     label: 'إنشاء مهمة جديدة',
     badgeClass:
@@ -469,6 +476,7 @@ export const AdminActivityLogView: React.FC<Props> = ({
                   <option value="report_created">تقديم تقرير يومي</option>
                   <option value="report_updated">تعديل تقرير يومي</option>
                   <option value="report_reviewed">مراجعة تقرير يومي</option>
+                  <option value="report_deleted">حذف تقرير يومي</option>
                 </>
               )}
               {(entityFilter === 'all' || entityFilter === 'task') && (
@@ -729,7 +737,9 @@ export const AdminActivityLogView: React.FC<Props> = ({
                         )}
                       </div>
 
-                      {onNavigateTab && log.action !== 'task_deleted' && (
+                      {onNavigateTab &&
+                        log.action !== 'task_deleted' &&
+                        log.action !== 'report_deleted' && (
                         <button
                           type="button"
                           onClick={() =>

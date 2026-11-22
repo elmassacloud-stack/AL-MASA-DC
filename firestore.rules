@@ -829,7 +829,7 @@ service cloud.firestore {
         && data.keys().hasOnly(['id', 'entityType', 'action', 'entityId', 'entityTitle', 'projectId', 'projectName', 'actorId', 'actorName', 'actorEmail', 'actorRole', 'summary', 'details', 'createdAt'])
         && isValidId(data.id)
         && (
-          (data.entityType == 'report' && data.action in ['report_created', 'report_updated', 'report_reviewed']) ||
+          (data.entityType == 'report' && data.action in ['report_created', 'report_updated', 'report_reviewed', 'report_deleted']) ||
           (data.entityType == 'task' && data.action in ['task_created', 'task_updated', 'task_completed', 'task_deleted'])
         )
         && isValidId(data.entityId)

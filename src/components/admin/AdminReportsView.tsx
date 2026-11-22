@@ -20,7 +20,8 @@ import {
   Copy,
   Paperclip,
   Pencil,
-  History
+  History,
+  Trash2
 } from 'lucide-react';
 import { DailyReport, Project, UserProfile, SubmittalItem } from '../../types';
 import { StatusBadge } from '../common/StatusBadge';
@@ -57,12 +58,45 @@ export const AdminReportsView: React.FC<Props> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedReport, setSelectedReport] = useState<DailyReport | null>(null);
   const [editingReport, setEditingReport] = useState<DailyReport | null>(null);
+  const [deletingReport, setDeletingReport] = useState<DailyReport | null>(null);
+  const [isDeletingReport, setIsDeletingReport] = useState<boolean>(false);
+  const [deleteErrorMsg, setDeleteErrorMsg] = useState<string | null>(null);
   const [editSuccessMsg, setEditSuccessMsg] = useState<string | null>(null);
   const [adminFeedbackInput, setAdminFeedbackInput] = useState<string>('');
   const [savedFeedbackMsg, setSavedFeedbackMsg] = useState<boolean>(false);
   const [feedbackErrorMsg, setFeedbackErrorMsg] = useState<string | null>(null);
   const [isSavingFeedback, setIsSavingFeedback] = useState<boolean>(false);
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
+
+  const isAdmin = currentUser.role === 'admin';
+
+  const handleConfirmDeleteReport = async () => {
+    if (!deletingReport || !isAdmin || isDeletingReport) return;
+    setIsDeletingReport(true);
+    setDeleteErrorMsg(null);
+    try {
+      const target = deletingReport;
+      const deleted = await dataService.deleteDailyReport(target.id);
+      if (!deleted) {
+        setDeleteErrorMsg('تعذر العثور على التقرير المطلوب حذفه.');
+        return;
+      }
+      if (selectedReport?.id === target.id) {
+        setSelectedReport(null);
+      }
+      setDeletingReport(null);
+      setEditSuccessMsg(
+        `تم حذف التقرير اليومي لمشروع «${target.projectName}» بتاريخ ${target.reportDate} نهائياً.`
+      );
+      window.setTimeout(() => setEditSuccessMsg(null), 4500);
+    } catch (err) {
+      setDeleteErrorMsg(
+        err instanceof Error ? err.message : 'تعذر حذف التقرير اليومي. يرجى المحاولة مرة أخرى.'
+      );
+    } finally {
+      setIsDeletingReport(false);
+    }
+  };
 
   // PDF Export Modal & single-report export state
   const latestReportDate = useMemo(() => {
@@ -583,6 +617,20 @@ export const AdminReportsView: React.FC<Props> = ({
 
               {/* Card Actions */}
               <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeleteErrorMsg(null);
+                      setDeletingReport(report);
+                    }}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-red-50 hover:bg-red-100 text-red-700 dark:bg-red-950/70 dark:hover:bg-red-900/60 dark:text-red-300 border border-red-200 dark:border-red-800 transition-colors flex items-center gap-1.5 cursor-pointer"
+                    title="حذف التقرير اليومي نهائياً (صلاحية الأدمن فقط)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>حذف التقرير</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setEditingReport(report)}
@@ -916,6 +964,19 @@ export const AdminReportsView: React.FC<Props> = ({
                   {copiedSummary ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   <span>{copiedSummary ? 'تم نسخ الملخص!' : 'نسخ ملخص التقرير للمشاركة'}</span>
                 </button>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeleteErrorMsg(null);
+                      setDeletingReport(selectedReport);
+                    }}
+                    className="px-4 py-2 bg-red-50 hover:bg-red-100 text-red-700 dark:bg-red-950/70 dark:hover:bg-red-900/60 dark:text-red-300 border border-red-200 dark:border-red-800 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>حذف التقرير</span>
+                  </button>
+                )}
               </div>
               <button
                 onClick={() => setSelectedReport(null)}
@@ -1170,6 +1231,104 @@ export const AdminReportsView: React.FC<Props> = ({
             setTimeout(() => setEditSuccessMsg(null), 4000);
           }}
         />
+      )}
+
+      {/* =========================================================================
+          ADMIN-ONLY DELETE REPORT CONFIRMATION MODAL
+          ========================================================================= */}
+      {isAdmin && deletingReport && (
+        <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 p-5 sm:p-6 space-y-4 my-auto">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-xl bg-red-50 dark:bg-red-950/70 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-900 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  تأكيد حذف التقرير اليومي
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
+                  هل أنت متأكد من حذف هذا التقرير نهائياً؟ سيتم حذف التقرير وكافة مرفقاته من قاعدة
+                  البيانات ولا يمكن التراجع عن هذه العملية.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isDeletingReport}
+                onClick={() => {
+                  setDeletingReport(null);
+                  setDeleteErrorMsg(null);
+                }}
+                className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                aria-label="إغلاق"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 text-xs space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 dark:text-slate-400">المشروع:</span>
+                <strong className="text-slate-900 dark:text-white truncate">
+                  {deletingReport.projectName}
+                </strong>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 dark:text-slate-400">تاريخ التقرير:</span>
+                <strong className="font-mono text-slate-900 dark:text-white">
+                  {deletingReport.reportDate}
+                </strong>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 dark:text-slate-400">المرسل:</span>
+                <strong className="text-slate-900 dark:text-white">
+                  {getReportIdentityAudit(deletingReport, users).currentName}
+                </strong>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-slate-500 dark:text-slate-400">البنود المسجلة:</span>
+                <strong className="font-mono text-slate-900 dark:text-white">
+                  {deletingReport.submittedWorks.length} تقديمات ·{' '}
+                  {deletingReport.receivedWorks.length} استلامات
+                </strong>
+              </div>
+            </div>
+
+            {deleteErrorMsg && (
+              <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-800 text-xs font-bold text-red-700 dark:text-red-300 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>{deleteErrorMsg}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isDeletingReport}
+                onClick={() => {
+                  setDeletingReport(null);
+                  setDeleteErrorMsg(null);
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer transition-colors disabled:opacity-50"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingReport}
+                onClick={handleConfirmDeleteReport}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 text-white flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-60"
+              >
+                {isDeletingReport ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Trash2 className="w-4 h-4" />
+                )}
+                <span>{isDeletingReport ? 'جاري الحذف...' : 'تأكيد الحذف النهائي'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

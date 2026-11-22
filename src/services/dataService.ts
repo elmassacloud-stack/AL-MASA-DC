@@ -2691,6 +2691,69 @@ class DataService {
     return true;
   }
 
+  public async deleteDailyReport(reportId: string): Promise<boolean> {
+    const activeUser = this.getCurrentUser();
+    const isAdminUser =
+      activeUser?.role === 'admin' ||
+      isSuperAdminEmail(auth.currentUser?.email || activeUser?.email);
+
+    if (!isAdminUser) {
+      throw new Error('صلاحية حذف التقارير اليومية متاحة لمسؤول النظام (الأدمن) فقط.');
+    }
+
+    const reports = this.getReports();
+    const targetReport = reports.find((r) => r.id === reportId);
+    if (!targetReport) return false;
+
+    // Clean up any chunked attachment payloads stored under reports/{reportId}/chunks
+    try {
+      const chunksRef = collection(db, 'reports', reportId, 'chunks');
+      const chunkSnap = await getDocs(chunksRef);
+      if (!chunkSnap.empty) {
+        const docs = chunkSnap.docs;
+        for (let i = 0; i < docs.length; i += 400) {
+          const batch = writeBatch(db);
+          docs.slice(i, i + 400).forEach((chunkDoc) => {
+            batch.delete(doc(db, 'reports', reportId, 'chunks', chunkDoc.id));
+          });
+          await batch.commit();
+        }
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `reports/${reportId}/chunks`);
+    }
+
+    // Revoke any cached blob URLs for this report's attachments
+    (targetReport.attachments || []).forEach((att) => {
+      if (att.id) {
+        revokePdfBlobUrl(`report-${reportId}-${att.id}`);
+      }
+    });
+
+    try {
+      await deleteDoc(doc(db, 'reports', reportId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `reports/${reportId}`);
+    }
+
+    const remaining = reports.filter((r) => r.id !== reportId);
+    localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(remaining));
+
+    this.recordActivityLog({
+      entityType: 'report',
+      action: 'report_deleted',
+      entityId: targetReport.id,
+      entityTitle: `تقرير يومي (${targetReport.reportDate})`,
+      projectId: targetReport.projectId,
+      projectName: targetReport.projectName,
+      summary: `تم حذف التقرير اليومي لمشروع ${targetReport.projectName} بتاريخ ${targetReport.reportDate}.`,
+      details: `المرسل: ${targetReport.senderName} | التقديمات: ${targetReport.submittedWorks.length} | الاستلامات: ${targetReport.receivedWorks.length}`
+    });
+
+    this.notify();
+    return true;
+  }
+
   // Local Autosave Draft
   public saveReportDraft(projectId: string, draftData: Partial<DailyReport>) {
     try {

@@ -310,6 +310,7 @@ export type ActivityActionType =
   | 'report_created'
   | 'report_updated'
   | 'report_reviewed'
+  | 'report_deleted'
   | 'task_created'
   | 'task_updated'
   | 'task_completed'
