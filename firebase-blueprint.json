@@ -367,6 +367,50 @@
         "summary",
         "createdAt"
       ]
+    },
+    "SharedExcelLogFile": {
+      "title": "SharedExcelLogFile",
+      "description": "Cloud-synced Excel log workbook metadata uploaded in the logs tab for a project so admins and authorized engineers share it automatically.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "fileName": { "type": "string", "minLength": 1, "maxLength": 260 },
+        "fileSizeBytes": { "type": "number" },
+        "chunkCount": { "type": "number" },
+        "uploadedBy": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "uploaderName": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "uploaderRole": { "type": "string", "enum": ["admin", "site"] },
+        "sourceLabel": { "type": "string", "maxLength": 200 },
+        "sheetOverridesJson": { "type": "string", "maxLength": 30000 },
+        "excludedSheetIndices": { "type": "array" },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "projectId",
+        "projectName",
+        "fileName",
+        "fileSizeBytes",
+        "chunkCount",
+        "uploadedBy",
+        "uploaderName",
+        "uploaderRole",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SharedExcelLogChunk": {
+      "title": "SharedExcelLogChunk",
+      "description": "Chunked Base64 binary payload belonging to a SharedExcelLogFile.",
+      "type": "object",
+      "properties": {
+        "index": { "type": "number" },
+        "data": { "type": "string", "minLength": 1, "maxLength": 800000 }
+      },
+      "required": ["index", "data"]
     }
   },
   "firestore": {
@@ -433,6 +477,14 @@
     "/activityLogs/{logId}": {
       "schema": { "$ref": "#/entities/ActivityLogEntry" },
       "description": "Immutable admin-readable audit log of edits and status changes on Daily Reports and Project Tasks."
+    },
+    "/excelLogs/{logId}": {
+      "schema": { "$ref": "#/entities/SharedExcelLogFile" },
+      "description": "Cloud-synced project Excel log workbooks shared automatically between site engineers and admins."
+    },
+    "/excelLogs/{logId}/chunks/{chunkId}": {
+      "schema": { "$ref": "#/entities/SharedExcelLogChunk" },
+      "description": "Chunked Base64 payload of a SharedExcelLogFile."
     }
   }
 }

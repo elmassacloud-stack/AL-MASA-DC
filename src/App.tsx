@@ -53,7 +53,8 @@ import {
   ExecutedWork,
   SiteDeliverable,
   PersonalNote,
-  ActivityLogEntry
+  ActivityLogEntry,
+  SharedExcelLogFile
 } from './types';
 import { getTodayDateStr } from './seedData';
 
@@ -96,6 +97,9 @@ export default function App() {
   );
   const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>(() =>
     dataService.getActivityLogs()
+  );
+  const [sharedExcelLogs, setSharedExcelLogs] = useState<SharedExcelLogFile[]>(() =>
+    dataService.getSharedExcelLogs()
   );
   const [stalledDays, setStalledDays] = useState<number>(() =>
     dataService.getStalledDaysThreshold()
@@ -192,6 +196,7 @@ export default function App() {
       setNotifications(dataService.getNotifications(activeUser));
       setPersonalNotes(dataService.getPersonalNotes(activeUser?.id));
       setActivityLogs(dataService.getActivityLogs());
+      setSharedExcelLogs(dataService.getSharedExcelLogs());
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
       setBrandColor(dataService.getBrandColor());
@@ -427,6 +432,7 @@ export default function App() {
                 projects={projects}
                 siteDeliverables={siteDeliverables}
                 reports={reports}
+                sharedExcelLogs={sharedExcelLogs}
               />
             )}
 
@@ -492,6 +498,7 @@ export default function App() {
                 projects={projects}
                 siteDeliverables={siteDeliverables}
                 reports={reports}
+                sharedExcelLogs={sharedExcelLogs}
               />
             )}
 

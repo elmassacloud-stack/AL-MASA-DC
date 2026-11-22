@@ -549,6 +549,73 @@ service cloud.firestore {
         || (userDocExists() && userDataCanCreateActivityLog(currentUserData(), inc));
     }
 
+    function userDataCanCreateSharedExcelLog(u, inc) {
+      return (
+        userDataIsAdmin(u)
+        && inc.uploaderRole == 'admin'
+      ) || (
+        userDataIsActive(u)
+        && inc.uploaderRole == 'site'
+        && userDataHasProjectAccess(u, inc.projectId)
+      );
+    }
+
+    function canCreateSharedExcelLog(inc) {
+      return (isSuperAdmin() && inc.uploaderRole == 'admin')
+        || (userDocExists() && userDataCanCreateSharedExcelLog(currentUserData(), inc));
+    }
+
+    function userDataCanManageSharedExcelLog(u, ext) {
+      return userDataIsAdmin(u) || (
+        userDataIsActive(u)
+        && ext.uploadedBy == request.auth.uid
+        && userDataHasProjectAccess(u, ext.projectId)
+      );
+    }
+
+    function canManageSharedExcelLog(ext) {
+      return isSuperAdmin()
+        || (userDocExists() && userDataCanManageSharedExcelLog(currentUserData(), ext));
+    }
+
+    function canReadSharedExcelLogChunks(logId) {
+      return exists(/databases/$(database)/documents/excelLogs/$(logId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataHasProjectAccess(
+            currentUserData(),
+            get(/databases/$(database)/documents/excelLogs/$(logId)).data.projectId
+          )
+        )
+      );
+    }
+
+    function canWriteSharedExcelLogChunk(logId) {
+      return exists(/databases/$(database)/documents/excelLogs/$(logId)) && (
+        isSuperAdmin() || (
+          userDocExists() &&
+          userDataCanManageSharedExcelLog(
+            currentUserData(),
+            get(/databases/$(database)/documents/excelLogs/$(logId)).data
+          )
+        )
+      );
+    }
+
+    function canDeleteSharedExcelLogChunk(logId) {
+      return isSuperAdmin() || (
+        userDocExists() && (
+          userDataIsAdmin(currentUserData()) || (
+            exists(/databases/$(database)/documents/excelLogs/$(logId)) &&
+            userDataCanManageSharedExcelLog(
+              currentUserData(),
+              get(/databases/$(database)/documents/excelLogs/$(logId)).data
+            )
+          )
+        )
+      );
+    }
+
     // Schema validation blueprints (pure, 0 DB calls)
     function isValidNotificationPreferences(prefs) {
       return prefs is map
@@ -845,6 +912,36 @@ service cloud.firestore {
         && data.createdAt is string && data.createdAt.size() <= 64;
     }
 
+    function isValidSharedExcelLog(data) {
+      return data.keys().hasAll(['id', 'projectId', 'projectName', 'fileName', 'fileSizeBytes', 'chunkCount', 'uploadedBy', 'uploaderName', 'uploaderRole', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'projectId', 'projectName', 'fileName', 'fileSizeBytes', 'chunkCount', 'uploadedBy', 'uploaderName', 'uploaderRole', 'sourceLabel', 'sheetOverridesJson', 'excludedSheetIndices', 'createdAt', 'updatedAt'])
+        && isValidId(data.id)
+        && isValidId(data.projectId)
+        && data.projectName is string && data.projectName.size() >= 1 && data.projectName.size() <= 200
+        && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 260
+        && data.fileSizeBytes is int && data.fileSizeBytes >= 1 && data.fileSizeBytes <= 26500000
+        && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 60
+        && data.uploadedBy is string && data.uploadedBy.size() >= 1 && data.uploadedBy.size() <= 128
+        && data.uploaderName is string && data.uploaderName.size() >= 1 && data.uploaderName.size() <= 150
+        && (data.uploaderRole == 'admin' || data.uploaderRole == 'site')
+        && (!('sourceLabel' in data) || data.sourceLabel == null || (data.sourceLabel is string && data.sourceLabel.size() <= 200))
+        && (!('sheetOverridesJson' in data) || data.sheetOverridesJson == null || (data.sheetOverridesJson is string && data.sheetOverridesJson.size() <= 30000))
+        && (!('excludedSheetIndices' in data) || data.excludedSheetIndices == null || (
+          data.excludedSheetIndices is list
+          && data.excludedSheetIndices.size() <= 200
+          && (data.excludedSheetIndices.size() == 0 || data.excludedSheetIndices[0] is int)
+        ))
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidSharedExcelLogChunk(data) {
+      return data.keys().hasAll(['index', 'data'])
+        && data.keys().hasOnly(['index', 'data'])
+        && data.index is int && data.index >= 0 && data.index < 60
+        && data.data is string && data.data.size() >= 1 && data.data.size() <= 800000;
+    }
+
     // Users collection (PII isolated to owner or Admin)
     match /users/{userId} {
       allow get: if isValidId(userId) && ((isSignedIn() && request.auth.uid == userId) || isAdmin());
@@ -1109,6 +1206,45 @@ service cloud.firestore {
         && canCreateActivityLog(incoming());
       allow update: if false;
       allow delete: if false;
+    }
+
+    // Cloud-Synced Excel Logs (Shared automatically between authorized site users and Admins)
+    match /excelLogs/{logId} {
+      allow get: if isValidId(logId) && hasProjectAccess(existing().projectId);
+      allow list: if hasProjectAccess(resource.data.projectId);
+      allow create: if isValidId(logId)
+        && isSignedIn()
+        && incoming().id == logId
+        && incoming().uploadedBy == request.auth.uid
+        && isValidSharedExcelLog(incoming())
+        && canCreateSharedExcelLog(incoming());
+      allow update: if isValidId(logId)
+        && isValidSharedExcelLog(incoming())
+        && incoming().id == existing().id
+        && incoming().projectId == existing().projectId
+        && incoming().fileName == existing().fileName
+        && incoming().fileSizeBytes == existing().fileSizeBytes
+        && incoming().chunkCount == existing().chunkCount
+        && incoming().uploadedBy == existing().uploadedBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['sheetOverridesJson', 'excludedSheetIndices', 'updatedAt'])
+        && canManageSharedExcelLog(existing());
+      allow delete: if isValidId(logId) && canManageSharedExcelLog(existing());
+
+      match /chunks/{chunkId} {
+        allow get: if isValidId(logId)
+          && isValidId(chunkId)
+          && canReadSharedExcelLogChunks(logId);
+        allow list: if isValidId(logId)
+          && canReadSharedExcelLogChunks(logId);
+        allow create: if isValidId(logId)
+          && isValidId(chunkId)
+          && isValidSharedExcelLogChunk(incoming())
+          && canWriteSharedExcelLogChunk(logId);
+        allow delete: if isValidId(logId)
+          && isValidId(chunkId)
+          && canDeleteSharedExcelLogChunk(logId);
+      }
     }
   }
 }

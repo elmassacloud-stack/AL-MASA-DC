@@ -135,7 +135,7 @@ export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<Exc
   return sheets;
 }
 
-function uint8ArrayToBase64(bytes: Uint8Array): string {
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
   const chunkSize = 0x8000;
   let binary = '';
   for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -143,6 +143,16 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
     binary += String.fromCharCode(...slice);
   }
   return btoa(binary);
+}
+
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
 }
 
 export function base64ToBlob(base64: string, mimeType = 'application/pdf'): Blob {

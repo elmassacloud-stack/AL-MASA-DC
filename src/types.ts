@@ -333,4 +333,27 @@ export interface ActivityLogEntry {
   createdAt: string;
 }
 
+export interface SharedExcelLogFile {
+  id: string;
+  projectId: string;
+  projectName: string;
+  fileName: string;
+  fileSizeBytes: number;
+  chunkCount: number;
+  uploadedBy: string;
+  uploaderName: string;
+  uploaderRole: UserRole;
+  sourceLabel?: string;
+  sheetOverridesJson?: string;
+  excludedSheetIndices?: number[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SharedExcelLogChunk {
+  index: number;
+  data: string;
+}
+
+
 

@@ -44,7 +44,8 @@ import {
   Project,
   SiteDeliverable,
   DailyReport,
-  ReportAttachment
+  ReportAttachment,
+  SharedExcelLogFile
 } from '../../types';
 import { SUBMITTAL_STATUS_CONFIG } from '../../config';
 import { dataService } from '../../services/dataService';
@@ -79,6 +80,7 @@ interface Props {
   projects: Project[];
   siteDeliverables?: SiteDeliverable[];
   reports?: DailyReport[];
+  sharedExcelLogs?: SharedExcelLogFile[];
 }
 
 interface UploadedExcelWorkbook {
@@ -91,6 +93,9 @@ interface UploadedExcelWorkbook {
   buffer?: ArrayBuffer;
   sourceLabel?: string;
   remoteKey?: string;
+  uploadedBy?: string;
+  uploaderName?: string;
+  isCloudSynced?: boolean;
   workbook: ParsedWorkbookData;
   sheetOverrides: Record<number, SheetOverrideConfig>;
   excludedSheetIndices: number[];
@@ -255,10 +260,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   currentUser,
   projects,
   siteDeliverables = [],
-  reports = []
+  reports = [],
+  sharedExcelLogs = []
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadTargetProjectIdRef = useRef<string | null>(null);
+  const uploadedFilesRef = useRef<UploadedExcelWorkbook[]>([]);
+  const inFlightCloudFetchIdsRef = useRef<Set<string>>(new Set());
 
   const isAdmin = currentUser.role === 'admin';
 
@@ -278,14 +286,19 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   const [projectTabSearch, setProjectTabSearch] = useState<string>('');
   const [activeFileByProject, setActiveFileByProject] = useState<Record<string, string>>({});
 
-  // Uploaded workbooks state (persisted per project in IndexedDB)
+  // Uploaded workbooks state (persisted in Cloud Firestore + cached per project in IndexedDB)
   const [uploadedFiles, setUploadedFiles] = useState<UploadedExcelWorkbook[]>([]);
   const [isHydratingSaved, setIsHydratingSaved] = useState<boolean>(true);
+  const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState<boolean>(false);
   const [loadingRemoteKey, setLoadingRemoteKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    uploadedFilesRef.current = uploadedFiles;
+  }, [uploadedFiles]);
 
   // View mode: 'overview' (all sheets dashboard), 'dates' (date filter & timeline), or sheet index
   const [activeView, setActiveView] = useState<'overview' | 'dates' | number>('overview');
@@ -366,6 +379,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               savedAtMs: rec.savedAtMs,
               buffer: rec.buffer,
               sourceLabel: rec.sourceLabel,
+              uploadedBy: rec.uploadedBy,
+              uploaderName: rec.uploaderName,
+              isCloudSynced: rec.isCloudSynced,
               workbook: parsed,
               sheetOverrides: rec.sheetOverrides || {},
               excludedSheetIndices: rec.excludedSheetIndices || []
@@ -404,20 +420,223 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     };
   }, []);
 
-  const persistEntryToStorage = (entry: UploadedExcelWorkbook) => {
-    if (!entry.buffer) return;
-    void saveStoredExcelFile({
-      id: entry.id,
-      projectId: entry.projectId,
-      fileName: entry.fileName,
-      fileSize: entry.fileSize,
-      uploadedAt: entry.uploadedAt,
-      savedAtMs: entry.savedAtMs,
-      buffer: entry.buffer,
-      sheetOverrides: entry.sheetOverrides,
-      excludedSheetIndices: entry.excludedSheetIndices,
-      sourceLabel: entry.sourceLabel
+  // Automatically sync cloud-stored Excel logs (uploaded by any authorized user/admin) in real time
+  useEffect(() => {
+    if (isHydratingSaved) return;
+    let active = true;
+
+    const authorizedCloudLogs = sharedExcelLogs.filter((log) =>
+      canAccessProject(currentUser, log.projectId)
+    );
+    const cloudById = new Map<string, SharedExcelLogFile>(
+      authorizedCloudLogs.map((log) => [log.id, log])
+    );
+
+    // 1. Remove locally cached cloud entries that were deleted from Firestore, and sync remote metadata edits
+    setUploadedFiles((prev) => {
+      let changed = false;
+      const next: UploadedExcelWorkbook[] = [];
+
+      for (const item of prev) {
+        const cloudMatch = cloudById.get(item.id);
+        if (item.isCloudSynced && !cloudMatch) {
+          changed = true;
+          void deleteStoredExcelFile(item.id);
+          continue;
+        }
+        if (cloudMatch) {
+          let nextOverrides = item.sheetOverrides;
+          if (cloudMatch.sheetOverridesJson) {
+            try {
+              const parsedOverrides = JSON.parse(cloudMatch.sheetOverridesJson);
+              if (
+                parsedOverrides &&
+                typeof parsedOverrides === 'object' &&
+                JSON.stringify(parsedOverrides) !== JSON.stringify(item.sheetOverrides)
+              ) {
+                nextOverrides = parsedOverrides as Record<number, SheetOverrideConfig>;
+                changed = true;
+              }
+            } catch {
+              // ignore malformed override json
+            }
+          }
+          const nextExcluded = Array.isArray(cloudMatch.excludedSheetIndices)
+            ? cloudMatch.excludedSheetIndices
+            : item.excludedSheetIndices;
+          if (JSON.stringify(nextExcluded) !== JSON.stringify(item.excludedSheetIndices)) {
+            changed = true;
+          }
+          const nextUploaderName = cloudMatch.uploaderName || item.uploaderName;
+          const nextUploadedBy = cloudMatch.uploadedBy || item.uploadedBy;
+          if (
+            !item.isCloudSynced ||
+            nextUploaderName !== item.uploaderName ||
+            nextUploadedBy !== item.uploadedBy
+          ) {
+            changed = true;
+          }
+          next.push({
+            ...item,
+            isCloudSynced: true,
+            uploadedBy: nextUploadedBy,
+            uploaderName: nextUploaderName,
+            sheetOverrides: nextOverrides,
+            excludedSheetIndices: nextExcluded
+          });
+        } else {
+          next.push(item);
+        }
+      }
+
+      return changed ? next : prev;
     });
+
+    // 2. Download & parse any new cloud Excel logs not yet in local state
+    const existingIds = new Set(uploadedFilesRef.current.map((f) => f.id));
+    const missingCloudLogs = authorizedCloudLogs.filter(
+      (log) => !existingIds.has(log.id) && !inFlightCloudFetchIdsRef.current.has(log.id)
+    );
+
+    if (missingCloudLogs.length === 0) return;
+
+    missingCloudLogs.forEach((log) => inFlightCloudFetchIdsRef.current.add(log.id));
+    setIsSyncingCloud(true);
+
+    (async () => {
+      const downloadedEntries: UploadedExcelWorkbook[] = [];
+      for (const cloudLog of missingCloudLogs) {
+        if (!active) break;
+        try {
+          const buffer = await dataService.fetchSharedExcelLogBuffer(cloudLog);
+          const parsed = parseDriveExcelWorkbook(buffer, cloudLog.fileName);
+          if (parsed.sheets.length === 0) continue;
+
+          let parsedOverrides: Record<number, SheetOverrideConfig> = {};
+          if (cloudLog.sheetOverridesJson) {
+            try {
+              const obj = JSON.parse(cloudLog.sheetOverridesJson);
+              if (obj && typeof obj === 'object') {
+                parsedOverrides = obj as Record<number, SheetOverrideConfig>;
+              }
+            } catch {
+              parsedOverrides = {};
+            }
+          }
+          const excludedIndices = Array.isArray(cloudLog.excludedSheetIndices)
+            ? cloudLog.excludedSheetIndices
+            : [];
+
+          const savedAtMs = Date.parse(cloudLog.createdAt) || Date.now();
+          const entry: UploadedExcelWorkbook = {
+            id: cloudLog.id,
+            projectId: cloudLog.projectId,
+            fileName: cloudLog.fileName,
+            fileSize: cloudLog.fileSizeBytes || buffer.byteLength,
+            uploadedAt: new Date(savedAtMs).toLocaleTimeString('ar-EG', {
+              hour: '2-digit',
+              minute: '2-digit'
+            }),
+            savedAtMs,
+            buffer,
+            sourceLabel: cloudLog.sourceLabel,
+            uploadedBy: cloudLog.uploadedBy,
+            uploaderName: cloudLog.uploaderName,
+            isCloudSynced: true,
+            workbook: parsed,
+            sheetOverrides: parsedOverrides,
+            excludedSheetIndices: excludedIndices
+          };
+
+          downloadedEntries.push(entry);
+          void saveStoredExcelFile({
+            id: entry.id,
+            projectId: entry.projectId,
+            fileName: entry.fileName,
+            fileSize: entry.fileSize,
+            uploadedAt: entry.uploadedAt,
+            savedAtMs: entry.savedAtMs,
+            buffer,
+            sheetOverrides: entry.sheetOverrides,
+            excludedSheetIndices: entry.excludedSheetIndices,
+            sourceLabel: entry.sourceLabel,
+            uploadedBy: entry.uploadedBy,
+            uploaderName: entry.uploaderName,
+            isCloudSynced: true
+          });
+        } catch {
+          // Keep UI resilient if one cloud file fails to load
+        } finally {
+          inFlightCloudFetchIdsRef.current.delete(cloudLog.id);
+        }
+      }
+
+      if (!active) return;
+      if (downloadedEntries.length > 0) {
+        setUploadedFiles((prev) => {
+          const prevIds = new Set(prev.map((p) => p.id));
+          const uniqueNew = downloadedEntries.filter((d) => !prevIds.has(d.id));
+          if (uniqueNew.length === 0) return prev;
+          return [...uniqueNew, ...prev].sort((a, b) => (b.savedAtMs || 0) - (a.savedAtMs || 0));
+        });
+
+        setActiveFileByProject((prev) => {
+          const next = { ...prev };
+          for (const entry of downloadedEntries) {
+            if (!next[entry.projectId]) {
+              next[entry.projectId] = entry.id;
+            }
+          }
+          return next;
+        });
+
+        setSelectedProjectTab((currentTab) => {
+          if (currentTab !== 'all') {
+            const match = downloadedEntries.find((d) => d.projectId === currentTab);
+            if (match && !uploadedFilesRef.current.some((f) => f.projectId === currentTab)) {
+              setActiveFileId(match.id);
+              const visibleIndices = match.workbook.sheets
+                .map((_, i) => i)
+                .filter((i) => !match.excludedSheetIndices.includes(i));
+              setActiveView(visibleIndices.length === 1 ? visibleIndices[0] : 'overview');
+            }
+          }
+          return currentTab;
+        });
+      }
+      setIsSyncingCloud(false);
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [sharedExcelLogs, isHydratingSaved, currentUser]);
+
+  const persistEntryToStorage = (entry: UploadedExcelWorkbook) => {
+    if (entry.buffer) {
+      void saveStoredExcelFile({
+        id: entry.id,
+        projectId: entry.projectId,
+        fileName: entry.fileName,
+        fileSize: entry.fileSize,
+        uploadedAt: entry.uploadedAt,
+        savedAtMs: entry.savedAtMs,
+        buffer: entry.buffer,
+        sheetOverrides: entry.sheetOverrides,
+        excludedSheetIndices: entry.excludedSheetIndices,
+        sourceLabel: entry.sourceLabel,
+        uploadedBy: entry.uploadedBy,
+        uploaderName: entry.uploaderName,
+        isCloudSynced: entry.isCloudSynced
+      });
+    }
+    if (entry.isCloudSynced) {
+      void dataService.updateSharedExcelLogMeta(
+        entry.id,
+        entry.sheetOverrides,
+        entry.excludedSheetIndices
+      );
+    }
   };
 
   const resetSheetFilters = () => {
@@ -721,8 +940,29 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           continue;
         }
         const nowMs = Date.now();
+        const entryId = 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+
+        // Persist to Cloud Firestore so Admin and all authorized project members see it automatically
+        let cloudSynced = false;
+        try {
+          await dataService.uploadSharedExcelLog({
+            id: entryId,
+            projectId: targetProjectId,
+            projectName: targetProjectName,
+            fileName: file.name,
+            buffer
+          });
+          cloudSynced = true;
+        } catch (cloudErr) {
+          const cloudMsg =
+            cloudErr instanceof Error
+              ? cloudErr.message
+              : 'تعذرت المزامنة السحابية لملف اللوج.';
+          errors.push(`تم فتح «${file.name}» محلياً ولكن تعذر حفظه سحابياً: ${cloudMsg}`);
+        }
+
         const entry: UploadedExcelWorkbook = {
-          id: 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+          id: entryId,
           projectId: targetProjectId,
           fileName: file.name,
           fileSize: file.size,
@@ -732,6 +972,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           }),
           savedAtMs: nowMs,
           buffer,
+          uploadedBy: currentUser.id,
+          uploaderName: currentUser.displayName,
+          isCloudSynced: cloudSynced,
           workbook: parsed,
           sheetOverrides: {},
           excludedSheetIndices: []
@@ -753,16 +996,25 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }
 
     if (newlyLoaded.length > 0) {
-      setUploadedFiles((prev) => [...newlyLoaded, ...prev]);
+      setUploadedFiles((prev) => {
+        const prevIds = new Set(prev.map((p) => p.id));
+        const uniqueNew = newlyLoaded.filter((item) => !prevIds.has(item.id));
+        return [...uniqueNew, ...prev];
+      });
       if (selectedProjectTab !== targetProjectId && sortedProjects.some((p) => p.id === targetProjectId)) {
         setSelectedProjectTab(targetProjectId);
       }
       selectWorkbookEntry(newlyLoaded[0]);
       const firstSheetsCount = newlyLoaded[0].workbook.sheets.length;
+      const syncedCount = newlyLoaded.filter((n) => n.isCloudSynced).length;
       showToast(
         newlyLoaded.length === 1
-          ? `تم قراءة وتحليل ${firstSheetsCount} ورقة داخلية من «${newlyLoaded[0].fileName}» لموقع «${targetProjectName}».`
-          : `تم رفع وتحليل ${newlyLoaded.length} ملفات Excel لموقع «${targetProjectName}».`
+          ? syncedCount > 0
+            ? `تم رفع ومزامنة «${newlyLoaded[0].fileName}» (${firstSheetsCount} ورقة) لموقع «${targetProjectName}» — يظهر تلقائياً للأدمن.`
+            : `تم قراءة وتحليل ${firstSheetsCount} ورقة داخلية من «${newlyLoaded[0].fileName}» لموقع «${targetProjectName}».`
+          : syncedCount > 0
+            ? `تم رفع ومزامنة ${newlyLoaded.length} ملفات Excel لموقع «${targetProjectName}» سحابياً تلقائياً.`
+            : `تم رفع وتحليل ${newlyLoaded.length} ملفات Excel لموقع «${targetProjectName}».`
       );
     }
 
@@ -810,8 +1062,27 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       }
 
       const nowMs = Date.now();
+      const entryId = 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+      const targetProjectName =
+        sortedProjects.find((p) => p.id === source.projectId)?.name || 'المشروع';
+
+      let cloudSynced = false;
+      try {
+        await dataService.uploadSharedExcelLog({
+          id: entryId,
+          projectId: source.projectId,
+          projectName: targetProjectName,
+          fileName: source.fileName,
+          buffer,
+          sourceLabel: source.sourceLabel
+        });
+        cloudSynced = true;
+      } catch {
+        cloudSynced = false;
+      }
+
       const entry: UploadedExcelWorkbook = {
-        id: 'xl-' + nowMs.toString(36) + '-' + Math.random().toString(36).slice(2, 6),
+        id: entryId,
         projectId: source.projectId,
         fileName: source.fileName,
         fileSize: source.fileSize || buffer.byteLength,
@@ -823,6 +1094,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         buffer,
         sourceLabel: source.sourceLabel,
         remoteKey: source.key,
+        uploadedBy: currentUser.id,
+        uploaderName: currentUser.displayName,
+        isCloudSynced: cloudSynced,
         workbook: parsed,
         sheetOverrides: {},
         excludedSheetIndices: []
@@ -842,7 +1116,19 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }
   };
 
-  const handleRemoveUploadedFile = (id: string) => {
+  const handleRemoveUploadedFile = async (id: string) => {
+    const target = uploadedFilesRef.current.find((item) => item.id === id);
+    if (target?.isCloudSynced) {
+      try {
+        await dataService.deleteSharedExcelLog(id);
+      } catch (err) {
+        setUploadError(
+          err instanceof Error ? err.message : 'تعذر حذف شيت اللوج من قاعدة البيانات.'
+        );
+        return;
+      }
+    }
+
     void deleteStoredExcelFile(id);
     setUploadedFiles((prev) => {
       const removed = prev.find((item) => item.id === id);
@@ -1408,8 +1694,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({
             <FileSpreadsheet className="w-5 h-5" />
           </div>
           <div className="min-w-0">
-            <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-snug">
-              شيتات اللوج حسب المواقع والمشاريع (Excel Logs)
+            <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-snug flex flex-wrap items-center gap-2">
+              <span>شيتات اللوج حسب المواقع والمشاريع (Excel Logs)</span>
+              {isSyncingCloud && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>جاري مزامنة الشيتات...</span>
+                </span>
+              )}
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
               {isAdmin
@@ -2310,11 +2602,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               <div className="flex items-center gap-2 overflow-x-auto pb-1">
                 {projectUploadedFiles.map((item) => {
                   const isSelected = activeEntry?.id === item.id;
+                  const canDeleteItem =
+                    isAdmin || !item.isCloudSynced || item.uploadedBy === currentUser.id;
                   return (
                     <div
                       key={item.id}
                       onClick={() => selectWorkbookEntry(item)}
-                      className={`px-3 py-2 rounded-xl border transition-colors flex items-center gap-2.5 cursor-pointer shrink-0 max-w-[280px] ${
+                      className={`px-3 py-2 rounded-xl border transition-colors flex items-center gap-2.5 cursor-pointer shrink-0 max-w-[300px] ${
                         isSelected
                           ? 'bg-blue-50/90 dark:bg-blue-950/50 border-blue-500 dark:border-blue-600'
                           : 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'
@@ -2338,18 +2632,25 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                           {item.workbook.sheets.length - item.excludedSheetIndices.length} ورقة ·{' '}
                           {formatFileSize(item.fileSize)}
                         </div>
+                        {item.uploaderName && (
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                            بواسطة: {item.uploaderName}
+                          </div>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRemoveUploadedFile(item.id);
-                        }}
-                        title="إزالة الملف"
-                        className="p-1 rounded-md text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer shrink-0 transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {canDeleteItem && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleRemoveUploadedFile(item.id);
+                          }}
+                          title="إزالة الملف"
+                          className="p-1 rounded-md text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer shrink-0 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   );
                 })}

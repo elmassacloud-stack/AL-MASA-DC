@@ -37,7 +37,9 @@ import {
   AppBrandingSettings,
   ActivityLogEntry,
   ActivityEntityType,
-  ActivityActionType
+  ActivityActionType,
+  SharedExcelLogFile,
+  SharedExcelLogChunk
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -93,6 +95,8 @@ import {
 } from '../utils/accessControl';
 import {
   base64ToBlob,
+  base64ToArrayBuffer,
+  uint8ArrayToBase64,
   splitBase64IntoChunks,
   isExcelFileName,
   getExcelMimeType,
@@ -121,6 +125,7 @@ const STORAGE_KEYS = {
   NOTIFICATIONS: 'dc_notifications_v2',
   PERSONAL_NOTES: 'dc_personal_notes_v2',
   ACTIVITY_LOGS: 'dc_activity_logs_v2',
+  EXCEL_LOGS: 'dc_shared_excel_logs_v2',
   CURRENT_USER: 'dc_active_user_v2',
   REPORT_DRAFT_PREFIX: 'dc_report_draft_',
   STALLED_DAYS_LIMIT: 'dc_stalled_days_limit',
@@ -342,6 +347,7 @@ class DataService {
     localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
     localStorage.removeItem(STORAGE_KEYS.PERSONAL_NOTES);
     localStorage.removeItem(STORAGE_KEYS.ACTIVITY_LOGS);
+    localStorage.removeItem(STORAGE_KEYS.EXCEL_LOGS);
     this.notify();
   }
 
@@ -927,6 +933,39 @@ class DataService {
       );
     } else {
       localStorage.removeItem(STORAGE_KEYS.ACTIVITY_LOGS);
+    }
+
+    // 12. Cloud-Synced Excel Logs (Admins see all projects; Site users see their authorized projects)
+    if (allProjAccess) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, 'excelLogs'),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...(d.data() as SharedExcelLogFile), id: d.id }))
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(list));
+            this.notify();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'excelLogs')
+        )
+      );
+    } else if (assigned.length > 0) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          query(collection(db, 'excelLogs'), where('projectId', 'in', assigned.slice(0, 30))),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...(d.data() as SharedExcelLogFile), id: d.id }))
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+            localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(list));
+            this.notify();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'excelLogs')
+        )
+      );
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.EXCEL_LOGS);
     }
   }
 
@@ -4872,6 +4911,219 @@ class DataService {
         // Audit log persistence failure must not block primary report/task workflows
       }
     });
+  }
+
+  // --- Cloud-Synced Excel Logs (Shared across Site Engineers & Admins) ---
+  public getSharedExcelLogs(): SharedExcelLogFile[] {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.EXCEL_LOGS);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as SharedExcelLogFile[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  public async uploadSharedExcelLog(payload: {
+    id: string;
+    projectId: string;
+    projectName: string;
+    fileName: string;
+    buffer: ArrayBuffer;
+    sourceLabel?: string;
+  }): Promise<SharedExcelLogFile> {
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser) {
+      throw new Error('يجب تسجيل الدخول أولاً لرفع وحفظ شيتات اللوج سحابياً.');
+    }
+
+    const totalBytes = payload.buffer.byteLength;
+    if (totalBytes <= 0 || totalBytes > MAX_PDF_FILE_SIZE_BYTES) {
+      throw new Error('حجم ملف Excel يتجاوز الحد الأقصى المسموح للمزامنة السحابية (25 ميجابايت).');
+    }
+
+    const base64 = uint8ArrayToBase64(new Uint8Array(payload.buffer));
+    const chunks = splitBase64IntoChunks(base64, PDF_CHUNK_SIZE_CHARS);
+    if (chunks.length === 0 || chunks.length > 60) {
+      throw new Error('تعذر تجهيز ملف Excel للمزامنة السحابية بسبب حجمه.');
+    }
+
+    const activeUser = this.getCurrentUser();
+    const isAdminActor =
+      activeUser?.role === 'admin' || isSuperAdminEmail(firebaseUser.email || activeUser?.email);
+    const uploaderRole: UserRole = isAdminActor ? 'admin' : 'site';
+    const nowIso = new Date().toISOString();
+
+    const safeId = payload.id
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 128);
+    const safeProjectId = payload.projectId
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .slice(0, 128);
+
+    const record: SharedExcelLogFile = stripUndefined({
+      id: safeId,
+      projectId: safeProjectId,
+      projectName: (payload.projectName || 'مشروع').trim().slice(0, 200) || 'مشروع',
+      fileName: (payload.fileName || 'log.xlsx').trim().slice(0, 260) || 'log.xlsx',
+      fileSizeBytes: Math.round(totalBytes),
+      chunkCount: chunks.length,
+      uploadedBy: firebaseUser.uid.slice(0, 128),
+      uploaderName:
+        (activeUser?.displayName || firebaseUser.displayName || firebaseUser.email || 'مستخدم')
+          .trim()
+          .slice(0, 150) || 'مستخدم',
+      uploaderRole,
+      sourceLabel: payload.sourceLabel ? payload.sourceLabel.trim().slice(0, 200) : undefined,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    });
+
+    try {
+      await setDoc(doc(db, 'excelLogs', safeId), record);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `excelLogs/${safeId}`);
+    }
+
+    try {
+      const BATCH_CONCURRENCY = 5;
+      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
+        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
+        const batchPromises: Promise<void>[] = [];
+        for (let idx = start; idx < end; idx++) {
+          const chunkDoc: SharedExcelLogChunk = {
+            index: idx,
+            data: chunks[idx]
+          };
+          batchPromises.push(
+            setDoc(doc(db, 'excelLogs', safeId, 'chunks', `chunk-${idx}`), chunkDoc)
+          );
+        }
+        await Promise.all(batchPromises);
+      }
+    } catch (error) {
+      // Roll back partial upload cleanly
+      await this.deleteSharedExcelLog(safeId).catch(() =>
+        deleteDoc(doc(db, 'excelLogs', safeId)).catch(() => undefined)
+      );
+      handleFirestoreError(error, OperationType.CREATE, `excelLogs/${safeId}/chunks`);
+    }
+
+    const currentList = this.getSharedExcelLogs();
+    const nextList = [record, ...currentList.filter((item) => item.id !== record.id)];
+    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(nextList));
+    this.notify();
+    return record;
+  }
+
+  public async fetchSharedExcelLogBuffer(log: SharedExcelLogFile): Promise<ArrayBuffer> {
+    let chunkDocs: SharedExcelLogChunk[] = [];
+    try {
+      const snap = await getDocs(collection(db, 'excelLogs', log.id, 'chunks'));
+      chunkDocs = snap.docs.map((d) => d.data() as SharedExcelLogChunk);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, `excelLogs/${log.id}/chunks`);
+    }
+
+    if (chunkDocs.length === 0) {
+      throw new Error(`لم يتم العثور على محتوى ملف اللوج «${log.fileName}» في قاعدة البيانات.`);
+    }
+
+    chunkDocs.sort((a, b) => a.index - b.index);
+    const fullBase64 = chunkDocs.map((c) => c.data).join('');
+    return base64ToArrayBuffer(fullBase64);
+  }
+
+  public async updateSharedExcelLogMeta(
+    logId: string,
+    sheetOverrides: Record<number, unknown>,
+    excludedSheetIndices: number[]
+  ): Promise<boolean> {
+    const logs = this.getSharedExcelLogs();
+    const target = logs.find((item) => item.id === logId);
+    if (!target) return false;
+
+    const activeUser = this.getCurrentUser();
+    const uid = auth.currentUser?.uid;
+    const isAdminActor =
+      activeUser?.role === 'admin' || isSuperAdminEmail(auth.currentUser?.email || activeUser?.email);
+    if (!isAdminActor && target.uploadedBy !== uid) {
+      return false;
+    }
+
+    const serializedOverrides = JSON.stringify(sheetOverrides || {});
+    if (serializedOverrides.length > 30000) return false;
+    const safeExcluded = (excludedSheetIndices || [])
+      .filter((n) => Number.isInteger(n) && n >= 0)
+      .slice(0, 200);
+    const updatedAt = new Date().toISOString();
+
+    try {
+      await updateDoc(doc(db, 'excelLogs', logId), {
+        sheetOverridesJson: serializedOverrides,
+        excludedSheetIndices: safeExcluded,
+        updatedAt
+      });
+    } catch {
+      return false;
+    }
+
+    const updatedLogs = logs.map((item) =>
+      item.id === logId
+        ? {
+            ...item,
+            sheetOverridesJson: serializedOverrides,
+            excludedSheetIndices: safeExcluded,
+            updatedAt
+          }
+        : item
+    );
+    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(updatedLogs));
+    this.notify();
+    return true;
+  }
+
+  public async deleteSharedExcelLog(logId: string): Promise<boolean> {
+    const logs = this.getSharedExcelLogs();
+    const target = logs.find((item) => item.id === logId);
+    const activeUser = this.getCurrentUser();
+    const uid = auth.currentUser?.uid;
+    const isAdminActor =
+      activeUser?.role === 'admin' || isSuperAdminEmail(auth.currentUser?.email || activeUser?.email);
+
+    if (target && !isAdminActor && target.uploadedBy !== uid) {
+      throw new Error('يمكن للأدمن أو صاحب الملف فقط حذف شيت اللوج من قاعدة البيانات.');
+    }
+
+    try {
+      const snap = await getDocs(collection(db, 'excelLogs', logId, 'chunks'));
+      if (!snap.empty) {
+        const docs = snap.docs;
+        for (let i = 0; i < docs.length; i += 400) {
+          const batch = writeBatch(db);
+          docs.slice(i, i + 400).forEach((chunkDoc) => {
+            batch.delete(doc(db, 'excelLogs', logId, 'chunks', chunkDoc.id));
+          });
+          await batch.commit();
+        }
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `excelLogs/${logId}/chunks`);
+    }
+
+    try {
+      await deleteDoc(doc(db, 'excelLogs', logId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `excelLogs/${logId}`);
+    }
+
+    const remaining = logs.filter((item) => item.id !== logId);
+    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(remaining));
+    this.notify();
+    return true;
   }
 
   // Reset sample project/report data

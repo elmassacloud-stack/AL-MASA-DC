@@ -11,6 +11,9 @@ export interface StoredProjectExcelFile {
   sheetOverrides: Record<number, SheetOverrideConfig>;
   excludedSheetIndices: number[];
   sourceLabel?: string;
+  uploadedBy?: string;
+  uploaderName?: string;
+  isCloudSynced?: boolean;
 }
 
 const DB_NAME = 'elmassa_excel_logs_store_v1';
