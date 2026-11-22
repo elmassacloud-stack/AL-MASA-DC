@@ -61,9 +61,13 @@ import { getTodayDateStr } from './seedData';
 export default function App() {
   // Theme state
   const [darkMode, setDarkMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem('dc_theme');
-    if (saved) return saved === 'dark';
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    try {
+      const saved = localStorage.getItem('dc_theme');
+      if (saved) return saved === 'dark';
+    } catch {
+      // ignore storage errors
+    }
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
   });
 
   // Firebase Auth Gate State (No dashboard access until authenticated & authorized)
@@ -124,10 +128,18 @@ export default function App() {
   useEffect(() => {
     if (darkMode) {
       document.documentElement.classList.add('dark');
-      localStorage.setItem('dc_theme', 'dark');
+      try {
+        localStorage.setItem('dc_theme', 'dark');
+      } catch {
+        // ignore storage errors
+      }
     } else {
       document.documentElement.classList.remove('dark');
-      localStorage.setItem('dc_theme', 'light');
+      try {
+        localStorage.setItem('dc_theme', 'light');
+      } catch {
+        // ignore storage errors
+      }
     }
   }, [darkMode]);
 
@@ -205,6 +217,10 @@ export default function App() {
           // Session was revoked (disabled or deleted in real-time)
           signOutUser().catch(() => undefined);
           setAuthError('تم تحديث حالة حسابك أو إيقافه من قبل مسؤول النظام.');
+          return null;
+        }
+        if (prev && activeUser && JSON.stringify(prev) === JSON.stringify(activeUser)) {
+          return prev;
         }
         return activeUser;
       });

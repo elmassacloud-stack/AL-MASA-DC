@@ -571,46 +571,57 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         }
       }
 
-      if (!active) return;
-      if (downloadedEntries.length > 0) {
-        setUploadedFiles((prev) => {
-          const prevIds = new Set(prev.map((p) => p.id));
-          const uniqueNew = downloadedEntries.filter((d) => !prevIds.has(d.id));
-          if (uniqueNew.length === 0) return prev;
-          return [...uniqueNew, ...prev].sort((a, b) => (b.savedAtMs || 0) - (a.savedAtMs || 0));
-        });
+      try {
+        if (!active) return;
+        if (downloadedEntries.length > 0) {
+          setUploadedFiles((prev) => {
+            const prevIds = new Set(prev.map((p) => p.id));
+            const uniqueNew = downloadedEntries.filter((d) => !prevIds.has(d.id));
+            if (uniqueNew.length === 0) return prev;
+            return [...uniqueNew, ...prev].sort((a, b) => (b.savedAtMs || 0) - (a.savedAtMs || 0));
+          });
 
-        setActiveFileByProject((prev) => {
-          const next = { ...prev };
-          for (const entry of downloadedEntries) {
-            if (!next[entry.projectId]) {
-              next[entry.projectId] = entry.id;
+          setActiveFileByProject((prev) => {
+            const next = { ...prev };
+            for (const entry of downloadedEntries) {
+              if (!next[entry.projectId]) {
+                next[entry.projectId] = entry.id;
+              }
             }
-          }
-          return next;
-        });
+            return next;
+          });
 
-        setSelectedProjectTab((currentTab) => {
-          if (currentTab !== 'all') {
-            const match = downloadedEntries.find((d) => d.projectId === currentTab);
-            if (match && !uploadedFilesRef.current.some((f) => f.projectId === currentTab)) {
-              setActiveFileId(match.id);
-              const visibleIndices = match.workbook.sheets
-                .map((_, i) => i)
-                .filter((i) => !match.excludedSheetIndices.includes(i));
-              setActiveView(visibleIndices.length === 1 ? visibleIndices[0] : 'overview');
+          setSelectedProjectTab((currentTab) => {
+            if (currentTab !== 'all') {
+              const match = downloadedEntries.find((d) => d.projectId === currentTab);
+              if (match && !uploadedFilesRef.current.some((f) => f.projectId === currentTab)) {
+                setActiveFileId(match.id);
+                const visibleIndices = match.workbook.sheets
+                  .map((_, i) => i)
+                  .filter((i) => !match.excludedSheetIndices.includes(i));
+                setActiveView(visibleIndices.length === 1 ? visibleIndices[0] : 'overview');
+              }
             }
-          }
-          return currentTab;
-        });
+            return currentTab;
+          });
+        }
+      } finally {
+        if (active) setIsSyncingCloud(false);
       }
-      setIsSyncingCloud(false);
     })();
 
     return () => {
       active = false;
+      setIsSyncingCloud(false);
     };
-  }, [sharedExcelLogs, isHydratingSaved, currentUser]);
+  }, [
+    sharedExcelLogs,
+    isHydratingSaved,
+    currentUser.id,
+    currentUser.role,
+    currentUser.allProjects,
+    (currentUser.assignedProjects || []).join(',')
+  ]);
 
   const persistEntryToStorage = (entry: UploadedExcelWorkbook) => {
     if (entry.buffer) {

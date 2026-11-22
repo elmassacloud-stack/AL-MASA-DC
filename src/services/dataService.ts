@@ -113,6 +113,43 @@ import {
   normalizeHexColor
 } from '../utils/brandTheme';
 
+const memoryStorageFallback = new Map<string, string>();
+const safeStorage = {
+  getItem(key: string): string | null {
+    if (memoryStorageFallback.has(key)) {
+      return memoryStorageFallback.get(key) ?? null;
+    }
+    try {
+      return typeof window !== 'undefined' && window.localStorage
+        ? window.localStorage.getItem(key)
+        : null;
+    } catch {
+      return null;
+    }
+  },
+  setItem(key: string, value: string): void {
+    memoryStorageFallback.set(key, value);
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem(key, value);
+      }
+    } catch {
+      // Keep working seamlessly in memory when browser storage quota is exceeded or blocked
+    }
+  },
+  removeItem(key: string): void {
+    memoryStorageFallback.delete(key);
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.removeItem(key);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+};
+const localStorage = safeStorage;
+
 const STORAGE_KEYS = {
   PROJECTS: 'dc_projects_v2',
   REPORTS: 'dc_reports_v2',
