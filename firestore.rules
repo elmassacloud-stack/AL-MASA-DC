@@ -532,6 +532,23 @@ service cloud.firestore {
       return isSuperAdmin() || (userDocExists() && userDataCanCreateNotification(currentUserData(), inc));
     }
 
+    function userDataCanCreateActivityLog(u, inc) {
+      return (
+        userDataIsAdmin(u)
+        && inc.actorRole == 'admin'
+      ) || (
+        userDataIsActive(u)
+        && inc.actorRole == 'site'
+        && inc.action in ['report_created', 'report_updated', 'task_completed']
+        && userDataHasProjectAccess(u, inc.projectId)
+      );
+    }
+
+    function canCreateActivityLog(inc) {
+      return (isSuperAdmin() && inc.actorRole == 'admin')
+        || (userDocExists() && userDataCanCreateActivityLog(currentUserData(), inc));
+    }
+
     // Schema validation blueprints (pure, 0 DB calls)
     function isValidNotificationPreferences(prefs) {
       return prefs is map
@@ -807,6 +824,27 @@ service cloud.firestore {
         && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['id', 'entityType', 'action', 'entityId', 'entityTitle', 'projectId', 'projectName', 'actorId', 'actorName', 'actorRole', 'summary', 'createdAt'])
+        && data.keys().hasOnly(['id', 'entityType', 'action', 'entityId', 'entityTitle', 'projectId', 'projectName', 'actorId', 'actorName', 'actorEmail', 'actorRole', 'summary', 'details', 'createdAt'])
+        && isValidId(data.id)
+        && (
+          (data.entityType == 'report' && data.action in ['report_created', 'report_updated', 'report_reviewed']) ||
+          (data.entityType == 'task' && data.action in ['task_created', 'task_updated', 'task_completed', 'task_deleted'])
+        )
+        && isValidId(data.entityId)
+        && data.entityTitle is string && data.entityTitle.size() >= 1 && data.entityTitle.size() <= 300
+        && isValidId(data.projectId)
+        && data.projectName is string && data.projectName.size() >= 1 && data.projectName.size() <= 200
+        && data.actorId is string && data.actorId.size() >= 1 && data.actorId.size() <= 128 && data.actorId == request.auth.uid
+        && data.actorName is string && data.actorName.size() >= 1 && data.actorName.size() <= 150
+        && (!('actorEmail' in data) || data.actorEmail == null || (data.actorEmail is string && data.actorEmail.size() <= 200))
+        && (data.actorRole == 'admin' || data.actorRole == 'site')
+        && data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 600
+        && (!('details' in data) || data.details == null || (data.details is string && data.details.size() <= 2000))
+        && data.createdAt is string && data.createdAt.size() <= 64;
+    }
+
     // Users collection (PII isolated to owner or Admin)
     match /users/{userId} {
       allow get: if isValidId(userId) && ((isSignedIn() && request.auth.uid == userId) || isAdmin());
@@ -1057,6 +1095,19 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().diff(existing()).affectedKeys().hasOnly(['brandColor', 'updatedBy', 'updatedByName', 'updatedAt'])
         && isAdmin();
+      allow delete: if false;
+    }
+
+    // Immutable System Activity Log (Reports & Tasks audit trail, Admin-readable only)
+    match /activityLogs/{logId} {
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(logId)
+        && isSignedIn()
+        && incoming().id == logId
+        && isValidActivityLog(incoming())
+        && canCreateActivityLog(incoming());
+      allow update: if false;
       allow delete: if false;
     }
   }

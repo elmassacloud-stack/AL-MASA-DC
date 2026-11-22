@@ -72,6 +72,7 @@ import {
   saveStoredExcelFile,
   deleteStoredExcelFile
 } from '../../utils/excelLogsStorage';
+import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 
 interface Props {
   currentUser: UserProfile;
@@ -259,15 +260,18 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadTargetProjectIdRef = useRef<string | null>(null);
 
-  // Projects ordered: active first, then completed
+  const isAdmin = currentUser.role === 'admin';
+
+  // Projects strictly scoped to the user's authorized projects (active first, then completed)
   const sortedProjects = useMemo(() => {
-    return [...projects].sort((a, b) => {
+    const accessible = getAccessibleProjects(currentUser, projects);
+    return [...accessible].sort((a, b) => {
       if (a.status !== b.status) return a.status === 'active' ? -1 : 1;
       return a.name.localeCompare(b.name, 'ar');
     });
-  }, [projects]);
+  }, [currentUser, projects]);
 
-  // Selected project tab: 'all' (all sites overview) or a specific Project ID
+  // Selected project tab: 'all' (accessible sites overview) or a specific authorized Project ID
   const [selectedProjectTab, setSelectedProjectTab] = useState<string>(() =>
     sortedProjects.length > 0 ? sortedProjects[0].id : 'all'
   );
@@ -321,10 +325,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }, 1800);
   };
 
-  // Ensure selectedProjectTab stays valid if projects load or change dynamically
+  // Ensure selectedProjectTab stays valid if projects or user permissions change dynamically
   useEffect(() => {
     if (sortedProjects.length === 0) {
       if (selectedProjectTab !== 'all') setSelectedProjectTab('all');
+      return;
+    }
+    if (!isAdmin && sortedProjects.length === 1 && selectedProjectTab === 'all') {
+      setSelectedProjectTab(sortedProjects[0].id);
       return;
     }
     if (
@@ -333,7 +341,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     ) {
       setSelectedProjectTab(sortedProjects[0].id);
     }
-  }, [sortedProjects, selectedProjectTab]);
+  }, [sortedProjects, selectedProjectTab, isAdmin]);
 
   // Hydrate previously uploaded project Excel workbooks from IndexedDB on mount
   useEffect(() => {
@@ -345,6 +353,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
 
         const restored: UploadedExcelWorkbook[] = [];
         for (const rec of stored) {
+          if (!canAccessProject(currentUser, rec.projectId)) continue;
           try {
             const parsed = parseDriveExcelWorkbook(rec.buffer, rec.fileName);
             if (parsed.sheets.length === 0) continue;
@@ -464,24 +473,34 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   };
 
   const triggerUploadForProject = (projectId?: string) => {
+    if (sortedProjects.length === 0) {
+      setUploadError('لا توجد مشاريع مصرح لك بالوصول إليها حالياً لرفع شيتات اللوج.');
+      return;
+    }
     const resolvedTarget =
       projectId ||
       (selectedProjectTab !== 'all'
         ? selectedProjectTab
-        : sortedProjects[0]?.id || 'general');
+        : sortedProjects[0]?.id || '');
+    if (!resolvedTarget || !canAccessProject(currentUser, resolvedTarget)) {
+      setUploadError('ليس لديك صلاحية رفع شيتات على هذا المشروع.');
+      return;
+    }
     uploadTargetProjectIdRef.current = resolvedTarget;
     fileInputRef.current?.click();
   };
 
-  // Discover Excel files already uploaded on the website (Deliverables & Daily Report Attachments) per project
+  // Discover Excel files already uploaded on the website (Deliverables & Daily Report Attachments) per authorized project
   const remoteExcelSourcesByProject = useMemo(() => {
     const map: Record<string, RemoteProjectExcelSource[]> = {};
     const addSource = (src: RemoteProjectExcelSource) => {
+      if (!canAccessProject(currentUser, src.projectId)) return;
       if (!map[src.projectId]) map[src.projectId] = [];
       map[src.projectId].push(src);
     };
 
     for (const deliv of siteDeliverables) {
+      if (!canAccessProject(currentUser, deliv.projectId)) continue;
       if (deliv.fileFormat === 'excel' || isExcelFileName(deliv.fileName)) {
         addSource({
           key: `deliv:${deliv.id}`,
@@ -498,6 +517,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }
 
     for (const rep of reports) {
+      if (!canAccessProject(currentUser, rep.projectId)) continue;
       if (!rep.attachments || rep.attachments.length === 0) continue;
       for (let i = 0; i < rep.attachments.length; i++) {
         const att = rep.attachments[i];
@@ -518,7 +538,12 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }
 
     return map;
-  }, [siteDeliverables, reports]);
+  }, [siteDeliverables, reports, currentUser]);
+
+  // Uploaded files strictly restricted to projects the current user can access
+  const accessibleUploadedFiles = useMemo(() => {
+    return uploadedFiles.filter((f) => canAccessProject(currentUser, f.projectId));
+  }, [uploadedFiles, currentUser]);
 
   const activeProject = useMemo(
     () =>
@@ -528,11 +553,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     [sortedProjects, selectedProjectTab]
   );
 
-  // Files belonging ONLY to the currently selected project tab
+  // Files belonging ONLY to the currently selected project tab (within accessible scope)
   const projectUploadedFiles = useMemo(() => {
-    if (selectedProjectTab === 'all') return uploadedFiles;
-    return uploadedFiles.filter((f) => f.projectId === selectedProjectTab);
-  }, [uploadedFiles, selectedProjectTab]);
+    if (selectedProjectTab === 'all') return accessibleUploadedFiles;
+    return accessibleUploadedFiles.filter((f) => f.projectId === selectedProjectTab);
+  }, [accessibleUploadedFiles, selectedProjectTab]);
 
   // Visible projects in tab bar (filtered by optional quick search when many projects exist)
   const visibleProjectTabs = useMemo(() => {
@@ -548,19 +573,19 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   // Files count map per project
   const fileCountByProject = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const f of uploadedFiles) {
+    for (const f of accessibleUploadedFiles) {
       counts[f.projectId] = (counts[f.projectId] || 0) + 1;
     }
     return counts;
-  }, [uploadedFiles]);
+  }, [accessibleUploadedFiles]);
 
   const dateFilterActive = useMemo(() => isDateFilterActive(dateFilter), [dateFilter]);
   const activeDateFilterLabel = useMemo(() => describeDateFilter(dateFilter), [dateFilter]);
 
-  // Unfiltered sheets across all uploaded project workbooks for discovering available years/dates
+  // Unfiltered sheets across all accessible uploaded project workbooks for discovering available years/dates
   const allProjectsUnfilteredSheets = useMemo(() => {
     const sheets: SheetAnalytics[] = [];
-    for (const file of uploadedFiles) {
+    for (const file of accessibleUploadedFiles) {
       const analysis = analyzeWorkbook(
         file.workbook,
         file.sheetOverrides,
@@ -569,7 +594,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       sheets.push(...analysis.sheets);
     }
     return sheets;
-  }, [uploadedFiles]);
+  }, [accessibleUploadedFiles]);
 
   // Date metadata across all projects (available years, earliest/latest date, reply dates)
   const allProjectsDateMeta = useMemo(() => {
@@ -581,7 +606,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     const activeFilterArg = dateFilterActive ? dateFilter : undefined;
 
     const perProject = sortedProjects.map((project) => {
-      const files = uploadedFiles.filter((f) => f.projectId === project.id);
+      const files = accessibleUploadedFiles.filter((f) => f.projectId === project.id);
       const remoteCount = (remoteExcelSourcesByProject[project.id] || []).length;
       let sheetsCount = 0;
       let totalRows = 0;
@@ -639,7 +664,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     const totals = {
       projectsCount: sortedProjects.length,
       projectsWithLogs: perProject.filter((p) => p.filesCount > 0).length,
-      filesCount: uploadedFiles.length,
+      filesCount: accessibleUploadedFiles.length,
       sheetsCount: perProject.reduce((acc, p) => acc + p.sheetsCount, 0),
       totalRows: perProject.reduce((acc, p) => acc + p.totalRows, 0),
       approvedCount: perProject.reduce((acc, p) => acc + p.approvedCount, 0),
@@ -648,7 +673,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     };
 
     return { perProject, chartData, totals };
-  }, [sortedProjects, uploadedFiles, remoteExcelSourcesByProject, dateFilter, dateFilterActive]);
+  }, [sortedProjects, accessibleUploadedFiles, remoteExcelSourcesByProject, dateFilter, dateFilterActive]);
 
   const handleLocalFilesSelected = async (fileList: FileList | File[], explicitProjectId?: string) => {
     const files = Array.from(fileList);
@@ -659,8 +684,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       uploadTargetProjectIdRef.current ||
       (selectedProjectTab !== 'all'
         ? selectedProjectTab
-        : sortedProjects[0]?.id || 'general');
+        : sortedProjects[0]?.id || '');
     uploadTargetProjectIdRef.current = null;
+
+    if (!targetProjectId || !canAccessProject(currentUser, targetProjectId)) {
+      setUploadError('ليس لديك صلاحية رفع شيتات على هذا المشروع. يرجى اختيار أحد مشاريعك المصرح بها.');
+      return;
+    }
 
     const targetProjectName =
       sortedProjects.find((p) => p.id === targetProjectId)?.name || 'المشروع';
@@ -1332,8 +1362,23 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     );
   };
 
-  if (currentUser.role !== 'admin') {
-    return null;
+  if (!isAdmin && sortedProjects.length === 0) {
+    return (
+      <div className="max-w-3xl mx-auto py-12">
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-8 text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
+            <FileSpreadsheet className="w-6 h-6" />
+          </div>
+          <h2 className="text-base font-bold text-slate-900 dark:text-white">
+            لا توجد مشاريع مصرح لك بالوصول إليها حالياً
+          </h2>
+          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed max-w-md mx-auto">
+            تظهر في تبويب <strong className="font-mono">logs</strong> المشاريع المسندة لحسابك فقط.
+            يرجى التواصل مع مسؤول النظام لمنحك صلاحية الوصول للمشروع المطلوب.
+          </p>
+        </div>
+      </div>
+    );
   }
 
   const activeProjectRemoteSources = activeProject
@@ -1367,15 +1412,16 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               شيتات اللوج حسب المواقع والمشاريع (Excel Logs)
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 mt-0.5 leading-relaxed">
-              تبويب داخلي مستقل لكل موقع مسجل على النظام لقراءة أوراق اللوج وتحليل آخر كود وحالات
-              التقديمات على آخر Revision فقط
+              {isAdmin
+                ? 'تبويب داخلي مستقل لكل موقع مسجل على النظام لقراءة أوراق اللوج وتحليل آخر كود وحالات التقديمات على آخر Revision فقط'
+                : 'تظهر هنا المشاريع المصرح لك بالوصول إليها فقط لرفع وقراءة شيتات اللوج وتحليل التقديمات على آخر Revision'}
             </p>
           </div>
         </div>
 
         <button
           type="button"
-          disabled={isParsing}
+          disabled={isParsing || sortedProjects.length === 0}
           onClick={() => triggerUploadForProject()}
           className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0 whitespace-nowrap touch-manipulation"
         >
@@ -1389,13 +1435,17 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       </div>
 
       {/* =====================================================================
-          INTERNAL PROJECTS / SITES TABS BAR (One Tab Per Website Project)
+          INTERNAL PROJECTS / SITES TABS BAR (Scoped to User's Authorized Projects)
           ===================================================================== */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-800 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
             <Building2 className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />
-            <span>مواقع ومشاريع النظام ({sortedProjects.length})</span>
+            <span>
+              {isAdmin
+                ? `مواقع ومشاريع النظام (${sortedProjects.length})`
+                : `المشاريع المصرح لك بها (${sortedProjects.length})`}
+            </span>
             {activeProject && (
               <>
                 <span className="text-slate-300 dark:text-slate-700" aria-hidden="true">
@@ -1426,31 +1476,35 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         </div>
 
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 -mx-0.5 px-0.5">
-          {/* All Projects Summary Tab */}
-          <button
-            type="button"
-            onClick={() => selectProjectTab('all')}
-            className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
-              selectedProjectTab === 'all'
-                ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white'
-                : 'bg-slate-100/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent hover:bg-slate-200/80 dark:hover:bg-slate-700'
-            }`}
-          >
-            <LayoutGrid className="w-3.5 h-3.5 shrink-0" />
-            <span>كل المشاريع</span>
-            <span
-              className={`font-mono tabular-nums text-[11px] ${
-                selectedProjectTab === 'all'
-                  ? 'text-slate-300 dark:text-slate-600'
-                  : 'text-slate-400 dark:text-slate-500'
-              }`}
-            >
-              ({sortedProjects.length})
-            </span>
-          </button>
+          {/* All Accessible Projects Summary Tab (shown for Admins or Site Users with 2+ assigned projects) */}
+          {(isAdmin || sortedProjects.length > 1) && (
+            <>
+              <button
+                type="button"
+                onClick={() => selectProjectTab('all')}
+                className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
+                  selectedProjectTab === 'all'
+                    ? 'bg-slate-900 dark:bg-white text-white dark:text-slate-900 border-slate-900 dark:border-white'
+                    : 'bg-slate-100/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-transparent hover:bg-slate-200/80 dark:hover:bg-slate-700'
+                }`}
+              >
+                <LayoutGrid className="w-3.5 h-3.5 shrink-0" />
+                <span>{isAdmin ? 'كل المشاريع' : 'كل مشاريعي'}</span>
+                <span
+                  className={`font-mono tabular-nums text-[11px] ${
+                    selectedProjectTab === 'all'
+                      ? 'text-slate-300 dark:text-slate-600'
+                      : 'text-slate-400 dark:text-slate-500'
+                  }`}
+                >
+                  ({sortedProjects.length})
+                </span>
+              </button>
 
-          {sortedProjects.length > 0 && (
-            <span className="h-5 w-px bg-slate-200 dark:bg-slate-700 shrink-0 mx-0.5" />
+              {sortedProjects.length > 0 && (
+                <span className="h-5 w-px bg-slate-200 dark:bg-slate-700 shrink-0 mx-0.5" />
+              )}
+            </>
           )}
 
           {/* Dedicated Internal Tab for Every Project Registered on the Website */}
@@ -1972,7 +2026,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               </div>
             </div>
           ) : (
-            uploadedFiles.length > 0 &&
+            accessibleUploadedFiles.length > 0 &&
             dateFilterActive && (
               <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2.5">
                 <p className="text-xs font-bold text-slate-600 dark:text-slate-300">

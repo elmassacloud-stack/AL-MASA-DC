@@ -15,6 +15,7 @@ import {
   NotebookPen,
   FileSpreadsheet,
   UserCircle2,
+  History,
   X
 } from 'lucide-react';
 import { UserRole } from '../../types';
@@ -63,6 +64,7 @@ export const Navigation: React.FC<Props> = ({
       : []),
     { id: 'report-issue', label: 'إبلاغ عن عائق', mobileLabel: 'عائق', icon: AlertTriangle },
     { id: 'my-submissions', label: 'تقديماتي', mobileLabel: 'تقديماتي', icon: ClipboardList },
+    { id: 'excel-logs', label: 'logs', mobileLabel: 'logs', icon: FileSpreadsheet },
     { id: 'my-tasks', label: 'مهامي', mobileLabel: 'مهامي', icon: CheckSquare, badge: openTasksCount },
     {
       id: 'personal-notes',
@@ -98,6 +100,7 @@ export const Navigation: React.FC<Props> = ({
       badge: personalNotesPendingCount
     },
     { id: 'announcements', label: 'التعاميم', icon: BellRing },
+    { id: 'activity-log', label: 'سجل النشاط', mobileLabel: 'النشاط', icon: History },
     { id: 'users', label: 'إدارة المستخدمين', icon: Users },
     { id: 'profile', label: 'ملفي الشخصي', mobileLabel: 'حسابي', icon: UserCircle2 }
   ];

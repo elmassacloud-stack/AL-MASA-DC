@@ -320,6 +320,52 @@
         "updatedAt": { "type": "string", "maxLength": 64 }
       },
       "required": ["id", "brandColor", "updatedAt"]
+    },
+    "ActivityLogEntry": {
+      "title": "ActivityLogEntry",
+      "description": "Immutable system activity audit entry tracking user and admin changes on Daily Reports and Project Tasks.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "entityType": { "type": "string", "enum": ["report", "task"] },
+        "action": {
+          "type": "string",
+          "enum": [
+            "report_created",
+            "report_updated",
+            "report_reviewed",
+            "task_created",
+            "task_updated",
+            "task_completed",
+            "task_deleted"
+          ]
+        },
+        "entityId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "entityTitle": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "projectId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "projectName": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "actorName": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "actorEmail": { "type": "string", "maxLength": 200 },
+        "actorRole": { "type": "string", "enum": ["admin", "site"] },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 600 },
+        "details": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "entityType",
+        "action",
+        "entityId",
+        "entityTitle",
+        "projectId",
+        "projectName",
+        "actorId",
+        "actorName",
+        "actorRole",
+        "summary",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -382,6 +428,10 @@
     "/appSettings/{settingId}": {
       "schema": { "$ref": "#/entities/AppBrandingSettings" },
       "description": "Global application settings such as custom Brand Color readable by all active users and writable only by admins."
+    },
+    "/activityLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLogEntry" },
+      "description": "Immutable admin-readable audit log of edits and status changes on Daily Reports and Project Tasks."
     }
   }
 }

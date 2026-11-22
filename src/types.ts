@@ -304,3 +304,32 @@ export interface AppBrandingSettings {
   updatedAt: string;
 }
 
+export type ActivityEntityType = 'report' | 'task';
+
+export type ActivityActionType =
+  | 'report_created'
+  | 'report_updated'
+  | 'report_reviewed'
+  | 'task_created'
+  | 'task_updated'
+  | 'task_completed'
+  | 'task_deleted';
+
+export interface ActivityLogEntry {
+  id: string;
+  entityType: ActivityEntityType;
+  action: ActivityActionType;
+  entityId: string;
+  entityTitle: string;
+  projectId: string;
+  projectName: string;
+  actorId: string;
+  actorName: string;
+  actorEmail?: string;
+  actorRole: UserRole;
+  summary: string;
+  details?: string;
+  createdAt: string;
+}
+
+

@@ -34,7 +34,10 @@ import {
   SiteDeliverableType,
   SiteDeliverableStatus,
   PersonalNote,
-  AppBrandingSettings
+  AppBrandingSettings,
+  ActivityLogEntry,
+  ActivityEntityType,
+  ActivityActionType
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -117,6 +120,7 @@ const STORAGE_KEYS = {
   USERS: 'dc_users_v2',
   NOTIFICATIONS: 'dc_notifications_v2',
   PERSONAL_NOTES: 'dc_personal_notes_v2',
+  ACTIVITY_LOGS: 'dc_activity_logs_v2',
   CURRENT_USER: 'dc_active_user_v2',
   REPORT_DRAFT_PREFIX: 'dc_report_draft_',
   STALLED_DAYS_LIMIT: 'dc_stalled_days_limit',
@@ -337,6 +341,7 @@ class DataService {
     localStorage.removeItem(STORAGE_KEYS.USERS);
     localStorage.removeItem(STORAGE_KEYS.NOTIFICATIONS);
     localStorage.removeItem(STORAGE_KEYS.PERSONAL_NOTES);
+    localStorage.removeItem(STORAGE_KEYS.ACTIVITY_LOGS);
     this.notify();
   }
 
@@ -903,6 +908,26 @@ class DataService {
           handleFirestoreError(error, OperationType.LIST, `users/${user.id}/personalNotes`)
       )
     );
+
+    // 11. System Activity Log sync (Admin-only audit trail for Reports & Tasks)
+    if (isAdmin) {
+      this.firestoreUnsubs.push(
+        onSnapshot(
+          collection(db, 'activityLogs'),
+          (snap) => {
+            const list = snap.docs
+              .map((d) => ({ ...(d.data() as ActivityLogEntry), id: d.id }))
+              .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+              .slice(0, 500);
+            localStorage.setItem(STORAGE_KEYS.ACTIVITY_LOGS, JSON.stringify(list));
+            this.notify();
+          },
+          (error) => handleFirestoreError(error, OperationType.LIST, 'activityLogs')
+        )
+      );
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.ACTIVITY_LOGS);
+    }
   }
 
   public stopRealtimeSync() {
@@ -2219,6 +2244,17 @@ class DataService {
       linkTab: 'reports'
     });
 
+    this.recordActivityLog({
+      entityType: 'report',
+      action: 'report_created',
+      entityId: newReport.id,
+      entityTitle: `تقرير يومي (${newReport.reportDate})`,
+      projectId: newReport.projectId,
+      projectName: newReport.projectName,
+      summary: `تم تقديم تقرير يومي جديد بعدد ${newReport.submittedWorks.length} تقديمات و${newReport.receivedWorks.length} استلامات.`,
+      details: newReport.notes ? `ملاحظات التقرير: ${newReport.notes}` : undefined
+    });
+
     this.notify();
     return newReport;
   }
@@ -2483,6 +2519,40 @@ class DataService {
       linkTab: 'reports'
     });
 
+    const reportChanges: string[] = [];
+    if (existing.reportDate !== updatedReport.reportDate) {
+      reportChanges.push(`تاريخ التقرير: ${existing.reportDate} ← ${updatedReport.reportDate}`);
+    }
+    if (existing.submittedWorks.length !== updatedReport.submittedWorks.length) {
+      reportChanges.push(
+        `التقديمات: ${existing.submittedWorks.length} ← ${updatedReport.submittedWorks.length}`
+      );
+    }
+    if (existing.receivedWorks.length !== updatedReport.receivedWorks.length) {
+      reportChanges.push(
+        `الاستلامات: ${existing.receivedWorks.length} ← ${updatedReport.receivedWorks.length}`
+      );
+    }
+    if ((existing.notes || '') !== (updatedReport.notes || '')) {
+      reportChanges.push('تم تحديث الملاحظات');
+    }
+    if ((existing.attachments?.length || 0) !== (updatedReport.attachments?.length || 0)) {
+      reportChanges.push(
+        `المرفقات: ${existing.attachments?.length || 0} ← ${updatedReport.attachments?.length || 0}`
+      );
+    }
+
+    this.recordActivityLog({
+      entityType: 'report',
+      action: 'report_updated',
+      entityId: savedReportId,
+      entityTitle: `تقرير يومي (${updatedReport.reportDate})`,
+      projectId: updatedReport.projectId,
+      projectName: updatedReport.projectName,
+      summary: `تم تعديل التقرير اليومي (${updatedReport.submittedWorks.length} تقديمات و${updatedReport.receivedWorks.length} استلامات).`,
+      details: reportChanges.length > 0 ? reportChanges.join(' | ') : undefined
+    });
+
     this.notify();
     return true;
   }
@@ -2573,6 +2643,14 @@ class DataService {
       handleFirestoreError(error, OperationType.UPDATE, `reports/${reportId}`);
     }
 
+    const statusArMap: Record<DailyReport['status'], string> = {
+      submitted: 'قيد المراجعة',
+      reviewed: 'تمت المراجعة والاعتماد',
+      needs_revision: 'مطلوب تعديل'
+    };
+    const prevStatusAr = statusArMap[reports[index].status] || reports[index].status;
+    const nextStatusAr = statusArMap[status] || status;
+
     reports[index] = stripUndefined({
       ...reports[index],
       status,
@@ -2588,7 +2666,7 @@ class DataService {
     );
     this.addNotification({
       title: `مراجعة تقرير: ${reports[index].projectName}`,
-      message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${status}"${nextFeedback ? ` مع ملاحظات: ${nextFeedback}` : ''}`,
+      message: `تم تحديث حالة التقرير (${reports[index].reportDate}) إلى "${nextStatusAr}"${nextFeedback ? ` مع ملاحظات: ${nextFeedback}` : ''}`,
       type: 'report_reviewed',
       targetRole: 'site',
       targetUserId: recipientUserId,
@@ -2596,6 +2674,17 @@ class DataService {
       senderId: adminUser?.id,
       senderName: adminUser?.displayName,
       linkTab: 'my-submissions'
+    });
+
+    this.recordActivityLog({
+      entityType: 'report',
+      action: 'report_reviewed',
+      entityId: reports[index].id,
+      entityTitle: `تقرير يومي (${reports[index].reportDate})`,
+      projectId: reports[index].projectId,
+      projectName: reports[index].projectName,
+      summary: `تم تحديث حالة مراجعة التقرير من «${prevStatusAr}» إلى «${nextStatusAr}».`,
+      details: nextFeedback ? `ملاحظات المسؤول: ${nextFeedback}` : undefined
     });
 
     this.notify();
@@ -2967,6 +3056,17 @@ class DataService {
       linkTab: 'my-tasks'
     });
 
+    this.recordActivityLog({
+      entityType: 'task',
+      action: 'task_created',
+      entityId: newTask.id,
+      entityTitle: newTask.title,
+      projectId: newTask.projectId,
+      projectName: newTask.projectName,
+      summary: `تم إنشاء مهمة ${newTask.priority === 'urgent' ? 'عاجلة' : 'جديدة'} بموعد تسليم ${newTask.deadline}.`,
+      details: newTask.description ? newTask.description : undefined
+    });
+
     this.notify();
     return newTask;
   }
@@ -3155,6 +3255,47 @@ class DataService {
       linkTab: 'my-tasks'
     });
 
+    const taskStatusAr: Record<ProjectTask['status'], string> = {
+      pending: 'معلقة',
+      in_progress: 'قيد التنفيذ',
+      done: 'مكتملة'
+    };
+    const taskDiffs: string[] = [];
+    if (existing.status !== nextStatus) {
+      taskDiffs.push(`الحالة: ${taskStatusAr[existing.status]} ← ${taskStatusAr[nextStatus]}`);
+    }
+    if (existing.deadline !== nextDeadline) {
+      taskDiffs.push(`موعد التسليم: ${existing.deadline} ← ${nextDeadline}`);
+    }
+    if (existing.priority !== nextPriority) {
+      taskDiffs.push(
+        `الأولوية: ${existing.priority === 'urgent' ? 'عاجلة' : 'عادية'} ← ${nextPriority === 'urgent' ? 'عاجلة' : 'عادية'}`
+      );
+    }
+    if (existing.title !== nextTitle) {
+      taskDiffs.push(`العنوان: ${existing.title} ← ${nextTitle}`);
+    }
+    if (existing.description !== nextDescription) {
+      taskDiffs.push('تم تحديث الوصف');
+    }
+    if (pendingNewAttachments.length > 0) {
+      taskDiffs.push(`إضافة ${pendingNewAttachments.length} مرفق`);
+    }
+
+    this.recordActivityLog({
+      entityType: 'task',
+      action: 'task_updated',
+      entityId: taskId,
+      entityTitle: nextTitle,
+      projectId: nextProjectId,
+      projectName: nextProjectName,
+      summary:
+        taskDiffs.length > 0
+          ? `تم تعديل المهمة (${taskDiffs.slice(0, 2).join('، ')}).`
+          : `تم تحديث بيانات المهمة (موعد التسليم: ${nextDeadline}).`,
+      details: taskDiffs.length > 0 ? taskDiffs.join(' | ') : undefined
+    });
+
     this.notify();
     return true;
   }
@@ -3204,7 +3345,8 @@ class DataService {
 
   public async deleteTask(taskId: string): Promise<boolean> {
     const tasks = this.getTasksRaw();
-    if (!tasks.some((t) => t.id === taskId)) return false;
+    const targetTask = tasks.find((t) => t.id === taskId);
+    if (!targetTask) return false;
 
     await deleteAllTaskChunksFromFirebase(taskId);
 
@@ -3216,6 +3358,18 @@ class DataService {
 
     const remaining = tasks.filter((t) => t.id !== taskId);
     localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(remaining));
+
+    this.recordActivityLog({
+      entityType: 'task',
+      action: 'task_deleted',
+      entityId: targetTask.id,
+      entityTitle: targetTask.title,
+      projectId: targetTask.projectId,
+      projectName: targetTask.projectName,
+      summary: `تم حذف المهمة من مشروع ${targetTask.projectName}.`,
+      details: `موعد التسليم السابق: ${targetTask.deadline}`
+    });
+
     this.notify();
     return true;
   }
@@ -3256,6 +3410,17 @@ class DataService {
       senderId: userId,
       senderName: activeUser?.displayName,
       linkTab: 'tasks'
+    });
+
+    this.recordActivityLog({
+      entityType: 'task',
+      action: 'task_completed',
+      entityId: tasks[idx].id,
+      entityTitle: tasks[idx].title,
+      projectId: tasks[idx].projectId,
+      projectName: tasks[idx].projectName,
+      summary: `تم إتمام المهمة وتحديث حالتها إلى «مكتملة».`,
+      details: proofNote ? `ملاحظة الإنجاز: ${proofNote}` : undefined
     });
 
     this.notify();
@@ -4559,6 +4724,91 @@ class DataService {
       handleFirestoreError(error, OperationType.WRITE, 'appSettings/branding');
       return false;
     }
+  }
+
+  // --- System Activity Log (Reports & Tasks Audit Trail) ---
+  public getActivityLogs(): ActivityLogEntry[] {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEYS.ACTIVITY_LOGS);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as ActivityLogEntry[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private recordActivityLog(input: {
+    entityType: ActivityEntityType;
+    action: ActivityActionType;
+    entityId: string;
+    entityTitle: string;
+    projectId: string;
+    projectName: string;
+    summary: string;
+    details?: string;
+  }) {
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser) return;
+
+    const activeUser = this.getCurrentUser();
+    const isAdminActor =
+      activeUser?.role === 'admin' || isSuperAdminEmail(firebaseUser.email || activeUser?.email);
+    const actorRole: UserRole = isAdminActor ? 'admin' : 'site';
+
+    const sanitizeId = (val: string) =>
+      String(val || '')
+        .trim()
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 128);
+
+    const safeEntityId = sanitizeId(input.entityId);
+    const safeProjectId = sanitizeId(input.projectId);
+    if (!safeEntityId || !safeProjectId) return;
+
+    const now = new Date().toISOString();
+    const id = `act-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const safeEntityTitle = (input.entityTitle || 'سجل نظام').trim().slice(0, 300) || 'سجل نظام';
+    const safeProjectName = (input.projectName || 'مشروع').trim().slice(0, 200) || 'مشروع';
+    const safeActorName =
+      (activeUser?.displayName || firebaseUser.displayName || firebaseUser.email || 'مستخدم')
+        .trim()
+        .slice(0, 150) || 'مستخدم';
+    const safeActorEmail = (activeUser?.email || firebaseUser.email || '').trim().slice(0, 200);
+    const safeSummary = (input.summary || 'تم تنفيذ تحديث').trim().slice(0, 600) || 'تم تنفيذ تحديث';
+    const safeDetails = input.details ? input.details.trim().slice(0, 2000) : undefined;
+
+    const entry: ActivityLogEntry = stripUndefined({
+      id,
+      entityType: input.entityType,
+      action: input.action,
+      entityId: safeEntityId,
+      entityTitle: safeEntityTitle,
+      projectId: safeProjectId,
+      projectName: safeProjectName,
+      actorId: firebaseUser.uid.slice(0, 128),
+      actorName: safeActorName,
+      actorEmail: safeActorEmail || undefined,
+      actorRole,
+      summary: safeSummary,
+      details: safeDetails || undefined,
+      createdAt: now
+    });
+
+    if (isAdminActor) {
+      const currentLogs = this.getActivityLogs();
+      const nextLogs = [entry, ...currentLogs.filter((l) => l.id !== entry.id)].slice(0, 500);
+      localStorage.setItem(STORAGE_KEYS.ACTIVITY_LOGS, JSON.stringify(nextLogs));
+    }
+
+    setDoc(doc(db, 'activityLogs', entry.id), entry).catch((error) => {
+      try {
+        handleFirestoreError(error, OperationType.CREATE, `activityLogs/${entry.id}`);
+      } catch {
+        // Audit log persistence failure must not block primary report/task workflows
+      }
+    });
   }
 
   // Reset sample project/report data

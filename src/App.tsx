@@ -27,6 +27,7 @@ import { AdminAnnouncementsView } from './components/admin/AdminAnnouncementsVie
 import { AdminProjectsView } from './components/admin/AdminProjectsView';
 import { AdminUsersView } from './components/admin/AdminUsersView';
 import { AdminExcelLogsView } from './components/admin/AdminExcelLogsView';
+import { AdminActivityLogView } from './components/admin/AdminActivityLogView';
 
 import { dataService } from './services/dataService';
 import { subscribeToAuthState, signOutUser } from './services/firebase';
@@ -51,7 +52,8 @@ import {
   AppNotification,
   ExecutedWork,
   SiteDeliverable,
-  PersonalNote
+  PersonalNote,
+  ActivityLogEntry
 } from './types';
 import { getTodayDateStr } from './seedData';
 
@@ -91,6 +93,9 @@ export default function App() {
   );
   const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>(() =>
     dataService.getPersonalNotes()
+  );
+  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>(() =>
+    dataService.getActivityLogs()
   );
   const [stalledDays, setStalledDays] = useState<number>(() =>
     dataService.getStalledDaysThreshold()
@@ -186,6 +191,7 @@ export default function App() {
       setUsers(dataService.getUsers());
       setNotifications(dataService.getNotifications(activeUser));
       setPersonalNotes(dataService.getPersonalNotes(activeUser?.id));
+      setActivityLogs(dataService.getActivityLogs());
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
       setBrandColor(dataService.getBrandColor());
@@ -204,7 +210,7 @@ export default function App() {
   // Redirect away from restricted tabs immediately if permission is revoked
   useEffect(() => {
     if (!currentUser) return;
-    if (currentUser.role !== 'admin' && activeTab === 'excel-logs') {
+    if (currentUser.role !== 'admin' && activeTab === 'activity-log') {
       setActiveTab('daily-report');
     } else if (!canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
       setActiveTab('daily-report');
@@ -415,6 +421,15 @@ export default function App() {
               />
             )}
 
+            {activeTab === 'excel-logs' && (
+              <AdminExcelLogsView
+                currentUser={currentUser}
+                projects={projects}
+                siteDeliverables={siteDeliverables}
+                reports={reports}
+              />
+            )}
+
             {activeTab === 'my-tasks' && (
               <MyTasksView currentUser={currentUser} tasks={tasks} />
             )}
@@ -514,6 +529,15 @@ export default function App() {
                 users={users}
                 siteDeliverables={siteDeliverables}
                 executedWorks={executedWorks}
+                onNavigateTab={setActiveTab}
+              />
+            )}
+
+            {activeTab === 'activity-log' && (
+              <AdminActivityLogView
+                activityLogs={activityLogs}
+                projects={projects}
+                users={users}
                 onNavigateTab={setActiveTab}
               />
             )}
