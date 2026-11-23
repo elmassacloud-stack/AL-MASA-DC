@@ -271,10 +271,105 @@ class DataService {
     const email = normalizeEmail(firebaseUser.email);
     const uid = firebaseUser.uid;
     const isSuper = isSuperAdminEmail(email);
-
-    let profile: UserProfile | null = null;
     const userDocRef = doc(db, 'users', uid);
 
+    if (isSuper) {
+      const now = new Date().toISOString();
+      const cachedProfile = this.getUsers().find((u) => u.id === uid) || null;
+      const allProjectIds = this.getProjects().map((p) => p.id);
+      const superProfile: UserProfile = {
+        id: uid,
+        email: SUPER_ADMIN_EMAIL,
+        displayName:
+          cachedProfile?.displayName || firebaseUser.displayName || 'مدير النظام العام (DC)',
+        jobTitle: cachedProfile?.jobTitle || 'المدير العام — إدارة مراقبة الوثائق',
+        role: 'admin',
+        allProjects: true,
+        canAccessExecutedWorks: true,
+        canAccessSiteDeliverables: true,
+        assignedProjects: cachedProfile?.assignedProjects?.length
+          ? cachedProfile.assignedProjects
+          : allProjectIds,
+        status: 'active',
+        phone: cachedProfile?.phone || '',
+        photoUrl: cachedProfile?.photoUrl || firebaseUser.photoURL || undefined,
+        notificationPreferences: cachedProfile?.notificationPreferences,
+        createdAt: cachedProfile?.createdAt || now,
+        updatedAt: cachedProfile?.updatedAt || now
+      };
+
+      if (!isFirestoreQuotaExhausted()) {
+        void getDoc(userDocRef)
+          .then((snap) => {
+            const remoteProfile = snap.exists()
+              ? normalizeUserProfile(snap.data() as Partial<UserProfile>, uid, email)
+              : null;
+
+            const mergedProfile: UserProfile = {
+              id: uid,
+              email: SUPER_ADMIN_EMAIL,
+              displayName:
+                remoteProfile?.displayName || superProfile.displayName,
+              jobTitle: remoteProfile?.jobTitle || superProfile.jobTitle,
+              role: 'admin',
+              allProjects: true,
+              canAccessExecutedWorks: true,
+              canAccessSiteDeliverables: true,
+              assignedProjects: remoteProfile?.assignedProjects?.length
+                ? remoteProfile.assignedProjects
+                : superProfile.assignedProjects,
+              status: 'active',
+              phone: remoteProfile?.phone ?? superProfile.phone,
+              photoUrl: remoteProfile?.photoUrl ?? superProfile.photoUrl,
+              notificationPreferences:
+                remoteProfile?.notificationPreferences ?? superProfile.notificationPreferences,
+              createdAt: remoteProfile?.createdAt || superProfile.createdAt,
+              updatedAt: remoteProfile?.updatedAt || superProfile.updatedAt
+            };
+
+            const activeUser = this.getCurrentUser();
+            if (
+              remoteProfile &&
+              activeUser?.id === uid &&
+              JSON.stringify(mergedProfile) !== JSON.stringify(activeUser)
+            ) {
+              this.upsertLocalUser(mergedProfile);
+              this.setCurrentUser(mergedProfile);
+            }
+
+            const needsRemoteSync =
+              !remoteProfile ||
+              normalizeEmail(remoteProfile.email) !== SUPER_ADMIN_EMAIL ||
+              remoteProfile.role !== 'admin' ||
+              remoteProfile.status !== 'active' ||
+              remoteProfile.allProjects !== true ||
+              remoteProfile.canAccessExecutedWorks !== true ||
+              remoteProfile.canAccessSiteDeliverables !== true;
+
+            if (needsRemoteSync && !isFirestoreQuotaExhausted()) {
+              const syncPayload: UserProfile = {
+                ...mergedProfile,
+                updatedAt: new Date().toISOString()
+              };
+              return setDoc(userDocRef, stripUndefined(syncPayload));
+            }
+            return undefined;
+          })
+          .catch((error) => {
+            if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+              markFirestoreQuotaExhausted();
+            }
+          });
+      }
+
+      void this.seedFirestoreIfEmpty().catch(() => undefined);
+      this.upsertLocalUser(superProfile);
+      this.setCurrentUser(superProfile);
+      this.startRealtimeSync(superProfile);
+      return superProfile;
+    }
+
+    let profile: UserProfile | null = null;
     try {
       const snap = await getDoc(userDocRef);
       if (snap.exists()) {
@@ -284,57 +379,7 @@ class DataService {
       if (getFirestoreErrorCode(error) === 'resource-exhausted') {
         markFirestoreQuotaExhausted();
       }
-      if (isSuper) {
-        profile = this.getUsers().find((u) => u.id === uid) || null;
-      } else {
-        handleFirestoreError(error, OperationType.GET, `users/${uid}`);
-      }
-    }
-
-    if (isSuper) {
-      const now = new Date().toISOString();
-      const allProjectIds = this.getProjects().map((p) => p.id);
-      const superProfile: UserProfile = {
-        id: uid,
-        email: SUPER_ADMIN_EMAIL,
-        displayName: profile?.displayName || firebaseUser.displayName || 'مدير النظام العام (DC)',
-        jobTitle: profile?.jobTitle || 'المدير العام — إدارة مراقبة الوثائق',
-        role: 'admin',
-        allProjects: true,
-        canAccessExecutedWorks: true,
-        canAccessSiteDeliverables: true,
-        assignedProjects: profile?.assignedProjects?.length ? profile.assignedProjects : allProjectIds,
-        status: 'active',
-        phone: profile?.phone || '',
-        photoUrl: profile?.photoUrl,
-        notificationPreferences: profile?.notificationPreferences,
-        createdAt: profile?.createdAt || now,
-        updatedAt: profile?.updatedAt || now
-      };
-
-      const needsRemoteSync =
-        !profile ||
-        normalizeEmail(profile.email) !== SUPER_ADMIN_EMAIL ||
-        profile.role !== 'admin' ||
-        profile.status !== 'active' ||
-        profile.allProjects !== true ||
-        profile.canAccessExecutedWorks !== true ||
-        profile.canAccessSiteDeliverables !== true;
-
-      if (needsRemoteSync && !isFirestoreQuotaExhausted()) {
-        superProfile.updatedAt = now;
-        void setDoc(userDocRef, stripUndefined(superProfile)).catch((error) => {
-          if (getFirestoreErrorCode(error) === 'resource-exhausted') {
-            markFirestoreQuotaExhausted();
-          }
-        });
-      }
-
-      void this.seedFirestoreIfEmpty().catch(() => undefined);
-      this.upsertLocalUser(superProfile);
-      this.setCurrentUser(superProfile);
-      this.startRealtimeSync(superProfile);
-      return superProfile;
+      handleFirestoreError(error, OperationType.GET, `users/${uid}`);
     }
 
     // Non-Super-Admin users must have an active profile in Firestore `/users/{uid}`
