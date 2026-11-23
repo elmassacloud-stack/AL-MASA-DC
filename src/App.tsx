@@ -1,14 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Loader2, FolderArchive, BellRing, X, ArrowUpLeft } from 'lucide-react';
+import React, { useState, useEffect, useRef, lazy, Suspense } from 'react';
+import { Loader2, FolderArchive, BellRing, X, ArrowUpLeft, AlertTriangle } from 'lucide-react';
 import { Header } from './components/common/Header';
 import { Navigation } from './components/common/Navigation';
 import { LoginScreen } from './components/common/LoginScreen';
 import { NotificationsDrawer } from './components/common/NotificationsDrawer';
 import { SettingsModal } from './components/common/SettingsModal';
 import { ShareAppModal } from './components/common/ShareAppModal';
-import { ExecutedWorksView } from './components/common/ExecutedWorksView';
-import { SiteDeliverablesView } from './components/common/SiteDeliverablesView';
-import { PersonalNotesView } from './components/common/PersonalNotesView';
 import { UserProfileView } from './components/common/UserProfileView';
 
 // Site User Views
@@ -19,18 +16,40 @@ import { MyTasksView } from './components/site/MyTasksView';
 
 // Admin Views
 import { AdminDashboard } from './components/admin/AdminDashboard';
-import { AdminReportsView } from './components/admin/AdminReportsView';
-import { SubmittalTrackerView } from './components/admin/SubmittalTrackerView';
 import { AdminIssuesView } from './components/admin/AdminIssuesView';
 import { AdminTasksView } from './components/admin/AdminTasksView';
-import { AdminAnnouncementsView } from './components/admin/AdminAnnouncementsView';
-import { AdminProjectsView } from './components/admin/AdminProjectsView';
 import { AdminUsersView } from './components/admin/AdminUsersView';
-import { AdminExcelLogsView } from './components/admin/AdminExcelLogsView';
-import { AdminActivityLogView } from './components/admin/AdminActivityLogView';
+
+// Lazy-loaded heavy views (code-split)
+const ExecutedWorksView = lazy(() =>
+  import('./components/common/ExecutedWorksView').then((m) => ({ default: m.ExecutedWorksView }))
+);
+const SiteDeliverablesView = lazy(() =>
+  import('./components/common/SiteDeliverablesView').then((m) => ({ default: m.SiteDeliverablesView }))
+);
+const PersonalNotesView = lazy(() =>
+  import('./components/common/PersonalNotesView').then((m) => ({ default: m.PersonalNotesView }))
+);
+const AdminReportsView = lazy(() =>
+  import('./components/admin/AdminReportsView').then((m) => ({ default: m.AdminReportsView }))
+);
+const SubmittalTrackerView = lazy(() =>
+  import('./components/admin/SubmittalTrackerView').then((m) => ({ default: m.SubmittalTrackerView }))
+);
+const AdminProjectsView = lazy(() =>
+  import('./components/admin/AdminProjectsView').then((m) => ({ default: m.AdminProjectsView }))
+);
+const ExportCenterView = lazy(() =>
+  import('./components/admin/ExportCenterView').then((m) => ({ default: m.ExportCenterView }))
+);
 
 import { dataService } from './services/dataService';
-import { subscribeToAuthState, signOutUser } from './services/firebase';
+import {
+  subscribeToAuthState,
+  signOutUser,
+  isFirestoreQuotaExhausted,
+  subscribeToFirestoreQuotaState
+} from './services/firebase';
 import {
   canAccessProject,
   canAccessExecutedWorksTab,
@@ -48,13 +67,10 @@ import {
   DailyReport,
   IssueReport,
   ProjectTask,
-  Announcement,
   AppNotification,
   ExecutedWork,
   SiteDeliverable,
-  PersonalNote,
-  ActivityLogEntry,
-  SharedExcelLogFile
+  PersonalNote
 } from './types';
 import { getTodayDateStr } from './seedData';
 
@@ -73,7 +89,10 @@ export default function App() {
   // Firebase Auth Gate State (No dashboard access until authenticated & authorized)
   const [authChecking, setAuthChecking] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authTimedOut, setAuthTimedOut] = useState<boolean>(false);
+  const [authRetryTick, setAuthRetryTick] = useState<number>(0);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [quotaExhausted, setQuotaExhausted] = useState<boolean>(() => isFirestoreQuotaExhausted());
 
   // Active navigation tab
   const [activeTab, setActiveTab] = useState<string>('daily-report');
@@ -83,9 +102,6 @@ export default function App() {
   const [reports, setReports] = useState<DailyReport[]>(() => dataService.getReports());
   const [issues, setIssues] = useState<IssueReport[]>(() => dataService.getIssues());
   const [tasks, setTasks] = useState<ProjectTask[]>(() => dataService.getTasks());
-  const [announcements, setAnnouncements] = useState<Announcement[]>(() =>
-    dataService.getAnnouncements()
-  );
   const [executedWorks, setExecutedWorks] = useState<ExecutedWork[]>(() =>
     dataService.getExecutedWorks()
   );
@@ -98,12 +114,6 @@ export default function App() {
   );
   const [personalNotes, setPersonalNotes] = useState<PersonalNote[]>(() =>
     dataService.getPersonalNotes()
-  );
-  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>(() =>
-    dataService.getActivityLogs()
-  );
-  const [sharedExcelLogs, setSharedExcelLogs] = useState<SharedExcelLogFile[]>(() =>
-    dataService.getSharedExcelLogs()
   );
   const [stalledDays, setStalledDays] = useState<number>(() =>
     dataService.getStalledDaysThreshold()
@@ -148,50 +158,103 @@ export default function App() {
     applyBrandColorToDocument(brandColor);
   }, [brandColor]);
 
-  // Listen to Firebase Auth State
+  // Subscribe to global Firestore daily write quota exhaustion state
+  useEffect(() => {
+    setQuotaExhausted(isFirestoreQuotaExhausted());
+    return subscribeToFirestoreQuotaState((exhausted) => {
+      setQuotaExhausted(exhausted);
+    });
+  }, []);
+
+  // Listen to Firebase Auth State with 15s safety & profile resolution timeouts
   useEffect(() => {
     let active = true;
+    let authStateReceived = false;
+    const AUTH_TIMEOUT_MS = 15000;
+
+    const authInitSafetyTimer = window.setTimeout(() => {
+      if (!active || authStateReceived) return;
+      setAuthError('تعذر التحقق من صلاحيات الحساب. يرجى المحاولة مرة أخرى.');
+      setAuthTimedOut(true);
+      setAuthChecking(false);
+    }, AUTH_TIMEOUT_MS);
+
     const unsubscribeAuth = subscribeToAuthState(async (firebaseUser) => {
       if (!active) return;
+      authStateReceived = true;
+      window.clearTimeout(authInitSafetyTimer);
 
       if (!firebaseUser) {
         dataService.clearSession();
         setCurrentUser(null);
+        setAuthTimedOut(false);
         setAuthChecking(false);
         return;
       }
 
       setAuthChecking(true);
+      let profileTimeoutId: number | null = null;
       try {
-        const resolvedProfile = await dataService.resolveAuthenticatedProfile(firebaseUser);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          profileTimeoutId = window.setTimeout(() => {
+            reject(new Error('AUTH_PROFILE_TIMEOUT'));
+          }, AUTH_TIMEOUT_MS);
+        });
+        const resolvedProfile = await Promise.race([
+          dataService.resolveAuthenticatedProfile(firebaseUser),
+          timeoutPromise
+        ]);
         if (!active) return;
         setAuthError(null);
+        setAuthTimedOut(false);
         setCurrentUser(resolvedProfile);
         setActiveTab(resolvedProfile.role === 'admin' ? 'dashboard' : 'daily-report');
       } catch (err) {
         if (!active) return;
         const code = err instanceof Error ? err.message : '';
-        if (code === 'ACCOUNT_DISABLED') {
+        if (code === 'AUTH_PROFILE_TIMEOUT') {
+          setAuthError('تعذر التحقق من صلاحيات الحساب. يرجى المحاولة مرة أخرى.');
+          setAuthTimedOut(true);
+          setCurrentUser(null);
+        } else if (code === 'ACCOUNT_DISABLED') {
           setAuthError('هذا الحساب معطل حالياً. يرجى التواصل مع مسؤول النظام لإعادة التفعيل.');
+          setAuthTimedOut(false);
+          await signOutUser().catch(() => undefined);
+          dataService.clearSession();
+          setCurrentUser(null);
         } else if (code === 'ACCOUNT_NOT_AUTHORIZED') {
           setAuthError('هذا الحساب غير مسجل أو تم حذفه من قبل مسؤول النظام.');
+          setAuthTimedOut(false);
+          await signOutUser().catch(() => undefined);
+          dataService.clearSession();
+          setCurrentUser(null);
         } else {
           setAuthError('تعذر التحقق من صلاحيات الحساب. يرجى المحاولة مرة أخرى.');
+          setAuthTimedOut(true);
+          setCurrentUser(null);
         }
-        await signOutUser().catch(() => undefined);
-        dataService.clearSession();
-        setCurrentUser(null);
       } finally {
+        if (profileTimeoutId !== null) {
+          window.clearTimeout(profileTimeoutId);
+        }
         if (active) setAuthChecking(false);
       }
     });
 
     return () => {
       active = false;
+      window.clearTimeout(authInitSafetyTimer);
       unsubscribeAuth();
       dataService.stopRealtimeSync();
     };
-  }, []);
+  }, [authRetryTick]);
+
+  const handleRetryAuth = () => {
+    setAuthError(null);
+    setAuthTimedOut(false);
+    setAuthChecking(true);
+    setAuthRetryTick((prev) => prev + 1);
+  };
 
   // Subscribe to reactive data store changes
   useEffect(() => {
@@ -201,14 +264,11 @@ export default function App() {
       setReports(dataService.getReports());
       setIssues(dataService.getIssues());
       setTasks(dataService.getTasks());
-      setAnnouncements(dataService.getAnnouncements());
       setExecutedWorks(dataService.getExecutedWorks());
       setSiteDeliverables(dataService.getSiteDeliverables());
       setUsers(dataService.getUsers());
       setNotifications(dataService.getNotifications(activeUser));
       setPersonalNotes(dataService.getPersonalNotes(activeUser?.id));
-      setActivityLogs(dataService.getActivityLogs());
-      setSharedExcelLogs(dataService.getSharedExcelLogs());
       setStalledDays(dataService.getStalledDaysThreshold());
       setCutoffHour(dataService.getCutoffHour());
       setBrandColor(dataService.getBrandColor());
@@ -228,11 +288,15 @@ export default function App() {
     return unsubscribe;
   }, []);
 
-  // Redirect away from restricted tabs immediately if permission is revoked
+  // Redirect away from removed or restricted tabs immediately if needed
   useEffect(() => {
     if (!currentUser) return;
-    if (currentUser.role !== 'admin' && activeTab === 'activity-log') {
-      setActiveTab('daily-report');
+    if (
+      activeTab === 'activity-log' ||
+      activeTab === 'announcements' ||
+      activeTab === 'excel-logs'
+    ) {
+      setActiveTab(currentUser.role === 'admin' ? 'dashboard' : 'daily-report');
     } else if (!canAccessExecutedWorksTab(currentUser) && activeTab === 'executed-works') {
       setActiveTab('daily-report');
     } else if (!canAccessSiteDeliverablesTab(currentUser) && activeTab === 'site-deliverables') {
@@ -331,15 +395,33 @@ export default function App() {
     );
   }
 
+  const quotaBanner = quotaExhausted ? (
+    <div
+      role="status"
+      aria-live="polite"
+      className="w-full bg-amber-50 dark:bg-amber-950/90 border-b border-amber-200 dark:border-amber-800 px-4 py-2 text-amber-900 dark:text-amber-200 text-xs sm:text-sm font-bold flex items-center justify-center gap-2"
+    >
+      <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+      <span>قاعدة البيانات وصلت الحد اليومي للكتابة</span>
+    </div>
+  ) : null;
+
   // Strict Auth Gate: Show ONLY LoginScreen when unauthenticated
   if (!currentUser) {
     return (
-      <LoginScreen
-        darkMode={darkMode}
-        onToggleDarkMode={handleToggleDarkMode}
-        externalError={authError}
-        onClearExternalError={() => setAuthError(null)}
-      />
+      <>
+        {quotaBanner}
+        <LoginScreen
+          darkMode={darkMode}
+          onToggleDarkMode={handleToggleDarkMode}
+          externalError={authError}
+          onClearExternalError={() => {
+            setAuthError(null);
+            setAuthTimedOut(false);
+          }}
+          onRetryAuth={authTimedOut ? handleRetryAuth : undefined}
+        />
+      </>
     );
   }
 
@@ -368,6 +450,7 @@ export default function App() {
 
   return (
     <div className="min-h-[100dvh] flex flex-col overflow-x-clip bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors font-sans antialiased">
+      {quotaBanner}
       {/* Top Application Header */}
       <Header
         currentUser={currentUser}
@@ -397,6 +480,14 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-6 transition-all pb-24 md:pb-8">
+        <Suspense
+          fallback={
+            <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-600 dark:text-slate-300">
+              <Loader2 className="w-7 h-7 animate-spin text-blue-600" />
+              <span className="text-sm font-semibold">جاري تحميل الشاشة...</span>
+            </div>
+          }
+        >
         {/* SITE USER SCREENS */}
         {currentUser.role === 'site' && (
           <>
@@ -442,16 +533,6 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'excel-logs' && (
-              <AdminExcelLogsView
-                currentUser={currentUser}
-                projects={projects}
-                siteDeliverables={siteDeliverables}
-                reports={reports}
-                sharedExcelLogs={sharedExcelLogs}
-              />
-            )}
-
             {activeTab === 'my-tasks' && (
               <MyTasksView currentUser={currentUser} tasks={tasks} />
             )}
@@ -467,7 +548,6 @@ export default function App() {
                 reports={reports}
                 issues={issues}
                 tasks={tasks}
-                announcements={announcements}
                 onNavigateTab={(tabId) => setActiveTab(tabId)}
               />
             )}
@@ -508,16 +588,6 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'excel-logs' && (
-              <AdminExcelLogsView
-                currentUser={currentUser}
-                projects={projects}
-                siteDeliverables={siteDeliverables}
-                reports={reports}
-                sharedExcelLogs={sharedExcelLogs}
-              />
-            )}
-
             {activeTab === 'issues' && (
               <AdminIssuesView
                 issues={issues}
@@ -530,15 +600,6 @@ export default function App() {
               <AdminTasksView
                 tasks={tasks}
                 projects={projects}
-                currentUser={currentUser}
-              />
-            )}
-
-            {activeTab === 'announcements' && (
-              <AdminAnnouncementsView
-                announcements={announcements}
-                projects={projects}
-                users={users}
                 currentUser={currentUser}
               />
             )}
@@ -556,20 +617,19 @@ export default function App() {
               />
             )}
 
-            {activeTab === 'activity-log' && (
-              <AdminActivityLogView
-                activityLogs={activityLogs}
-                projects={projects}
-                users={users}
-                onNavigateTab={setActiveTab}
-              />
-            )}
-
             {activeTab === 'users' && (
               <AdminUsersView
                 users={users}
                 projects={projects}
                 currentUser={currentUser}
+              />
+            )}
+
+            {activeTab === 'export-center' && (
+              <ExportCenterView
+                reports={reports}
+                issues={issues}
+                projects={projects}
               />
             )}
           </>
@@ -590,6 +650,7 @@ export default function App() {
             projects={projects}
           />
         )}
+        </Suspense>
       </main>
 
       {/* Global Drawers & Modals */}

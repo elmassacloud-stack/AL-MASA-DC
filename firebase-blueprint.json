@@ -370,7 +370,7 @@
     },
     "SharedExcelLogFile": {
       "title": "SharedExcelLogFile",
-      "description": "Cloud-synced Excel log workbook metadata uploaded in the logs tab for a project so admins and authorized engineers share it automatically.",
+      "description": "Cloud-synced Excel log workbook metadata uploaded in the admin-only logs tab.",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -411,6 +411,16 @@
         "data": { "type": "string", "minLength": 1, "maxLength": 800000 }
       },
       "required": ["index", "data"]
+    },
+    "Counter": {
+      "title": "Counter",
+      "description": "Atomic monotonic sequence counter used for collision-free document numbering such as issues-YYYY.",
+      "type": "object",
+      "properties": {
+        "value": { "type": "number" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["value", "updatedAt"]
     }
   },
   "firestore": {
@@ -480,11 +490,15 @@
     },
     "/excelLogs/{logId}": {
       "schema": { "$ref": "#/entities/SharedExcelLogFile" },
-      "description": "Cloud-synced project Excel log workbooks shared automatically between site engineers and admins."
+      "description": "Cloud-synced project Excel log workbooks restricted strictly to admins."
     },
     "/excelLogs/{logId}/chunks/{chunkId}": {
       "schema": { "$ref": "#/entities/SharedExcelLogChunk" },
       "description": "Chunked Base64 payload of a SharedExcelLogFile."
+    },
+    "/counters/{counterId}": {
+      "schema": { "$ref": "#/entities/Counter" },
+      "description": "Atomic sequence counters incremented transactionally (e.g., counters/issues-2026)."
     }
   }
 }

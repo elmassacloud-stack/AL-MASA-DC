@@ -18,8 +18,6 @@ import {
   MapPin,
   Hammer,
   FileUp,
-  FileSpreadsheet,
-  ArrowUpLeft,
   Check,
   BarChart3,
   Target
@@ -1278,15 +1276,6 @@ export const AdminProjectsView: React.FC<Props> = ({
                   {/* Connected Modules Quick Jumps */}
                   {onNavigateTab && (
                     <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px]">
-                      <button
-                        type="button"
-                        onClick={() => onNavigateTab('excel-logs')}
-                        className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-blue-950/50 text-slate-700 dark:text-slate-300 hover:text-blue-700 dark:hover:text-blue-300 border border-slate-200 dark:border-slate-700 font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
-                      >
-                        <FileSpreadsheet className="w-3 h-3" />
-                        <span>شيتات Logs</span>
-                        <ArrowUpLeft className="w-3 h-3 opacity-60" />
-                      </button>
                       <button
                         type="button"
                         onClick={() => onNavigateTab('reports')}

@@ -6,16 +6,13 @@ import {
   CheckSquare,
   LayoutDashboard,
   Search,
-  BellRing,
   Users,
   LayoutGrid,
   Building2,
   Hammer,
   FileUp,
   NotebookPen,
-  FileSpreadsheet,
   UserCircle2,
-  History,
   X
 } from 'lucide-react';
 import { UserRole } from '../../types';
@@ -64,7 +61,6 @@ export const Navigation: React.FC<Props> = ({
       : []),
     { id: 'report-issue', label: 'إبلاغ عن عائق', mobileLabel: 'عائق', icon: AlertTriangle },
     { id: 'my-submissions', label: 'تقديماتي', mobileLabel: 'تقديماتي', icon: ClipboardList },
-    { id: 'excel-logs', label: 'logs', mobileLabel: 'logs', icon: FileSpreadsheet },
     { id: 'my-tasks', label: 'مهامي', mobileLabel: 'مهامي', icon: CheckSquare, badge: openTasksCount },
     {
       id: 'personal-notes',
@@ -90,7 +86,6 @@ export const Navigation: React.FC<Props> = ({
     },
     { id: 'executed-works', label: 'الأعمال المنفذة', mobileLabel: 'المنفذة', icon: Hammer },
     { id: 'submittal-tracker', label: 'تتبع التقديمات', icon: Search },
-    { id: 'excel-logs', label: 'logs', icon: FileSpreadsheet },
     { id: 'issues', label: 'المشكلات', icon: AlertTriangle, badge: urgentIssuesCount },
     { id: 'tasks', label: 'المهام', icon: CheckSquare },
     {
@@ -99,8 +94,6 @@ export const Navigation: React.FC<Props> = ({
       icon: NotebookPen,
       badge: personalNotesPendingCount
     },
-    { id: 'announcements', label: 'التعاميم', icon: BellRing },
-    { id: 'activity-log', label: 'سجل النشاط', mobileLabel: 'النشاط', icon: History },
     { id: 'users', label: 'إدارة المستخدمين', icon: Users },
     { id: 'profile', label: 'ملفي الشخصي', mobileLabel: 'حسابي', icon: UserCircle2 }
   ];

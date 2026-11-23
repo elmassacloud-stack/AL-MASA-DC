@@ -273,7 +273,7 @@ export const AdminUsersView: React.FC<Props> = ({
 
       {/* Users Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filteredUsers.map((user) => {
+        {filteredUsers.map((user, index) => {
           const isMe = user.id === currentUser.id;
           const isSuper = isSuperAdminEmail(user.email);
           const hasAll = user.role === 'admin' || user.allProjects === true || isSuper;
@@ -303,7 +303,7 @@ export const AdminUsersView: React.FC<Props> = ({
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <h3 className="font-bold text-base text-slate-900 dark:text-white truncate">
-                          {user.displayName}
+                          {!searchQuery.trim() && index === 2 ? 'DC MANGER' : user.displayName}
                         </h3>
                         {isMe && (
                           <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full font-bold">

@@ -180,8 +180,31 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNowTick(new Date()), 30000);
-    return () => window.clearInterval(id);
+    let id: number | null = null;
+    const start = () => {
+      if (id !== null) return;
+      id = window.setInterval(() => setNowTick(new Date()), 30000);
+    };
+    const stop = () => {
+      if (id !== null) {
+        window.clearInterval(id);
+        id = null;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        setNowTick(new Date());
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   const showFeedback = (msg: string) => {

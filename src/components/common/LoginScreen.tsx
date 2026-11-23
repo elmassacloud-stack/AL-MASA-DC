@@ -26,13 +26,15 @@ interface Props {
   onToggleDarkMode: () => void;
   externalError?: string | null;
   onClearExternalError?: () => void;
+  onRetryAuth?: () => void;
 }
 
 export const LoginScreen: React.FC<Props> = ({
   darkMode,
   onToggleDarkMode,
   externalError,
-  onClearExternalError
+  onClearExternalError,
+  onRetryAuth
 }) => {
   const [emailInput, setEmailInput] = useState<string>('');
   const [passwordInput, setPasswordInput] = useState<string>('');
@@ -226,10 +228,21 @@ export const LoginScreen: React.FC<Props> = ({
               {displayedError && (
                 <div
                   role="alert"
-                  className="p-3.5 bg-red-50 dark:bg-red-950/80 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-xs sm:text-sm font-medium flex items-start gap-2.5"
+                  className="p-3.5 bg-red-50 dark:bg-red-950/80 border border-red-200 dark:border-red-800 rounded-xl text-red-700 dark:text-red-300 text-xs sm:text-sm font-medium flex items-start justify-between gap-3"
                 >
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{displayedError}</span>
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{displayedError}</span>
+                  </div>
+                  {onRetryAuth && (
+                    <button
+                      type="button"
+                      onClick={onRetryAuth}
+                      className="shrink-0 px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold cursor-pointer transition-colors"
+                    >
+                      إعادة المحاولة
+                    </button>
+                  )}
                 </div>
               )}
 

@@ -26,6 +26,8 @@ service cloud.firestore {
       return isSignedIn()
         && ('email' in request.auth.token)
         && request.auth.token.email is string
+        && ('email_verified' in request.auth.token)
+        && request.auth.token.email_verified == true
         && request.auth.token.email.lower() == 'elmassacloud@gmail.com';
     }
 
@@ -76,13 +78,7 @@ service cloud.firestore {
     }
 
     function userDataIsReportOwner(u, reportData) {
-      return ('senderId' in reportData && reportData.senderId == request.auth.uid) || (
-        'senderEmail' in reportData &&
-        reportData.senderEmail is string && (
-          ('email' in u && u.email is string && reportData.senderEmail.lower() == u.email.lower()) ||
-          ('email' in request.auth.token && request.auth.token.email is string && reportData.senderEmail.lower() == request.auth.token.email.lower())
-        )
-      );
+      return 'senderId' in reportData && reportData.senderId == request.auth.uid;
     }
 
     // Single-fetch wrapper helpers (max 1 exists + 1 get each)
@@ -103,8 +99,8 @@ service cloud.firestore {
       return userDataIsAdmin(u) || (
         request.auth.uid == userId
         && userDataIsActive(u)
-        && inc.diff(ext).affectedKeys().hasOnly(['displayName', 'jobTitle', 'phone', 'photoUrl', 'email', 'notificationPreferences', 'updatedAt'])
-        && (inc.email.lower() != 'elmassacloud@gmail.com' || ext.email.lower() == 'elmassacloud@gmail.com')
+        && inc.email == ext.email
+        && inc.diff(ext).affectedKeys().hasOnly(['displayName', 'jobTitle', 'phone', 'photoUrl', 'notificationPreferences', 'updatedAt'])
       );
     }
 
@@ -549,74 +545,18 @@ service cloud.firestore {
         || (userDocExists() && userDataCanCreateActivityLog(currentUserData(), inc));
     }
 
-    function userDataCanCreateSharedExcelLog(u, inc) {
-      return (
-        userDataIsAdmin(u)
-        && inc.uploaderRole == 'admin'
-      ) || (
-        userDataIsActive(u)
-        && inc.uploaderRole == 'site'
-        && userDataHasProjectAccess(u, inc.projectId)
-      );
-    }
-
-    function canCreateSharedExcelLog(inc) {
-      return (isSuperAdmin() && inc.uploaderRole == 'admin')
-        || (userDocExists() && userDataCanCreateSharedExcelLog(currentUserData(), inc));
-    }
-
-    function userDataCanManageSharedExcelLog(u, ext) {
-      return userDataIsAdmin(u) || (
-        userDataIsActive(u)
-        && ext.uploadedBy == request.auth.uid
-        && userDataHasProjectAccess(u, ext.projectId)
-      );
-    }
-
-    function canManageSharedExcelLog(ext) {
-      return isSuperAdmin()
-        || (userDocExists() && userDataCanManageSharedExcelLog(currentUserData(), ext));
-    }
-
-    function canReadSharedExcelLogChunks(logId) {
-      return exists(/databases/$(database)/documents/excelLogs/$(logId)) && (
-        isSuperAdmin() || (
-          userDocExists() &&
-          userDataHasProjectAccess(
-            currentUserData(),
-            get(/databases/$(database)/documents/excelLogs/$(logId)).data.projectId
-          )
-        )
-      );
-    }
-
-    function canWriteSharedExcelLogChunk(logId) {
-      return exists(/databases/$(database)/documents/excelLogs/$(logId)) && (
-        isSuperAdmin() || (
-          userDocExists() &&
-          userDataCanManageSharedExcelLog(
-            currentUserData(),
-            get(/databases/$(database)/documents/excelLogs/$(logId)).data
-          )
-        )
-      );
-    }
-
-    function canDeleteSharedExcelLogChunk(logId) {
-      return isSuperAdmin() || (
-        userDocExists() && (
-          userDataIsAdmin(currentUserData()) || (
-            exists(/databases/$(database)/documents/excelLogs/$(logId)) &&
-            userDataCanManageSharedExcelLog(
-              currentUserData(),
-              get(/databases/$(database)/documents/excelLogs/$(logId)).data
-            )
-          )
-        )
-      );
-    }
-
     // Schema validation blueprints (pure, 0 DB calls)
+    function isAllowedUploadMimeType(mime) {
+      return mime is string && mime in [
+        'application/pdf',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel',
+        'image/jpeg',
+        'image/png',
+        'image/webp'
+      ];
+    }
+
     function isValidNotificationPreferences(prefs) {
       return prefs is map
         && prefs.keys().hasAll(['dailyReports', 'tasks', 'urgentTasksOnly', 'issues', 'urgentIssuesOnly', 'deliverables', 'executedWorks', 'announcements'])
@@ -690,7 +630,17 @@ service cloud.firestore {
         && data.receivedWorks is list && data.receivedWorks.size() <= 200
         && (data.receivedWorks.size() == 0 || data.receivedWorks[0] is map)
         && (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 4000))
-        && (!('attachments' in data) || data.attachments == null || (data.attachments is list && data.attachments.size() <= 5 && (data.attachments.size() == 0 || data.attachments[0] is map)))
+        && (!('attachments' in data) || data.attachments == null || (
+          data.attachments is list
+          && data.attachments.size() <= 5
+          && (
+            data.attachments.size() == 0 || (
+              data.attachments[0] is map
+              && (!('type' in data.attachments[0]) || isAllowedUploadMimeType(data.attachments[0].type))
+              && (!('mimeType' in data.attachments[0]) || isAllowedUploadMimeType(data.attachments[0].mimeType))
+            )
+          )
+        ))
         && (data.status == 'submitted' || data.status == 'reviewed' || data.status == 'needs_revision')
         && (!('adminFeedback' in data) || data.adminFeedback == null || (data.adminFeedback is string && data.adminFeedback.size() <= 2000))
         && data.createdAt is string && data.createdAt.size() <= 64
@@ -743,6 +693,7 @@ service cloud.firestore {
               && 'id' in data.attachments[0]
               && 'expiresAtMs' in data.attachments[0]
               && data.attachments[0].expiresAtMs is int
+              && (!('mimeType' in data.attachments[0]) || isAllowedUploadMimeType(data.attachments[0].mimeType))
             )
           )
         ))
@@ -788,7 +739,17 @@ service cloud.firestore {
         && data.completionPercent is number && data.completionPercent >= 0 && data.completionPercent <= 100
         && (!('relatedSubmittalNumber' in data) || (data.relatedSubmittalNumber is string && data.relatedSubmittalNumber.size() <= 120))
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
-        && (!('attachments' in data) || data.attachments == null || (data.attachments is list && data.attachments.size() <= 5 && (data.attachments.size() == 0 || data.attachments[0] is map)))
+        && (!('attachments' in data) || data.attachments == null || (
+          data.attachments is list
+          && data.attachments.size() <= 5
+          && (
+            data.attachments.size() == 0 || (
+              data.attachments[0] is map
+              && (!('type' in data.attachments[0]) || isAllowedUploadMimeType(data.attachments[0].type))
+              && (!('mimeType' in data.attachments[0]) || isAllowedUploadMimeType(data.attachments[0].mimeType))
+            )
+          )
+        ))
         && data.authorId is string && data.authorId.size() <= 128
         && data.authorName is string && data.authorName.size() <= 150
         && data.reviewStatus in ['pending', 'approved']
@@ -810,7 +771,7 @@ service cloud.firestore {
         && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
         && data.fileName is string && data.fileName.size() >= 1 && data.fileName.size() <= 260
         && (!('fileFormat' in data) || data.fileFormat in ['pdf', 'excel'])
-        && (!('mimeType' in data) || (data.mimeType is string && data.mimeType.size() <= 150))
+        && (!('mimeType' in data) || isAllowedUploadMimeType(data.mimeType))
         && data.fileSizeBytes is int && data.fileSizeBytes >= 1 && data.fileSizeBytes <= 26500000
         && data.chunkCount is int && data.chunkCount >= 1 && data.chunkCount <= 60
         && (!('pageCount' in data) || (data.pageCount is int && data.pageCount >= 1 && data.pageCount <= 2000))
@@ -940,6 +901,13 @@ service cloud.firestore {
         && data.keys().hasOnly(['index', 'data'])
         && data.index is int && data.index >= 0 && data.index < 60
         && data.data is string && data.data.size() >= 1 && data.data.size() <= 800000;
+    }
+
+    function isValidCounter(data) {
+      return data.keys().hasAll(['value', 'updatedAt'])
+        && data.keys().hasOnly(['value', 'updatedAt'])
+        && data.value is int && data.value >= 1 && data.value <= 10000000
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
     // Users collection (PII isolated to owner or Admin)
@@ -1208,16 +1176,17 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Cloud-Synced Excel Logs (Shared automatically between authorized site users and Admins)
+    // Cloud-Synced Excel Logs (Admin-only)
     match /excelLogs/{logId} {
-      allow get: if isValidId(logId) && hasProjectAccess(existing().projectId);
-      allow list: if hasProjectAccess(resource.data.projectId);
+      allow get: if isValidId(logId) && isAdmin();
+      allow list: if isAdmin();
       allow create: if isValidId(logId)
         && isSignedIn()
         && incoming().id == logId
         && incoming().uploadedBy == request.auth.uid
+        && incoming().uploaderRole == 'admin'
         && isValidSharedExcelLog(incoming())
-        && canCreateSharedExcelLog(incoming());
+        && isAdmin();
       allow update: if isValidId(logId)
         && isValidSharedExcelLog(incoming())
         && incoming().id == existing().id
@@ -1228,23 +1197,44 @@ service cloud.firestore {
         && incoming().uploadedBy == existing().uploadedBy
         && incoming().createdAt == existing().createdAt
         && incoming().diff(existing()).affectedKeys().hasOnly(['sheetOverridesJson', 'excludedSheetIndices', 'updatedAt'])
-        && canManageSharedExcelLog(existing());
-      allow delete: if isValidId(logId) && canManageSharedExcelLog(existing());
+        && isAdmin();
+      allow delete: if isValidId(logId) && isAdmin();
 
       match /chunks/{chunkId} {
         allow get: if isValidId(logId)
           && isValidId(chunkId)
-          && canReadSharedExcelLogChunks(logId);
+          && isAdmin();
         allow list: if isValidId(logId)
-          && canReadSharedExcelLogChunks(logId);
+          && isAdmin();
         allow create: if isValidId(logId)
           && isValidId(chunkId)
           && isValidSharedExcelLogChunk(incoming())
-          && canWriteSharedExcelLogChunk(logId);
+          && exists(/databases/$(database)/documents/excelLogs/$(logId))
+          && isAdmin();
         allow delete: if isValidId(logId)
           && isValidId(chunkId)
-          && canDeleteSharedExcelLogChunk(logId);
+          && isAdmin();
       }
+    }
+
+    // Atomic sequence counters (e.g. counters/issues-2026)
+    match /counters/{counterId} {
+      allow get: if isValidId(counterId) && (
+        isAdmin() ||
+        (isActiveUser() && counterId.matches('^issues-[0-9]{4}$'))
+      );
+      allow list: if isAdmin();
+      allow create: if isValidId(counterId)
+        && counterId.matches('^issues-[0-9]{4}$')
+        && isValidCounter(incoming())
+        && incoming().value == 1
+        && isActiveUser();
+      allow update: if isValidId(counterId)
+        && counterId.matches('^issues-[0-9]{4}$')
+        && isValidCounter(incoming())
+        && incoming().value == existing().value + 1
+        && isActiveUser();
+      allow delete: if false;
     }
   }
 }

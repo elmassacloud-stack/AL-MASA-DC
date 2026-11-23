@@ -1,5 +1,3 @@
-import html2canvas from 'html2canvas';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { DailyReport, Project, SubmittalStatusCode, UserProfile } from '../types';
 import { SUBMITTAL_STATUS_CONFIG } from '../config';
 import { getReportIdentityAudit } from './identityAudit';
@@ -888,6 +886,11 @@ export async function generateReportsPdfBlob(
         };
       })
       .filter((b) => b.bottom > b.top + 4);
+
+    const [{ default: html2canvas }, { PDFDocument, StandardFonts, rgb }] = await Promise.all([
+      import('html2canvas'),
+      import('pdf-lib')
+    ]);
 
     const fullCanvas = await html2canvas(targetBody, {
       scale: SCALE,

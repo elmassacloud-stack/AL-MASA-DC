@@ -24,7 +24,8 @@ import {
   GitBranch,
   RotateCcw,
   Building2,
-  CloudDownload
+  CloudDownload,
+  PauseCircle
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -47,8 +48,10 @@ import {
   ReportAttachment,
   SharedExcelLogFile
 } from '../../types';
-import { SUBMITTAL_STATUS_CONFIG } from '../../config';
+import { SUBMITTAL_STATUS_CONFIG, MAX_PDF_FILE_SIZE_BYTES } from '../../config';
 import { dataService } from '../../services/dataService';
+import { isExcelLogLoadingPausedForProject } from '../../services/data/excelLogs';
+import { isFirestoreQuotaExhausted } from '../../services/firebase';
 import {
   parseDriveExcelWorkbook,
   autoDetectColumnMapping,
@@ -67,11 +70,17 @@ import {
   DateFilterConfig,
   DateFilterMode
 } from '../../utils/driveLogParser';
-import { formatFileSize, isExcelFile, isExcelFileName } from '../../utils/pdfUtils';
+import {
+  formatFileSize,
+  isExcelFile,
+  isExcelFileName,
+  validateUploadedFile
+} from '../../utils/pdfUtils';
 import {
   loadAllStoredExcelFiles,
   saveStoredExcelFile,
-  deleteStoredExcelFile
+  deleteStoredExcelFile,
+  clearAllStoredExcelFiles
 } from '../../utils/excelLogsStorage';
 import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 
@@ -267,6 +276,42 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   const uploadTargetProjectIdRef = useRef<string | null>(null);
   const uploadedFilesRef = useRef<UploadedExcelWorkbook[]>([]);
   const inFlightCloudFetchIdsRef = useRef<Set<string>>(new Set());
+  const syncAbortedRef = useRef<boolean>(false);
+  const metaSyncTimersRef = useRef<Map<string, number>>(new Map());
+  const lastSyncedMetaHashRef = useRef<Map<string, string>>(new Map());
+  const projectsRef = useRef<Project[]>(projects);
+  projectsRef.current = projects;
+
+  const isProjectLogLoadingPaused = (
+    projectId?: string | null,
+    projectName?: string | null
+  ): boolean => {
+    const matchedProject = projectId
+      ? projectsRef.current.find((p) => p.id === projectId)
+      : undefined;
+    return isExcelLogLoadingPausedForProject({
+      projectId: projectId || matchedProject?.id,
+      projectName: projectName || matchedProject?.name,
+      projectCode: matchedProject?.code
+    });
+  };
+
+  const getExcelLogMetaHash = (
+    sheetOverrides: Record<number, SheetOverrideConfig>,
+    excludedSheetIndices: number[]
+  ): string =>
+    JSON.stringify({
+      sheetOverrides: sheetOverrides || {},
+      excludedSheetIndices: [...(excludedSheetIndices || [])].sort((a, b) => a - b)
+    });
+
+  useEffect(() => {
+    const timersMap = metaSyncTimersRef.current;
+    return () => {
+      timersMap.forEach((timerId) => window.clearTimeout(timerId));
+      timersMap.clear();
+    };
+  }, []);
 
   const isAdmin = currentUser.role === 'admin';
 
@@ -295,6 +340,8 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   const [loadingRemoteKey, setLoadingRemoteKey] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [confirmClearAllLogs, setConfirmClearAllLogs] = useState<boolean>(false);
+  const [isClearingAllLogs, setIsClearingAllLogs] = useState<boolean>(false);
 
   useEffect(() => {
     uploadedFilesRef.current = uploadedFiles;
@@ -367,9 +414,18 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         const restored: UploadedExcelWorkbook[] = [];
         for (const rec of stored) {
           if (!canAccessProject(currentUser, rec.projectId)) continue;
+          if (isProjectLogLoadingPaused(rec.projectId)) continue;
           try {
-            const parsed = parseDriveExcelWorkbook(rec.buffer, rec.fileName);
+            const parsed = await parseDriveExcelWorkbook(rec.buffer, rec.fileName);
             if (parsed.sheets.length === 0) continue;
+            const entryOverrides = rec.sheetOverrides || {};
+            const entryExcluded = rec.excludedSheetIndices || [];
+            if (rec.isCloudSynced) {
+              lastSyncedMetaHashRef.current.set(
+                rec.id,
+                getExcelLogMetaHash(entryOverrides, entryExcluded)
+              );
+            }
             restored.push({
               id: rec.id,
               projectId: rec.projectId,
@@ -383,8 +439,8 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               uploaderName: rec.uploaderName,
               isCloudSynced: rec.isCloudSynced,
               workbook: parsed,
-              sheetOverrides: rec.sheetOverrides || {},
-              excludedSheetIndices: rec.excludedSheetIndices || []
+              sheetOverrides: entryOverrides,
+              excludedSheetIndices: entryExcluded
             });
           } catch {
             // Skip corrupted cached entry silently
@@ -425,8 +481,10 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     if (isHydratingSaved) return;
     let active = true;
 
-    const authorizedCloudLogs = sharedExcelLogs.filter((log) =>
-      canAccessProject(currentUser, log.projectId)
+    const authorizedCloudLogs = sharedExcelLogs.filter(
+      (log) =>
+        canAccessProject(currentUser, log.projectId) &&
+        !isProjectLogLoadingPaused(log.projectId, log.projectName)
     );
     const cloudById = new Map<string, SharedExcelLogFile>(
       authorizedCloudLogs.map((log) => [log.id, log])
@@ -476,6 +534,12 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           ) {
             changed = true;
           }
+          if (!metaSyncTimersRef.current.has(item.id)) {
+            lastSyncedMetaHashRef.current.set(
+              item.id,
+              getExcelLogMetaHash(nextOverrides, nextExcluded)
+            );
+          }
           next.push({
             ...item,
             isCloudSynced: true,
@@ -498,7 +562,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       (log) => !existingIds.has(log.id) && !inFlightCloudFetchIdsRef.current.has(log.id)
     );
 
-    if (missingCloudLogs.length === 0) return;
+    if (missingCloudLogs.length === 0 || syncAbortedRef.current) return;
 
     missingCloudLogs.forEach((log) => inFlightCloudFetchIdsRef.current.add(log.id));
     setIsSyncingCloud(true);
@@ -506,10 +570,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     (async () => {
       const downloadedEntries: UploadedExcelWorkbook[] = [];
       for (const cloudLog of missingCloudLogs) {
-        if (!active) break;
+        if (!active || syncAbortedRef.current) {
+          inFlightCloudFetchIdsRef.current.delete(cloudLog.id);
+          continue;
+        }
         try {
           const buffer = await dataService.fetchSharedExcelLogBuffer(cloudLog);
-          const parsed = parseDriveExcelWorkbook(buffer, cloudLog.fileName);
+          const parsed = await parseDriveExcelWorkbook(buffer, cloudLog.fileName);
           if (parsed.sheets.length === 0) continue;
 
           let parsedOverrides: Record<number, SheetOverrideConfig> = {};
@@ -548,6 +615,10 @@ export const AdminExcelLogsView: React.FC<Props> = ({
             excludedSheetIndices: excludedIndices
           };
 
+          lastSyncedMetaHashRef.current.set(
+            entry.id,
+            getExcelLogMetaHash(entry.sheetOverrides, entry.excludedSheetIndices)
+          );
           downloadedEntries.push(entry);
           void saveStoredExcelFile({
             id: entry.id,
@@ -572,7 +643,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       }
 
       try {
-        if (!active) return;
+        if (!active || syncAbortedRef.current) return;
         if (downloadedEntries.length > 0) {
           setUploadedFiles((prev) => {
             const prevIds = new Set(prev.map((p) => p.id));
@@ -642,11 +713,31 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       });
     }
     if (entry.isCloudSynced) {
-      void dataService.updateSharedExcelLogMeta(
-        entry.id,
-        entry.sheetOverrides,
-        entry.excludedSheetIndices
-      );
+      const nextHash = getExcelLogMetaHash(entry.sheetOverrides, entry.excludedSheetIndices);
+      const existingTimer = metaSyncTimersRef.current.get(entry.id);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+        metaSyncTimersRef.current.delete(entry.id);
+      }
+      if (lastSyncedMetaHashRef.current.get(entry.id) === nextHash) {
+        return;
+      }
+      const logId = entry.id;
+      const overridesSnapshot = entry.sheetOverrides;
+      const excludedSnapshot = entry.excludedSheetIndices;
+      const timerId = window.setTimeout(() => {
+        metaSyncTimersRef.current.delete(logId);
+        if (isFirestoreQuotaExhausted()) return;
+        if (lastSyncedMetaHashRef.current.get(logId) === nextHash) return;
+        void dataService
+          .updateSharedExcelLogMeta(logId, overridesSnapshot, excludedSnapshot)
+          .then((ok) => {
+            if (ok) {
+              lastSyncedMetaHashRef.current.set(logId, nextHash);
+            }
+          });
+      }, 2000);
+      metaSyncTimersRef.current.set(logId, timerId);
     }
   };
 
@@ -716,6 +807,10 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       setUploadError('ليس لديك صلاحية رفع شيتات على هذا المشروع.');
       return;
     }
+    if (isProjectLogLoadingPaused(resolvedTarget)) {
+      setUploadError('تم إيقاف تحميل ورفع شيت اللوج لموقع رافيل.');
+      return;
+    }
     uploadTargetProjectIdRef.current = resolvedTarget;
     fileInputRef.current?.click();
   };
@@ -725,6 +820,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     const map: Record<string, RemoteProjectExcelSource[]> = {};
     const addSource = (src: RemoteProjectExcelSource) => {
       if (!canAccessProject(currentUser, src.projectId)) return;
+      if (isProjectLogLoadingPaused(src.projectId)) return;
       if (!map[src.projectId]) map[src.projectId] = [];
       map[src.projectId].push(src);
     };
@@ -768,12 +864,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     }
 
     return map;
-  }, [siteDeliverables, reports, currentUser]);
+  }, [siteDeliverables, reports, currentUser, projects]);
 
-  // Uploaded files strictly restricted to projects the current user can access
+  // Uploaded files strictly restricted to projects the current user can access (excluding paused projects)
   const accessibleUploadedFiles = useMemo(() => {
-    return uploadedFiles.filter((f) => canAccessProject(currentUser, f.projectId));
-  }, [uploadedFiles, currentUser]);
+    return uploadedFiles.filter(
+      (f) => canAccessProject(currentUser, f.projectId) && !isProjectLogLoadingPaused(f.projectId)
+    );
+  }, [uploadedFiles, currentUser, projects]);
 
   const activeProject = useMemo(
     () =>
@@ -925,6 +1023,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     const targetProjectName =
       sortedProjects.find((p) => p.id === targetProjectId)?.name || 'المشروع';
 
+    if (isProjectLogLoadingPaused(targetProjectId, targetProjectName)) {
+      setUploadError('تم إيقاف تحميل ورفع شيت اللوج لموقع رافيل.');
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
     setUploadError(null);
     setIsParsing(true);
 
@@ -932,12 +1038,18 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     const errors: string[] = [];
 
     for (const file of files) {
-      if (!isExcelFile(file)) {
-        errors.push(`الملف «${file.name}» ليس ملف Excel مدعوماً (.xlsx / .xls / .csv).`);
-        continue;
-      }
-      if (file.size <= 0) {
-        errors.push(`الملف «${file.name}» فارغ ولا يمكن قراءته.`);
+      try {
+        await validateUploadedFile(file, {
+          allowedFormats: ['xlsx', 'xls', 'csv'],
+          maxSizeBytes: MAX_PDF_FILE_SIZE_BYTES,
+          contextLabel: 'شيتات اللوج'
+        });
+      } catch (valErr) {
+        errors.push(
+          valErr instanceof Error
+            ? valErr.message
+            : `الملف «${file.name}» غير صالح أو غير مدعوم (.xlsx / .xls / .csv).`
+        );
         continue;
       }
 
@@ -945,7 +1057,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         // Yield briefly so the loading indicator paints before parsing large multi-sheet files
         await new Promise((resolve) => window.setTimeout(resolve, 16));
         const buffer = await file.arrayBuffer();
-        const parsed = parseDriveExcelWorkbook(buffer, file.name);
+        const parsed = await parseDriveExcelWorkbook(buffer, file.name);
         if (parsed.sheets.length === 0) {
           errors.push(`لم يتم العثور على أوراق عمل داخل «${file.name}».`);
           continue;
@@ -1041,6 +1153,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({
 
   // Load & parse an Excel file already uploaded on the website (Site Deliverables or Daily Report)
   const handleLoadRemoteProjectExcel = async (source: RemoteProjectExcelSource) => {
+    if (isProjectLogLoadingPaused(source.projectId)) {
+      setUploadError('تم إيقاف تحميل شيت اللوج لموقع رافيل.');
+      return;
+    }
+
     const existing = uploadedFiles.find(
       (f) => f.projectId === source.projectId && f.remoteKey === source.key
     );
@@ -1067,7 +1184,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         throw new Error('تعذر تحميل بيانات ملف Excel.');
       }
       const buffer = await resp.arrayBuffer();
-      const parsed = parseDriveExcelWorkbook(buffer, source.fileName);
+      const parsed = await parseDriveExcelWorkbook(buffer, source.fileName);
       if (parsed.sheets.length === 0) {
         throw new Error(`لم يتم العثور على أوراق عمل داخل «${source.fileName}».`);
       }
@@ -1128,6 +1245,13 @@ export const AdminExcelLogsView: React.FC<Props> = ({
   };
 
   const handleRemoveUploadedFile = async (id: string) => {
+    const pendingTimer = metaSyncTimersRef.current.get(id);
+    if (pendingTimer !== undefined) {
+      window.clearTimeout(pendingTimer);
+      metaSyncTimersRef.current.delete(id);
+    }
+    lastSyncedMetaHashRef.current.delete(id);
+
     const target = uploadedFilesRef.current.find((item) => item.id === id);
     if (target?.isCloudSynced) {
       try {
@@ -1157,6 +1281,37 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       }
       return next;
     });
+  };
+
+  const handleDeleteAllExcelLogs = async () => {
+    if (!isAdmin || isClearingAllLogs) return;
+    setIsClearingAllLogs(true);
+    setUploadError(null);
+    metaSyncTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
+    metaSyncTimersRef.current.clear();
+    lastSyncedMetaHashRef.current.clear();
+    try {
+      const deletedCloudCount = await dataService.deleteAllSharedExcelLogs();
+      await clearAllStoredExcelFiles();
+      inFlightCloudFetchIdsRef.current.clear();
+      setUploadedFiles([]);
+      setActiveFileId(null);
+      setActiveFileByProject({});
+      setActiveView('overview');
+      setConfirmClearAllLogs(false);
+      showToast(
+        deletedCloudCount > 0
+          ? `تم حذف جميع شيتات اللوج (${deletedCloudCount} ملف سحابي + النسخ المحلية) بنجاح.`
+          : 'تم مسح جميع شيتات اللوج المحفوظة بنجاح.'
+      );
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : 'تعذر حذف جميع شيتات اللوج من قاعدة البيانات.'
+      );
+      setConfirmClearAllLogs(false);
+    } finally {
+      setIsClearingAllLogs(false);
+    }
   };
 
   const activeEntry = useMemo(() => {
@@ -1659,28 +1814,54 @@ export const AdminExcelLogsView: React.FC<Props> = ({
     );
   };
 
-  if (!isAdmin && sortedProjects.length === 0) {
-    return (
-      <div className="max-w-3xl mx-auto py-12">
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-8 text-center space-y-3">
-          <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 flex items-center justify-center mx-auto">
-            <FileSpreadsheet className="w-6 h-6" />
-          </div>
-          <h2 className="text-base font-bold text-slate-900 dark:text-white">
-            لا توجد مشاريع مصرح لك بالوصول إليها حالياً
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 leading-relaxed max-w-md mx-auto">
-            تظهر في تبويب <strong className="font-mono">logs</strong> المشاريع المسندة لحسابك فقط.
-            يرجى التواصل مع مسؤول النظام لمنحك صلاحية الوصول للمشروع المطلوب.
-          </p>
-        </div>
-      </div>
+  const isActiveProjectLogPaused = activeProject
+    ? isProjectLogLoadingPaused(activeProject.id, activeProject.name)
+    : false;
+
+  const pausedActiveProjectCloudLogs = useMemo(() => {
+    if (!activeProject || !isActiveProjectLogPaused) return [];
+    return sharedExcelLogs.filter(
+      (log) =>
+        log.projectId === activeProject.id ||
+        isProjectLogLoadingPaused(log.projectId, log.projectName)
     );
+  }, [activeProject, isActiveProjectLogPaused, sharedExcelLogs, projects]);
+
+  if (!isAdmin) {
+    return null;
   }
 
   const activeProjectRemoteSources = activeProject
     ? remoteExcelSourcesByProject[activeProject.id] || []
     : [];
+
+  const handleStopCloudSync = () => {
+    syncAbortedRef.current = true;
+    inFlightCloudFetchIdsRef.current.clear();
+    setIsSyncingCloud(false);
+    showToast('تم إيقاف تحميل ومزامنة شيتات اللوج.');
+  };
+
+  const handleDeletePausedProjectCloudLogs = async () => {
+    if (!isAdmin || pausedActiveProjectCloudLogs.length === 0 || isClearingAllLogs) return;
+    setIsClearingAllLogs(true);
+    setUploadError(null);
+    try {
+      let deletedCount = 0;
+      for (const cloudLog of pausedActiveProjectCloudLogs) {
+        await dataService.deleteSharedExcelLog(cloudLog.id);
+        void deleteStoredExcelFile(cloudLog.id);
+        deletedCount++;
+      }
+      showToast(`تم حذف ${deletedCount} ملف لوج سحابي خاص بموقع «${activeProject?.name || 'رافيل'}».`);
+    } catch (err) {
+      setUploadError(
+        err instanceof Error ? err.message : 'تعذر حذف ملفات اللوج السحابية للموقع.'
+      );
+    } finally {
+      setIsClearingAllLogs(false);
+    }
+  };
 
   return (
     <div className="space-y-5 max-w-7xl mx-auto pb-16">
@@ -1708,9 +1889,16 @@ export const AdminExcelLogsView: React.FC<Props> = ({
             <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white leading-snug flex flex-wrap items-center gap-2">
               <span>شيتات اللوج حسب المواقع والمشاريع (Excel Logs)</span>
               {isSyncingCloud && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-bold bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   <span>جاري مزامنة الشيتات...</span>
+                  <button
+                    type="button"
+                    onClick={handleStopCloudSync}
+                    className="mr-1 px-1.5 py-0.5 rounded bg-rose-100 hover:bg-rose-200 dark:bg-rose-900/60 dark:hover:bg-rose-800/70 text-rose-700 dark:text-rose-300 text-[10px] font-bold cursor-pointer transition-colors"
+                  >
+                    إيقاف
+                  </button>
                 </span>
               )}
             </h2>
@@ -1722,19 +1910,45 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          disabled={isParsing || sortedProjects.length === 0}
-          onClick={() => triggerUploadForProject()}
-          className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0 whitespace-nowrap touch-manipulation"
-        >
-          {isParsing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-          <span>
-            {activeProject
-              ? `رفع Excel لـ «${activeProject.name.length > 22 ? activeProject.name.slice(0, 21) + '…' : activeProject.name}»`
-              : 'رفع ملف Excel من الجهاز'}
-          </span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto shrink-0">
+          {(uploadedFiles.length > 0 || sharedExcelLogs.length > 0) && (
+            <button
+              type="button"
+              disabled={isClearingAllLogs || isParsing}
+              onClick={() => setConfirmClearAllLogs(true)}
+              className="w-full sm:w-auto min-h-[44px] px-3.5 py-2.5 bg-red-50 hover:bg-red-100 dark:bg-red-950/50 dark:hover:bg-red-900/60 border border-red-200 dark:border-red-800 disabled:opacity-50 text-red-700 dark:text-red-300 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0 whitespace-nowrap touch-manipulation"
+            >
+              {isClearingAllLogs ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Trash2 className="w-4 h-4" />
+              )}
+              <span>حذف كل شيتات اللوج</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            disabled={isParsing || sortedProjects.length === 0 || isActiveProjectLogPaused}
+            onClick={() => triggerUploadForProject()}
+            className="w-full sm:w-auto min-h-[44px] px-4 py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0 whitespace-nowrap touch-manipulation"
+          >
+            {isParsing ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : isActiveProjectLogPaused ? (
+              <PauseCircle className="w-4 h-4" />
+            ) : (
+              <Plus className="w-4 h-4" />
+            )}
+            <span>
+              {isActiveProjectLogPaused
+                ? 'تحميل اللوج متوقف لهذا الموقع'
+                : activeProject
+                  ? `رفع Excel لـ «${activeProject.name.length > 22 ? activeProject.name.slice(0, 21) + '…' : activeProject.name}»`
+                  : 'رفع ملف Excel من الجهاز'}
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* =====================================================================
@@ -1813,6 +2027,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           {/* Dedicated Internal Tab for Every Project Registered on the Website */}
           {visibleProjectTabs.map((project) => {
             const isSelected = selectedProjectTab === project.id;
+            const isPaused = isProjectLogLoadingPaused(project.id, project.name);
             const localFilesCount = fileCountByProject[project.id] || 0;
             const remoteFilesCount = (remoteExcelSourcesByProject[project.id] || []).length;
             return (
@@ -1820,7 +2035,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                 key={project.id}
                 type="button"
                 onClick={() => selectProjectTab(project.id)}
-                title={`${project.name} (${project.code}) — ${localFilesCount} ملف لوج محمّل`}
+                title={
+                  isPaused
+                    ? `${project.name} (${project.code}) — تم إيقاف تحميل شيت اللوج`
+                    : `${project.name} (${project.code}) — ${localFilesCount} ملف لوج محمّل`
+                }
                 className={`min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer transition-colors border ${
                   isSelected
                     ? 'bg-blue-600 text-white border-blue-600'
@@ -1830,14 +2049,20 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                 <span className="max-w-[200px] truncate">{project.name}</span>
                 <span
                   className={`font-mono tabular-nums text-[11px] ${
-                    isSelected ? 'text-blue-100' : 'text-slate-400 dark:text-slate-500'
+                    isSelected
+                      ? 'text-blue-100'
+                      : isPaused
+                        ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-slate-400 dark:text-slate-500'
                   }`}
                 >
-                  {localFilesCount > 0
-                    ? `${localFilesCount} ملف`
-                    : remoteFilesCount > 0
-                      ? `${remoteFilesCount} بالموقع`
-                      : project.code}
+                  {isPaused
+                    ? 'متوقف'
+                    : localFilesCount > 0
+                      ? `${localFilesCount} ملف`
+                      : remoteFilesCount > 0
+                        ? `${remoteFilesCount} بالموقع`
+                        : project.code}
                 </span>
               </button>
             );
@@ -2367,7 +2592,9 @@ export const AdminExcelLogsView: React.FC<Props> = ({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
-                {allProjectsOverview.perProject.map((item) => (
+                {allProjectsOverview.perProject.map((item) => {
+                  const isCardPaused = isProjectLogLoadingPaused(item.project.id, item.project.name);
+                  return (
                   <div
                     key={item.project.id}
                     onClick={() => selectProjectTab(item.project.id)}
@@ -2385,14 +2612,14 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 flex flex-wrap items-center gap-x-1.5 tabular-nums">
                         <span>{item.project.status === 'active' ? 'مشروع نشط' : 'مكتمل'}</span>
                         <span aria-hidden="true">·</span>
-                        <span>{item.filesCount} ملف لوج</span>
-                        {item.sheetsCount > 0 && (
+                        <span>{isCardPaused ? 'تحميل اللوج متوقف' : `${item.filesCount} ملف لوج`}</span>
+                        {!isCardPaused && item.sheetsCount > 0 && (
                           <>
                             <span aria-hidden="true">·</span>
                             <span>{item.sheetsCount} ورقة</span>
                           </>
                         )}
-                        {item.remoteCount > 0 && (
+                        {!isCardPaused && item.remoteCount > 0 && (
                           <>
                             <span aria-hidden="true">·</span>
                             <span className="text-blue-600 dark:text-blue-400 font-semibold">
@@ -2422,9 +2649,11 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                       </div>
                     ) : (
                       <div className="pt-2.5 border-t border-slate-200/70 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
-                        {item.filesCount > 0 && dateFilterActive
-                          ? 'لا توجد بنود في الفترة الزمنية المحددة'
-                          : 'لم يتم رفع شيتات لوج لهذا الموقع بعد'}
+                        {isCardPaused
+                          ? 'تم إيقاف تحميل شيت اللوج لهذا الموقع'
+                          : item.filesCount > 0 && dateFilterActive
+                            ? 'لا توجد بنود في الفترة الزمنية المحددة'
+                            : 'لم يتم رفع شيتات لوج لهذا الموقع بعد'}
                       </div>
                     )}
 
@@ -2442,18 +2671,24 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                       </button>
                       <button
                         type="button"
+                        disabled={isCardPaused}
                         onClick={(e) => {
                           e.stopPropagation();
                           triggerUploadForProject(item.project.id);
                         }}
-                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap"
+                        className="min-h-[36px] px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 dark:disabled:bg-slate-700 disabled:text-slate-500 dark:disabled:text-slate-400 disabled:cursor-not-allowed text-white text-xs font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors shrink-0 whitespace-nowrap"
                       >
-                        <Upload className="w-3.5 h-3.5" />
-                        <span>رفع Excel</span>
+                        {isCardPaused ? (
+                          <PauseCircle className="w-3.5 h-3.5" />
+                        ) : (
+                          <Upload className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isCardPaused ? 'متوقف' : 'رفع Excel'}</span>
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -2521,8 +2756,40 @@ export const AdminExcelLogsView: React.FC<Props> = ({
             </div>
           )}
 
-          {/* Empty State Dropzone OR Compact Uploaded Workbooks Bar for This Project */}
-          {isHydratingSaved && projectUploadedFiles.length === 0 ? (
+          {/* Empty State Dropzone OR Paused Notice OR Compact Uploaded Workbooks Bar for This Project */}
+          {isActiveProjectLogPaused ? (
+            <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 sm:p-8 border border-amber-200 dark:border-amber-900/60 text-center space-y-3">
+              <div className="w-12 h-12 rounded-xl bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto">
+                <PauseCircle className="w-6 h-6" />
+              </div>
+              <div className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">
+                تم إيقاف تحميل شيت اللوج لموقع «{activeProject?.name || 'رافيل'}»
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-400 max-w-md mx-auto leading-relaxed">
+                تم تعطيل التحميل التلقائي والمزامنة السحابية ورفع شيتات Excel الخاصة بهذا الموقع حالياً.
+              </p>
+              {pausedActiveProjectCloudLogs.length > 0 && (
+                <div className="pt-2 flex flex-col items-center gap-2">
+                  <span className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">
+                    يوجد {pausedActiveProjectCloudLogs.length} ملف محفوظ سحابياً ومتوقف عن التحميل
+                  </span>
+                  <button
+                    type="button"
+                    disabled={isClearingAllLogs}
+                    onClick={() => void handleDeletePausedProjectCloudLogs()}
+                    className="min-h-[38px] px-3.5 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 dark:hover:bg-rose-900/60 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                  >
+                    {isClearingAllLogs ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>حذف شيتات رافيل المحفوظة سحابياً</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : isHydratingSaved && projectUploadedFiles.length === 0 ? (
             <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 border border-slate-200 dark:border-slate-800 flex items-center justify-center gap-2.5 text-xs font-bold text-slate-500 dark:text-slate-400">
               <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
               <span>جاري تحميل شيتات اللوج المحفوظة للموقع...</span>
@@ -5374,6 +5641,63 @@ export const AdminExcelLogsView: React.FC<Props> = ({
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Confirm Delete All Uploaded Excel Logs Modal */}
+      {confirmClearAllLogs && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center p-4"
+          onClick={() => {
+            if (!isClearingAllLogs) setConfirmClearAllLogs(false);
+          }}
+        >
+          <div
+            className="w-full max-w-md bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-2xl p-5 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-red-100 dark:bg-red-950/70 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
+                  تأكيد حذف جميع شيتات اللوج
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  سيتم حذف جميع ملفات Excel المرفوعة مسبقاً في تبويب <strong className="font-mono">logs</strong> بشكل نهائي من قاعدة البيانات السحابية ومن الذاكرة المحلية للجهاز. لا يمكن التراجع عن هذا الإجراء.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                disabled={isClearingAllLogs}
+                onClick={() => setConfirmClearAllLogs(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 cursor-pointer disabled:opacity-50"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={isClearingAllLogs}
+                onClick={() => void handleDeleteAllExcelLogs()}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-700 text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isClearingAllLogs ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>جاري الحذف...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>نعم، حذف الكل نهائياً</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

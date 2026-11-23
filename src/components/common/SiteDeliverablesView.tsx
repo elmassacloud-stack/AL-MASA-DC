@@ -76,8 +76,31 @@ export const SiteDeliverablesView: React.FC<Props> = ({
   // Live tick every 30 seconds so 48h countdown badges stay accurate
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNowTick(Date.now()), 30000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (timer !== null) return;
+      timer = setInterval(() => setNowTick(Date.now()), 30000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        setNowTick(Date.now());
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   // Upload form toggle (always open for site user; toggleable for admin)

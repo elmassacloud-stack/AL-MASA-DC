@@ -1,0 +1,28 @@
+{
+  "name": "متابعة المواقع - إدارة مراقبة الوثائق (DC)",
+  "short_name": "DC Follow-Up",
+  "description": "تطبيق ويب متجاوب للجوال لإدارة ومتابعة المواقع والمشاريع، تقارير الأعمال اليومية، تتبع التقديمات (Submittals)، البلاغات والمهام لإدارة مراقبة الوثائق.",
+  "start_url": "/",
+  "display": "standalone",
+  "dir": "rtl",
+  "lang": "ar",
+  "theme_color": "#2563eb",
+  "background_color": "#f8fafc",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/dc-logo.jpg",
+      "sizes": "192x192",
+      "type": "image/jpeg"
+    },
+    {
+      "src": "/dc-logo.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg"
+    }
+  ]
+}

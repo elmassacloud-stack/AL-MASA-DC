@@ -91,3 +91,19 @@ export async function deleteStoredExcelFile(id: string): Promise<void> {
     }
   });
 }
+
+export async function clearAllStoredExcelFiles(): Promise<void> {
+  const db = await openExcelLogsDb();
+  if (!db) return;
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+

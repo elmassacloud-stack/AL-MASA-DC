@@ -1,4 +1,4 @@
-import * as XLSX from 'xlsx';
+import type * as XLSXTypes from 'xlsx';
 import { SubmittalStatusCode } from '../types';
 
 export type LogDocumentCategory = 'IR' | 'MIR' | 'SD' | 'MS' | 'MAT' | 'RFI' | 'OTHER';
@@ -330,7 +330,7 @@ export function detectHeaderRowIndex(rows: string[][]): number {
 const MAX_SAFE_ROWS = 50000;
 const MAX_SAFE_COLS = 80;
 
-function formatWorksheetCell(cell: XLSX.CellObject | undefined): string {
+function formatWorksheetCell(cell: XLSXTypes.CellObject | undefined): string {
   if (!cell || cell.t === 'z') return '';
   if (cell.t === 'd' && cell.v instanceof Date && !Number.isNaN(cell.v.getTime())) {
     const yyyy = cell.v.getFullYear();
@@ -352,7 +352,10 @@ function formatWorksheetCell(cell: XLSX.CellObject | undefined): string {
  * Extracts a compact string[][] matrix directly from populated cells in a worksheet.
  * Immune to bloated !ref ranges (e.g. A1:XFD1048576) that cause SheetJS sheet_to_json to crash/OOM.
  */
-function extractSafeSheetMatrix(sheet: XLSX.WorkSheet | undefined): string[][] {
+function extractSafeSheetMatrix(
+  sheet: XLSXTypes.WorkSheet | undefined,
+  decodeCell: (addr: string) => XLSXTypes.CellAddress
+): string[][] {
   if (!sheet || typeof sheet !== 'object') return [];
   const metaSheet = sheet as Record<string, unknown>;
   if (metaSheet['!type'] === 'chart') return [];
@@ -362,7 +365,7 @@ function extractSafeSheetMatrix(sheet: XLSX.WorkSheet | undefined): string[][] {
 
   // Support dense mode (!data) if present
   if (Array.isArray(metaSheet['!data'])) {
-    const denseRows = metaSheet['!data'] as (XLSX.CellObject | undefined)[][];
+    const denseRows = metaSheet['!data'] as (XLSXTypes.CellObject | undefined)[][];
     const limitR = Math.min(denseRows.length, MAX_SAFE_ROWS);
     for (let r = 0; r < limitR; r++) {
       const rowArr = denseRows[r];
@@ -385,13 +388,13 @@ function extractSafeSheetMatrix(sheet: XLSX.WorkSheet | undefined): string[][] {
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
       if (key.charCodeAt(0) === 33) continue; // Skip metadata keys starting with '!'
-      const cell = sheet[key] as XLSX.CellObject | undefined;
+      const cell = sheet[key] as XLSXTypes.CellObject | undefined;
       const text = formatWorksheetCell(cell);
       if (!text) continue;
 
-      let pos: XLSX.CellAddress;
+      let pos: XLSXTypes.CellAddress;
       try {
-        pos = XLSX.utils.decode_cell(key);
+        pos = decodeCell(key);
       } catch {
         continue;
       }
@@ -445,12 +448,13 @@ function extractSafeSheetMatrix(sheet: XLSX.WorkSheet | undefined): string[][] {
   return rawRows;
 }
 
-export function parseDriveExcelWorkbook(
+export async function parseDriveExcelWorkbook(
   buffer: ArrayBuffer,
   fileName: string
-): ParsedWorkbookData {
+): Promise<ParsedWorkbookData> {
+  const XLSX = await import('xlsx');
   const bytes = new Uint8Array(buffer);
-  let workbook: XLSX.WorkBook;
+  let workbook: XLSXTypes.WorkBook;
 
   try {
     workbook = XLSX.read(bytes, {
@@ -499,7 +503,7 @@ export function parseDriveExcelWorkbook(
       if (!sheet) continue;
       if ((sheet as Record<string, unknown>)['!type'] === 'chart') continue;
 
-      const rawRows = extractSafeSheetMatrix(sheet);
+      const rawRows = extractSafeSheetMatrix(sheet, XLSX.utils.decode_cell);
       const detectedHeaderRowIndex = detectHeaderRowIndex(rawRows);
       sheets.push({
         name,
@@ -1742,11 +1746,12 @@ export function analyzeWorkbook(
   };
 }
 
-export function exportExtractedLogsToExcel(
+export async function exportExtractedLogsToExcel(
   rows: ExtractedLogRow[],
   sourceFileName: string,
   sheetName: string
-): void {
+): Promise<void> {
+  const XLSX = await import('xlsx');
   const statusLabels: Record<string, string> = {
     A: 'A - معتمد',
     B: 'B - معتمد بملاحظات',
@@ -1797,10 +1802,11 @@ export function exportExtractedLogsToExcel(
   XLSX.writeFile(wb, `ALMASA_DC_Extract_${safeBase}_${safeSheet}_${dateTag}.xlsx`);
 }
 
-export function exportWorkbookSummaryToExcel(
+export async function exportWorkbookSummaryToExcel(
   sourceFileName: string,
   sheets: SheetAnalytics[]
-): void {
+): Promise<void> {
+  const XLSX = await import('xlsx');
   const summaryRows = sheets.map((s, idx) => ({
     م: idx + 1,
     'اسم الورقة الداخلية': s.sheetName,

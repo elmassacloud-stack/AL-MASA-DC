@@ -15,44 +15,36 @@ import {
  */
 
 // 0. APPLICATION URLS (روابط التطبيق للمشاركة وفرق المواقع)
-export const SHARED_APP_URL =
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_APP_URL) ||
-  'https://ais-pre-itffrlf5j3n7gvtbo6rz45-829466429532.europe-west2.run.app';
-
-export const DEV_APP_URL =
-  'https://ais-dev-itffrlf5j3n7gvtbo6rz45-829466429532.europe-west2.run.app';
-
-export function getAppUrl(): string {
-  if (
-    typeof window !== 'undefined' &&
-    window.location.origin &&
-    !window.location.origin.includes('localhost') &&
-    !window.location.origin.includes('127.0.0.1')
-  ) {
+function resolveConfiguredAppUrl(): string {
+  const envUrl =
+    typeof import.meta !== 'undefined'
+      ? (
+          (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
+            ?.VITE_APP_URL || ''
+        ).trim()
+      : '';
+  if (envUrl) return envUrl.replace(/\/+$/, '');
+  if (typeof window !== 'undefined' && window.location?.origin) {
     return window.location.origin;
   }
-  return SHARED_APP_URL;
+  return '';
+}
+
+export const SHARED_APP_URL = resolveConfiguredAppUrl();
+export const DEV_APP_URL = resolveConfiguredAppUrl();
+
+export function getAppUrl(): string {
+  return resolveConfiguredAppUrl();
 }
 
 // 1. PRIMARY SUPER ADMIN EMAIL (البريد الإلكتروني المعتمد للمسؤول الرئيسي)
 export const SUPER_ADMIN_EMAIL = 'elmassacloud@gmail.com';
 export const ADMIN_EMAIL_CONFIG = SUPER_ADMIN_EMAIL;
-export const ALLOWED_ADMIN_EMAILS: string[] = [
-  SUPER_ADMIN_EMAIL,
-  'admin@dc-manager.com',
-  'dc.manager@example.com'
-];
 
 // Helper to check if an email is the primary Super Admin
 export function isSuperAdminEmail(email?: string | null): boolean {
   if (!email) return false;
   return email.trim().toLowerCase() === SUPER_ADMIN_EMAIL;
-}
-
-// Helper to check if an email has admin privileges
-export function isConfiguredAdminEmail(email?: string | null): boolean {
-  if (!email) return false;
-  return ALLOWED_ADMIN_EMAILS.some((adm) => adm.toLowerCase() === email.trim().toLowerCase());
 }
 
 // 2. SUBMITTAL STATUS CODES CONFIGURATION (مواقف التقديمات الهندسية)

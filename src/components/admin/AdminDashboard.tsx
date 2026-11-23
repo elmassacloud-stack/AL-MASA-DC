@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import {
   TrendingUp,
   AlertTriangle,
@@ -18,19 +18,20 @@ import {
   Project,
   DailyReport,
   IssueReport,
-  ProjectTask,
-  Announcement
+  ProjectTask
 } from '../../types';
 import { getTodayDateStr } from '../../seedData';
 import { WORK_DISCIPLINE_CONFIG } from '../../config';
-import { AdminAnalyticsCharts } from './AdminAnalyticsCharts';
+
+const AdminAnalyticsCharts = lazy(() =>
+  import('./AdminAnalyticsCharts').then((m) => ({ default: m.AdminAnalyticsCharts }))
+);
 
 interface Props {
   projects: Project[];
   reports: DailyReport[];
   issues: IssueReport[];
   tasks: ProjectTask[];
-  announcements: Announcement[];
   onNavigateTab: (tabId: string) => void;
   onOpenReport?: (reportId: string) => void;
 }
@@ -40,7 +41,6 @@ export const AdminDashboard: React.FC<Props> = ({
   reports,
   issues,
   tasks,
-  announcements,
   onNavigateTab
 }) => {
   const todayStr = getTodayDateStr();
@@ -227,12 +227,20 @@ export const AdminDashboard: React.FC<Props> = ({
       {/* =========================================================================
           INTERACTIVE ANALYTICS CHARTS (RECHARTS)
           ========================================================================= */}
-      <AdminAnalyticsCharts
-        projects={projects}
-        reports={reports}
-        tasks={tasks}
-        onNavigateTab={onNavigateTab}
-      />
+      <Suspense
+        fallback={
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 text-center text-xs font-semibold text-slate-500 dark:text-slate-400">
+            جاري تحميل الرسوم البيانية التحليلية...
+          </div>
+        }
+      >
+        <AdminAnalyticsCharts
+          projects={projects}
+          reports={reports}
+          tasks={tasks}
+          onNavigateTab={onNavigateTab}
+        />
+      </Suspense>
 
       {/* =========================================================================
           PER-PROJECT STATUS & COMPLIANCE TABLE (Requested specifically)
@@ -375,7 +383,7 @@ export const AdminDashboard: React.FC<Props> = ({
                           </button>
                         ) : (
                           <button
-                            onClick={() => onNavigateTab('announcements')}
+                            onClick={() => onNavigateTab('tasks')}
                             className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 hover:bg-slate-200 font-medium text-xs cursor-pointer transition-colors"
                           >
                             تذكير الموقع
@@ -391,63 +399,26 @@ export const AdminDashboard: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* Quick Launch & Submittal Stalled Warning */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Quick Submittal Search Trigger */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Search className="w-5 h-5 text-blue-600" />
-              <h4 className="font-bold text-slate-900 dark:text-white text-sm sm:text-base">
-                متتبع التقديمات السريع (Submittal Tracker)
-              </h4>
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-              البحث عن أي رقم تقديم (مثل MAS_RAV_IR_STR_0055) لمعرفة كافة مراجعاته (REV)، مواقف اعتماده عبر الأيام، وتنبيهات التعثر.
-            </p>
+      {/* Quick Submittal Search Trigger */}
+      <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <Search className="w-5 h-5 text-blue-600" />
+            <h4 className="font-bold text-slate-900 dark:text-white text-sm sm:text-base">
+              متتبع التقديمات السريع (Submittal Tracker)
+            </h4>
           </div>
-          <button
-            onClick={() => onNavigateTab('submittal-tracker')}
-            className="mt-4 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors"
-          >
-            <Search className="w-4 h-4" />
-            <span>فتح متتبع التقديمات</span>
-          </button>
+          <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+            البحث عن أي رقم تقديم (مثل MAS_RAV_IR_STR_0055) لمعرفة كافة مراجعاته (REV)، مواقف اعتماده عبر الأيام، وتنبيهات التعثر.
+          </p>
         </div>
-
-        {/* Latest Announcements summary */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-5 border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Layers className="w-5 h-5 text-indigo-600" />
-              <h4 className="font-bold text-slate-900 dark:text-white text-sm sm:text-base">
-                التعاميم والتنبيهات الإدارية للمواقع
-              </h4>
-            </div>
-            {announcements.length > 0 ? (
-              <div className="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-800 text-xs">
-                <span className="font-bold text-slate-900 dark:text-white block mb-0.5">
-                  {announcements[0].title}
-                </span>
-                <p className="text-slate-600 dark:text-slate-400 line-clamp-2">
-                  {announcements[0].content}
-                </p>
-                <span className="text-[11px] text-blue-600 dark:text-blue-400 font-semibold mt-1 block">
-                  تم تأكيد القراءة من {announcements[0].readBy.length} مستخدم
-                </span>
-              </div>
-            ) : (
-              <p className="text-xs text-slate-400">لا توجد تعاميم منشورة حالياً.</p>
-            )}
-          </div>
-          <button
-            onClick={() => onNavigateTab('announcements')}
-            className="mt-4 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span>نشر تعميم جديد للمشاريع</span>
-          </button>
-        </div>
+        <button
+          onClick={() => onNavigateTab('submittal-tracker')}
+          className="shrink-0 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors"
+        >
+          <Search className="w-4 h-4" />
+          <span>فتح متتبع التقديمات</span>
+        </button>
       </div>
     </div>
   );

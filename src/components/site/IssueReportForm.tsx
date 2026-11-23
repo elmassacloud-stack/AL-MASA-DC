@@ -12,9 +12,10 @@ import {
   X
 } from 'lucide-react';
 import { UserProfile, Project, IssueType, IssuePriority } from '../../types';
-import { ISSUE_TYPES_CONFIG } from '../../config';
+import { ISSUE_TYPES_CONFIG, MAX_REPORT_ATTACHMENT_SIZE_BYTES } from '../../config';
 import { dataService } from '../../services/dataService';
 import { getAccessibleProjects } from '../../utils/accessControl';
+import { validateUploadedFile } from '../../utils/pdfUtils';
 
 interface Props {
   currentUser: UserProfile;
@@ -67,19 +68,30 @@ export const IssueReportForm: React.FC<Props> = ({
     }
   };
 
-  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
+    e.target.value = '';
+    if (!file) return;
+    try {
+      await validateUploadedFile(file, {
+        allowedFormats: ['jpeg', 'png', 'webp'],
+        maxSizeBytes: MAX_REPORT_ATTACHMENT_SIZE_BYTES
+      });
+      setErrorMsg(null);
       setPhotoName(file.name);
       const reader = new FileReader();
       reader.onloadend = () => {
         setPhotoUrl(reader.result as string);
       };
       reader.readAsDataURL(file);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error ? err.message : 'صيغة الصورة غير مدعومة أو حجمها يتجاوز الحد المسموح.'
+      );
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
 
@@ -97,7 +109,7 @@ export const IssueReportForm: React.FC<Props> = ({
     setIsSubmitting(true);
 
     try {
-      const created = dataService.addIssue({
+      const created = await dataService.addIssue({
         projectId: project.id,
         projectName: project.name,
         authorId: currentUser.id,
@@ -118,8 +130,12 @@ export const IssueReportForm: React.FC<Props> = ({
           onIssueReported();
         }
       }, 2000);
-    } catch {
-      setErrorMsg('حدث خطأ أثناء حفظ البلاغ، يرجى المحاولة ثانية.');
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'حدث خطأ أثناء حفظ البلاغ، يرجى المحاولة ثانية.'
+      );
     } finally {
       setIsSubmitting(false);
     }

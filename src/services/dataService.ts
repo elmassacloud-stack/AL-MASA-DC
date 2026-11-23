@@ -9,7 +9,15 @@ import {
   onSnapshot,
   query,
   where,
+  orderBy,
+  limit,
+  arrayUnion,
+  runTransaction,
   writeBatch,
+  Query,
+  QueryConstraint,
+  QuerySnapshot,
+  DocumentData,
   Unsubscribe
 } from 'firebase/firestore';
 import { User as FirebaseUser } from 'firebase/auth';
@@ -21,7 +29,6 @@ import {
   IssueReport,
   ProjectTask,
   TaskAttachment,
-  TaskAttachmentChunk,
   Announcement,
   UserProfile,
   UserRole,
@@ -30,16 +37,13 @@ import {
   ExecutedWork,
   WorkDiscipline,
   SiteDeliverable,
-  SiteDeliverableChunk,
-  SiteDeliverableType,
   SiteDeliverableStatus,
   PersonalNote,
   AppBrandingSettings,
   ActivityLogEntry,
   ActivityEntityType,
   ActivityActionType,
-  SharedExcelLogFile,
-  SharedExcelLogChunk
+  SharedExcelLogFile
 } from '../types';
 import {
   SEED_PROJECTS,
@@ -53,9 +57,6 @@ import {
 } from '../seedData';
 import {
   DEFAULT_DAILY_REPORT_CUTOFF_HOUR,
-  SITE_DELIVERABLE_RETENTION_MS,
-  MAX_PDF_FILE_SIZE_BYTES,
-  PDF_CHUNK_SIZE_CHARS,
   MAX_REPORT_ATTACHMENT_SIZE_BYTES,
   MAX_REPORT_ATTACHMENTS,
   REPORT_ATTACHMENT_CHUNK_SIZE_CHARS,
@@ -71,12 +72,12 @@ import {
   db,
   OperationType,
   handleFirestoreError,
+  getFirestoreErrorCode,
+  isFirestoreQuotaExhausted,
+  markFirestoreQuotaExhausted,
   stripUndefined,
-  createFirebaseUserByAdmin,
   updateCurrentAuthDisplayName,
   isDeliverableExpired,
-  deleteDeliverableFromFirebase,
-  purgeExpiredSiteDeliverablesFromFirebase,
   isTaskAttachmentExpired,
   deleteTaskAttachmentChunksFromFirebase,
   deleteAllTaskChunksFromFirebase,
@@ -95,8 +96,6 @@ import {
 } from '../utils/accessControl';
 import {
   base64ToBlob,
-  base64ToArrayBuffer,
-  uint8ArrayToBase64,
   splitBase64IntoChunks,
   isExcelFileName,
   getExcelMimeType,
@@ -112,174 +111,48 @@ import {
   isValidHexColor,
   normalizeHexColor
 } from '../utils/brandTheme';
+import {
+  safeStorage,
+  STORAGE_KEYS,
+  normalizeEmail,
+  chunkArray,
+  normalizeAssignedProjectsList,
+  normalizeUserProfile,
+  type CreateUserPayload,
+  type DeliverableUploadProgress,
+  type ReportUploadProgress,
+  type TaskUploadProgress,
+  type HistoricalSyncSummary,
+  type CreateSiteDeliverablePayload
+} from './data/shared';
+import * as reportsDomain from './data/reports';
+import * as tasksDomain from './data/tasks';
+import * as issuesDomain from './data/issues';
+import * as usersDomain from './data/users';
+import * as notificationsDomain from './data/notifications';
+import * as deliverablesDomain from './data/deliverables';
+import * as excelLogsDomain from './data/excelLogs';
 
-const memoryStorageFallback = new Map<string, string>();
-const safeStorage = {
-  getItem(key: string): string | null {
-    if (memoryStorageFallback.has(key)) {
-      return memoryStorageFallback.get(key) ?? null;
-    }
-    try {
-      return typeof window !== 'undefined' && window.localStorage
-        ? window.localStorage.getItem(key)
-        : null;
-    } catch {
-      return null;
-    }
-  },
-  setItem(key: string, value: string): void {
-    memoryStorageFallback.set(key, value);
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.setItem(key, value);
-      }
-    } catch {
-      // Keep working seamlessly in memory when browser storage quota is exceeded or blocked
-    }
-  },
-  removeItem(key: string): void {
-    memoryStorageFallback.delete(key);
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        window.localStorage.removeItem(key);
-      }
-    } catch {
-      // ignore storage errors
-    }
-  }
+export type {
+  CreateUserPayload,
+  DeliverableUploadProgress,
+  ReportUploadProgress,
+  TaskUploadProgress,
+  HistoricalSyncSummary,
+  CreateSiteDeliverablePayload
 };
+export {
+  reportsDomain,
+  tasksDomain,
+  issuesDomain,
+  usersDomain,
+  notificationsDomain,
+  deliverablesDomain,
+  excelLogsDomain
+};
+
 const localStorage = safeStorage;
 
-const STORAGE_KEYS = {
-  PROJECTS: 'dc_projects_v2',
-  REPORTS: 'dc_reports_v2',
-  ISSUES: 'dc_issues_v2',
-  TASKS: 'dc_tasks_v2',
-  ANNOUNCEMENTS: 'dc_announcements_v2',
-  EXECUTED_WORKS: 'dc_executed_works_v2',
-  SITE_DELIVERABLES: 'dc_site_deliverables_v2',
-  USERS: 'dc_users_v2',
-  NOTIFICATIONS: 'dc_notifications_v2',
-  PERSONAL_NOTES: 'dc_personal_notes_v2',
-  ACTIVITY_LOGS: 'dc_activity_logs_v2',
-  EXCEL_LOGS: 'dc_shared_excel_logs_v2',
-  CURRENT_USER: 'dc_active_user_v2',
-  REPORT_DRAFT_PREFIX: 'dc_report_draft_',
-  STALLED_DAYS_LIMIT: 'dc_stalled_days_limit',
-  CUTOFF_HOUR: 'dc_cutoff_hour',
-  BRAND_COLOR: 'dc_brand_color_v1'
-};
-
-function normalizeEmail(email?: string | null): string {
-  return (email || '').trim().toLowerCase();
-}
-
-function chunkArray<T>(items: T[], size: number): T[][] {
-  if (items.length === 0) return [];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-  return chunks;
-}
-
-function normalizeAssignedProjectsList(projects?: unknown): string[] {
-  if (!Array.isArray(projects)) return [];
-  return Array.from(
-    new Set(projects.filter((id): id is string => typeof id === 'string' && id.trim().length > 0))
-  );
-}
-
-function normalizeUserProfile(raw: Partial<UserProfile>, docId: string, fallbackEmail?: string): UserProfile {
-  const email = normalizeEmail(raw.email || fallbackEmail);
-  const role: UserRole = raw.role === 'admin' || isSuperAdminEmail(email) ? 'admin' : 'site';
-  const now = new Date().toISOString();
-  return stripUndefined({
-    id: docId,
-    email,
-    displayName: (raw.displayName || email || 'مستخدم').trim().slice(0, 150),
-    jobTitle: raw.jobTitle !== undefined ? String(raw.jobTitle).trim().slice(0, 150) : undefined,
-    role,
-    allProjects: role === 'admin' ? true : raw.allProjects === true,
-    canAccessExecutedWorks: role === 'admin' ? true : raw.canAccessExecutedWorks !== false,
-    canAccessSiteDeliverables: true,
-    assignedProjects: normalizeAssignedProjectsList(raw.assignedProjects),
-    status: raw.status === 'disabled' ? 'disabled' : 'active',
-    phone: raw.phone ? String(raw.phone).trim().slice(0, 40) : undefined,
-    photoUrl:
-      typeof raw.photoUrl === 'string' && raw.photoUrl.trim().length > 0
-        ? raw.photoUrl.trim().slice(0, 350000)
-        : undefined,
-    notificationPreferences: raw.notificationPreferences
-      ? normalizeNotificationPreferences(raw.notificationPreferences)
-      : undefined,
-    createdAt: raw.createdAt || now,
-    updatedAt: raw.updatedAt || now
-  });
-}
-
-export interface CreateUserPayload {
-  displayName: string;
-  jobTitle: string;
-  email: string;
-  password: string;
-  role: UserRole;
-  allProjects: boolean;
-  canAccessExecutedWorks: boolean;
-  canAccessSiteDeliverables: boolean;
-  assignedProjects: string[];
-  phone?: string;
-}
-
-export interface DeliverableUploadProgress {
-  percent: number;
-  uploadedChunks: number;
-  totalChunks: number;
-  uploadedBytes: number;
-  totalBytes: number;
-  stage: 'metadata' | 'uploading' | 'finalizing';
-}
-
-export interface ReportUploadProgress {
-  percent: number;
-  currentFileIndex: number;
-  totalFiles: number;
-  currentFileName: string;
-  uploadedChunks: number;
-  totalChunks: number;
-  uploadedBytes: number;
-  totalBytes: number;
-  stage: 'metadata' | 'uploading' | 'finalizing';
-}
-
-export type TaskUploadProgress = ReportUploadProgress;
-
-export interface HistoricalSyncSummary {
-  totalUpdated: number;
-  reportsUpdated: number;
-  executedWorksUpdated: number;
-  deliverablesUpdated: number;
-  issuesUpdated: number;
-  announcementsUpdated: number;
-}
-
-export interface CreateSiteDeliverablePayload {
-  projectId: string;
-  projectName: string;
-  title: string;
-  deliverableType: SiteDeliverableType;
-  submittalNumber?: string;
-  rev?: number;
-  notes?: string;
-  fileName: string;
-  fileFormat?: 'pdf' | 'excel';
-  mimeType?: string;
-  fileSizeBytes: number;
-  pageCount?: number;
-  senderId: string;
-  senderName: string;
-  senderEmail: string;
-}
 
 class DataService {
   private listeners: Set<() => void> = new Set();
@@ -291,6 +164,8 @@ class DataService {
   private autoIdentitySyncRunning = false;
   private autoIdentitySyncTimer: ReturnType<typeof setTimeout> | null = null;
   private attemptedAutoSyncKeys: Set<string> = new Set();
+  private olderLoadedByCollection: Map<string, Map<string, unknown>> = new Map();
+  private syncWindowCutoffIso: string | null = null;
 
   constructor() {
     this.ensureInitialized();
@@ -406,7 +281,14 @@ class DataService {
         profile = normalizeUserProfile(snap.data() as Partial<UserProfile>, uid, email);
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+      if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+        markFirestoreQuotaExhausted();
+      }
+      if (isSuper) {
+        profile = this.getUsers().find((u) => u.id === uid) || null;
+      } else {
+        handleFirestoreError(error, OperationType.GET, `users/${uid}`);
+      }
     }
 
     if (isSuper) {
@@ -427,16 +309,28 @@ class DataService {
         photoUrl: profile?.photoUrl,
         notificationPreferences: profile?.notificationPreferences,
         createdAt: profile?.createdAt || now,
-        updatedAt: now
+        updatedAt: profile?.updatedAt || now
       };
 
-      try {
-        await setDoc(userDocRef, stripUndefined(superProfile));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, `users/${uid}`);
+      const needsRemoteSync =
+        !profile ||
+        normalizeEmail(profile.email) !== SUPER_ADMIN_EMAIL ||
+        profile.role !== 'admin' ||
+        profile.status !== 'active' ||
+        profile.allProjects !== true ||
+        profile.canAccessExecutedWorks !== true ||
+        profile.canAccessSiteDeliverables !== true;
+
+      if (needsRemoteSync && !isFirestoreQuotaExhausted()) {
+        superProfile.updatedAt = now;
+        void setDoc(userDocRef, stripUndefined(superProfile)).catch((error) => {
+          if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+            markFirestoreQuotaExhausted();
+          }
+        });
       }
 
-      await this.seedFirestoreIfEmpty();
+      void this.seedFirestoreIfEmpty().catch(() => undefined);
       this.upsertLocalUser(superProfile);
       this.setCurrentUser(superProfile);
       this.startRealtimeSync(superProfile);
@@ -452,8 +346,8 @@ class DataService {
       throw new Error('ACCOUNT_DISABLED');
     }
 
-    // Sync Firestore email if Firebase Auth email was updated (e.g. after verifyBeforeUpdateEmail link)
-    if (email && normalizeEmail(profile.email) !== email) {
+    // Sync Firestore email for admins only (non-admin email changes are restricted to admins in firestore.rules)
+    if (profile.role === 'admin' && email && normalizeEmail(profile.email) !== email) {
       const syncedAt = new Date().toISOString();
       profile = { ...profile, email, updatedAt: syncedAt };
       try {
@@ -470,11 +364,16 @@ class DataService {
   }
 
   private async seedFirestoreIfEmpty() {
+    if (isFirestoreQuotaExhausted()) return;
+    const SEED_FLAG_KEY = 'dc_firestore_seed_checked_v1';
+    if (localStorage.getItem(SEED_FLAG_KEY) === '1') {
+      return;
+    }
     try {
       const [projSnap, reportsSnap, usersSnap] = await Promise.all([
-        getDocs(collection(db, 'projects')),
-        getDocs(collection(db, 'reports')),
-        getDocs(collection(db, 'users'))
+        getDocs(query(collection(db, 'projects'), limit(1))),
+        getDocs(query(collection(db, 'reports'), limit(1))),
+        getDocs(query(collection(db, 'users'), limit(2)))
       ]);
       if (projSnap.empty && reportsSnap.empty && usersSnap.size <= 1) {
         for (const p of SEED_PROJECTS) {
@@ -496,25 +395,81 @@ class DataService {
           await setDoc(doc(db, 'executedWorks', w.id), stripUndefined(w));
         }
       }
+      localStorage.setItem(SEED_FLAG_KEY, '1');
     } catch (error) {
       console.warn('Firestore initial seed check skipped/failed:', error);
     }
   }
 
   private resolveRecipientUserId(userId?: string, email?: string): string | undefined {
-    const cleanEmail = normalizeEmail(email);
-    const users = this.getUsers();
-    const matched = users.find(
-      (u) => (userId && u.id === userId) || (cleanEmail && normalizeEmail(u.email) === cleanEmail)
-    );
-    return matched?.id || userId || undefined;
+    return notificationsDomain.resolveRecipientUserId(this.getUsers(), userId, email);
   }
 
   private isNotificationTargetingUser(notif: AppNotification, user: UserProfile): boolean {
-    if (!notif.targetUserId) return true;
-    if (notif.targetUserId === user.id) return true;
-    const userEmail = normalizeEmail(user.email);
-    return Boolean(userEmail && normalizeEmail(notif.targetUserId) === userEmail);
+    return notificationsDomain.isNotificationTargetingUser(notif, user);
+  }
+
+  private mergeWithOlderItems<T>(collectionName: string, liveItems: T[]): T[] {
+    const olderMap = this.olderLoadedByCollection.get(collectionName);
+    if (!olderMap || olderMap.size === 0) return liveItems;
+    const mergedMap = new Map<string, T>();
+    olderMap.forEach((item, id) => {
+      mergedMap.set(id, item as T);
+    });
+    liveItems.forEach((item) => {
+      const itemId = (item as unknown as { id?: string }).id;
+      if (itemId) mergedMap.set(itemId, item);
+    });
+    return Array.from(mergedMap.values());
+  }
+
+  private handleSnapshotError(error: unknown, operationType: OperationType, path: string): void {
+    const code = getFirestoreErrorCode(error);
+    if (code === 'resource-exhausted') {
+      markFirestoreQuotaExhausted();
+    }
+    console.warn(`Firestore listener (${operationType} ${path}): ${code}`);
+  }
+
+  private subscribeSnapshotWithFallback(
+    primaryQuery: Query<DocumentData>,
+    fallbackQuery: Query<DocumentData> | null,
+    onNext: (snap: QuerySnapshot<DocumentData>) => void,
+    path: string
+  ): void {
+    let activeUnsub: Unsubscribe | null = null;
+    let disposed = false;
+
+    const registerUnsub: Unsubscribe = () => {
+      disposed = true;
+      if (activeUnsub) {
+        activeUnsub();
+        activeUnsub = null;
+      }
+    };
+    this.firestoreUnsubs.push(registerUnsub);
+
+    activeUnsub = onSnapshot(
+      primaryQuery,
+      onNext,
+      (error) => {
+        const code = getFirestoreErrorCode(error);
+        if (code === 'failed-precondition' && fallbackQuery && !disposed) {
+          if (activeUnsub) {
+            activeUnsub();
+            activeUnsub = null;
+          }
+          console.warn(
+            `Firestore composite index missing for "${path}"; using bounded fallback query until firestore.indexes.json is deployed.`
+          );
+          activeUnsub = onSnapshot(fallbackQuery, onNext, (fallbackErr) =>
+            this.handleSnapshotError(fallbackErr, OperationType.LIST, path)
+          );
+          return;
+        }
+        this.handleSnapshotError(error, OperationType.LIST, path);
+      }
+    );
   }
 
   private subscribeToScopedCollection<T>(
@@ -524,25 +479,51 @@ class DataService {
     assigned: string[],
     storageKey: string,
     onItems: (docs: T[]) => void,
-    sortFn?: (a: T, b: T) => number
+    sortFn?: (a: T, b: T) => number,
+    options?: { cutoffIso?: string; orderByField?: string; maxDocs?: number }
   ) {
+    const baseConstraints: QueryConstraint[] = [];
+    if (options?.orderByField) {
+      if (options.cutoffIso) {
+        baseConstraints.push(where(options.orderByField, '>=', options.cutoffIso));
+      }
+      baseConstraints.push(orderBy(options.orderByField, 'desc'));
+    }
+    if (options?.maxDocs && options.maxDocs > 0) {
+      baseConstraints.push(limit(options.maxDocs));
+    }
+
+    const fallbackConstraints: QueryConstraint[] = [];
+    if (options?.maxDocs && options.maxDocs > 0) {
+      fallbackConstraints.push(limit(options.maxDocs));
+    }
+
     if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, collectionName),
-          (snap) => {
-            const list = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
-            if (sortFn) list.sort(sortFn);
-            onItems(list);
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, collectionName)
-        )
+      const primaryQuery =
+        baseConstraints.length > 0
+          ? query(collection(db, collectionName), ...baseConstraints)
+          : collection(db, collectionName);
+      const fallbackQuery =
+        options?.orderByField
+          ? query(collection(db, collectionName), ...fallbackConstraints)
+          : null;
+
+      this.subscribeSnapshotWithFallback(
+        primaryQuery,
+        fallbackQuery,
+        (snap) => {
+          const liveList = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
+          const list = this.mergeWithOlderItems<T>(collectionName, liveList);
+          if (sortFn) list.sort(sortFn);
+          onItems(list);
+        },
+        collectionName
       );
       return;
     }
 
     if (assigned.length === 0) {
-      localStorage.setItem(storageKey, JSON.stringify([]));
+      safeStorage.setJson(storageKey, []);
       this.notify();
       return;
     }
@@ -551,24 +532,35 @@ class DataService {
     const batchResults: T[][] = batches.map(() => []);
 
     batches.forEach((batchIds, batchIndex) => {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, collectionName), where(fieldName, 'in', batchIds)),
-          (snap) => {
-            batchResults[batchIndex] = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
-            const mergedMap = new Map<string, T>();
-            batchResults.forEach((items) => {
-              items.forEach((item) => {
-                const itemId = (item as unknown as { id?: string }).id;
-                if (itemId) mergedMap.set(itemId, item);
-              });
+      const primaryQuery = query(
+        collection(db, collectionName),
+        where(fieldName, 'in', batchIds),
+        ...baseConstraints
+      );
+      const fallbackQuery = options?.orderByField
+        ? query(collection(db, collectionName), where(fieldName, 'in', batchIds), ...fallbackConstraints)
+        : null;
+
+      this.subscribeSnapshotWithFallback(
+        primaryQuery,
+        fallbackQuery,
+        (snap) => {
+          batchResults[batchIndex] = snap.docs.map((d) => ({ ...(d.data() as T), id: d.id }));
+          const mergedMap = new Map<string, T>();
+          batchResults.forEach((items) => {
+            items.forEach((item) => {
+              const itemId = (item as unknown as { id?: string }).id;
+              if (itemId) mergedMap.set(itemId, item);
             });
-            const merged = Array.from(mergedMap.values());
-            if (sortFn) merged.sort(sortFn);
-            onItems(merged);
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, collectionName)
-        )
+          });
+          const merged = this.mergeWithOlderItems<T>(
+            collectionName,
+            Array.from(mergedMap.values())
+          );
+          if (sortFn) merged.sort(sortFn);
+          onItems(merged);
+        },
+        collectionName
       );
     });
   }
@@ -586,27 +578,29 @@ class DataService {
 
     const isAdmin = user.role === 'admin' || isSuperAdminEmail(user.email);
     const allProjAccess = hasAllProjectsAccess(user);
+    const cutoffIso60d = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    this.syncWindowCutoffIso = cutoffIso60d;
 
-    // 1. User profile / Users list sync
+    // 1. User profile / Users list sync (bounded)
     if (isAdmin) {
       const unsubUsers = onSnapshot(
-        collection(db, 'users'),
+        query(collection(db, 'users'), limit(500)),
         (snap) => {
           const list = snap.docs.map((d) =>
             normalizeUserProfile(d.data() as Partial<UserProfile>, d.id)
           );
           if (list.length > 0) {
-            localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(list));
+            safeStorage.setJson(STORAGE_KEYS.USERS, list);
             const active = this.getCurrentUser();
             const refreshedSelf = list.find((u) => u.id === user.id);
             if (active && refreshedSelf && refreshedSelf.id === active.id) {
-              localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(refreshedSelf));
+              safeStorage.setJson(STORAGE_KEYS.CURRENT_USER, refreshedSelf);
             }
             this.notify();
             this.scheduleAutoIdentitySync();
           }
         },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'users')
+        (error) => this.handleSnapshotError(error, OperationType.LIST, 'users')
       );
       this.firestoreUnsubs.push(unsubUsers);
     } else {
@@ -628,7 +622,7 @@ class DataService {
             return;
           }
           this.upsertLocalUser(updatedProfile);
-          localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(updatedProfile));
+          safeStorage.setJson(STORAGE_KEYS.CURRENT_USER, updatedProfile);
           const nextCanExec = canAccessExecutedWorksTab(updatedProfile);
           const nextCanDeliverables = canAccessSiteDeliverablesTab(updatedProfile);
           const nextAssigned = normalizeAssignedProjectsList(updatedProfile.assignedProjects);
@@ -640,12 +634,12 @@ class DataService {
             this.scheduleAutoIdentitySync();
           }
         },
-        (error) => handleFirestoreError(error, OperationType.GET, `users/${user.id}`)
+        (error) => this.handleSnapshotError(error, OperationType.GET, `users/${user.id}`)
       );
       this.firestoreUnsubs.push(unsubSelf);
     }
 
-    // 2. Projects sync (available to all active users so every email can upload in Site Deliverables)
+    // 2. Projects sync (bounded, available to all active users)
     this.subscribeToScopedCollection<Project>(
       'projects',
       'id',
@@ -653,9 +647,11 @@ class DataService {
       assigned,
       STORAGE_KEYS.PROJECTS,
       (list) => {
-        localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(list));
+        safeStorage.setJson(STORAGE_KEYS.PROJECTS, list);
         this.notify();
-      }
+      },
+      undefined,
+      { maxDocs: 200 }
     );
 
     // 2b. Global App Branding Settings sync (Custom Brand Color managed by Admins)
@@ -673,11 +669,11 @@ class DataService {
             }
           }
         },
-        (error) => handleFirestoreError(error, OperationType.GET, 'appSettings/branding')
+        (error) => this.handleSnapshotError(error, OperationType.GET, 'appSettings/branding')
       )
     );
 
-    // 3. Reports sync
+    // 3. Reports sync (most recent 60 days, ordered desc, limit 300)
     this.subscribeToScopedCollection<DailyReport>(
       'reports',
       'projectId',
@@ -685,14 +681,15 @@ class DataService {
       assigned,
       STORAGE_KEYS.REPORTS,
       (list) => {
-        localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(list));
+        safeStorage.setJson(STORAGE_KEYS.REPORTS, list);
         this.notify();
         this.scheduleAutoIdentitySync();
       },
-      (a, b) => b.createdAt.localeCompare(a.createdAt)
+      (a, b) => b.createdAt.localeCompare(a.createdAt),
+      { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
     );
 
-    // 4. Issues sync
+    // 4. Issues sync (most recent 60 days, ordered desc, limit 300)
     this.subscribeToScopedCollection<IssueReport>(
       'issues',
       'projectId',
@@ -700,14 +697,15 @@ class DataService {
       assigned,
       STORAGE_KEYS.ISSUES,
       (list) => {
-        localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(list));
+        safeStorage.setJson(STORAGE_KEYS.ISSUES, list);
         this.notify();
         this.scheduleAutoIdentitySync();
       },
-      (a, b) => b.createdAt.localeCompare(a.createdAt)
+      (a, b) => b.createdAt.localeCompare(a.createdAt),
+      { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
     );
 
-    // 5. Tasks sync (including 48-hour auto-cleanup for expired Admin attachments)
+    // 5. Tasks sync (most recent 60 days, ordered desc, limit 300 + 48-hour auto-cleanup)
     this.subscribeToScopedCollection<ProjectTask>(
       'tasks',
       'projectId',
@@ -715,7 +713,7 @@ class DataService {
       assigned,
       STORAGE_KEYS.TASKS,
       (list) => {
-        localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(list));
+        safeStorage.setJson(STORAGE_KEYS.TASKS, list);
         this.notify();
         const nowMs = Date.now();
         const hasExpired = list.some((t) =>
@@ -725,28 +723,28 @@ class DataService {
           void this.cleanupExpiredTaskAttachments(list);
         }
       },
-      (a, b) => b.createdAt.localeCompare(a.createdAt)
+      (a, b) => b.createdAt.localeCompare(a.createdAt),
+      { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
     );
 
-    // 6. Announcements sync
-    this.firestoreUnsubs.push(
-      onSnapshot(
-        collection(db, 'announcements'),
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...(d.data() as Announcement), id: d.id }))
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-          localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(list));
-          this.notify();
-          this.scheduleAutoIdentitySync();
-        },
-        (error) => handleFirestoreError(error, OperationType.LIST, 'announcements')
-      )
+    // 6. Announcements sync (ordered desc, limit 100)
+    this.subscribeSnapshotWithFallback(
+      query(collection(db, 'announcements'), orderBy('createdAt', 'desc'), limit(100)),
+      query(collection(db, 'announcements'), limit(100)),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ ...(d.data() as Announcement), id: d.id }))
+          .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        safeStorage.setJson(STORAGE_KEYS.ANNOUNCEMENTS, list);
+        this.notify();
+        this.scheduleAutoIdentitySync();
+      },
+      'announcements'
     );
 
-    // 7. Executed Works sync (only if user has permission to access Executed Works tab)
+    // 7. Executed Works sync (most recent 60 days, ordered desc, limit 300)
     if (!canExecWorks) {
-      localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify([]));
+      safeStorage.setJson(STORAGE_KEYS.EXECUTED_WORKS, []);
       this.notify();
     } else {
       this.subscribeToScopedCollection<ExecutedWork>(
@@ -756,15 +754,16 @@ class DataService {
         assigned,
         STORAGE_KEYS.EXECUTED_WORKS,
         (list) => {
-          localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(list));
+          safeStorage.setJson(STORAGE_KEYS.EXECUTED_WORKS, list);
           this.notify();
           this.scheduleAutoIdentitySync();
         },
-        (a, b) => b.createdAt.localeCompare(a.createdAt)
+        (a, b) => b.createdAt.localeCompare(a.createdAt),
+        { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
       );
     }
 
-    // 8. Site PDF Deliverables sync (48-hour auto-expiring items)
+    // 8. Site PDF Deliverables sync (most recent 60 days, ordered desc, limit 300)
     const processDeliverablesSnapshot = (rawList: SiteDeliverable[]) => {
       const nowMs = Date.now();
       const activeList = rawList
@@ -772,7 +771,7 @@ class DataService {
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       const expiredList = rawList.filter((item) => isDeliverableExpired(item, nowMs));
 
-      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(activeList));
+      safeStorage.setJson(STORAGE_KEYS.SITE_DELIVERABLES, activeList);
       this.notify();
       this.scheduleAutoIdentitySync();
 
@@ -782,7 +781,7 @@ class DataService {
     };
 
     if (!canDeliverables) {
-      localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify([]));
+      safeStorage.setJson(STORAGE_KEYS.SITE_DELIVERABLES, []);
       this.notify();
     } else if (allProjAccess) {
       this.subscribeToScopedCollection<SiteDeliverable>(
@@ -791,7 +790,9 @@ class DataService {
         true,
         assigned,
         STORAGE_KEYS.SITE_DELIVERABLES,
-        processDeliverablesSnapshot
+        processDeliverablesSnapshot,
+        undefined,
+        { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
       );
     } else {
       let ownDeliverables: SiteDeliverable[] = [];
@@ -801,18 +802,32 @@ class DataService {
         [...projectDeliverables, ...ownDeliverables].forEach((item) => {
           if (item.id) mergedMap.set(item.id, item);
         });
-        processDeliverablesSnapshot(Array.from(mergedMap.values()));
+        processDeliverablesSnapshot(
+          this.mergeWithOlderItems<SiteDeliverable>(
+            'siteDeliverables',
+            Array.from(mergedMap.values())
+          )
+        );
       };
 
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'siteDeliverables'), where('senderId', '==', user.id)),
-          (snap) => {
-            ownDeliverables = snap.docs.map((d) => ({ ...(d.data() as SiteDeliverable), id: d.id }));
-            mergeAndProcessDeliverables();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'siteDeliverables')
-        )
+      this.subscribeSnapshotWithFallback(
+        query(
+          collection(db, 'siteDeliverables'),
+          where('senderId', '==', user.id),
+          where('createdAt', '>=', cutoffIso60d),
+          orderBy('createdAt', 'desc'),
+          limit(300)
+        ),
+        query(
+          collection(db, 'siteDeliverables'),
+          where('senderId', '==', user.id),
+          limit(300)
+        ),
+        (snap) => {
+          ownDeliverables = snap.docs.map((d) => ({ ...(d.data() as SiteDeliverable), id: d.id }));
+          mergeAndProcessDeliverables();
+        },
+        'siteDeliverables'
       );
 
       if (assigned.length > 0) {
@@ -825,7 +840,9 @@ class DataService {
           (list) => {
             projectDeliverables = list;
             mergeAndProcessDeliverables();
-          }
+          },
+          undefined,
+          { cutoffIso: cutoffIso60d, orderByField: 'createdAt', maxDocs: 300 }
         );
       }
     }
@@ -843,7 +860,7 @@ class DataService {
       () => this.cleanupExpiredTaskAttachments()
     );
 
-    // 9. Real-time Notifications sync across devices
+    // 9. Real-time Notifications sync across devices (orderBy createdAt desc, limit 100)
     this.seenNotificationIds.clear();
     this.notificationsInitialized = false;
 
@@ -890,19 +907,18 @@ class DataService {
         });
       }
 
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(normalized));
+      safeStorage.setJson(STORAGE_KEYS.NOTIFICATIONS, normalized);
       this.notify();
     };
 
     if (isAdmin) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'notifications'),
-          (snap) => {
-            processNotificationsList(snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id })));
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
-        )
+      this.subscribeSnapshotWithFallback(
+        query(collection(db, 'notifications'), orderBy('createdAt', 'desc'), limit(100)),
+        query(collection(db, 'notifications'), limit(100)),
+        (snap) => {
+          processNotificationsList(snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id })));
+        },
+        'notifications'
       );
     } else {
       let directItems: AppNotification[] = [];
@@ -913,97 +929,204 @@ class DataService {
         processNotificationsList(Array.from(mergedMap.values()));
       };
 
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'notifications'), where('targetUserId', '==', user.id)),
-          (snap) => {
-            directItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
-            mergeAndProcess();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
-        )
+      this.subscribeSnapshotWithFallback(
+        query(
+          collection(db, 'notifications'),
+          where('targetUserId', '==', user.id),
+          orderBy('createdAt', 'desc'),
+          limit(100)
+        ),
+        query(
+          collection(db, 'notifications'),
+          where('targetUserId', '==', user.id),
+          limit(100)
+        ),
+        (snap) => {
+          directItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
+          mergeAndProcess();
+        },
+        'notifications'
       );
 
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'notifications'), where('targetRole', 'in', ['site', 'all'])),
-          (snap) => {
-            broadcastItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
-            mergeAndProcess();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'notifications')
-        )
+      this.subscribeSnapshotWithFallback(
+        query(
+          collection(db, 'notifications'),
+          where('targetRole', 'in', ['site', 'all']),
+          orderBy('createdAt', 'desc'),
+          limit(100)
+        ),
+        query(
+          collection(db, 'notifications'),
+          where('targetRole', 'in', ['site', 'all']),
+          limit(100)
+        ),
+        (snap) => {
+          broadcastItems = snap.docs.map((d) => ({ ...(d.data() as AppNotification), id: d.id }));
+          mergeAndProcess();
+        },
+        'notifications'
       );
     }
 
-    // 10. Strictly Private Personal Notes sync (owner-only subcollection under /users/{uid}/personalNotes)
-    this.firestoreUnsubs.push(
-      onSnapshot(
-        query(collection(db, 'users', user.id, 'personalNotes'), where('userId', '==', user.id)),
-        (snap) => {
-          const list = snap.docs
-            .map((d) => ({ ...(d.data() as PersonalNote), id: d.id }))
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-          localStorage.setItem(STORAGE_KEYS.PERSONAL_NOTES, JSON.stringify(list));
-          this.notify();
-        },
-        (error) =>
-          handleFirestoreError(error, OperationType.LIST, `users/${user.id}/personalNotes`)
-      )
+    // 10. Strictly Private Personal Notes sync (owner-only, ordered desc, limit 200)
+    this.subscribeSnapshotWithFallback(
+      query(
+        collection(db, 'users', user.id, 'personalNotes'),
+        where('userId', '==', user.id),
+        orderBy('createdAt', 'desc'),
+        limit(200)
+      ),
+      query(
+        collection(db, 'users', user.id, 'personalNotes'),
+        where('userId', '==', user.id),
+        limit(200)
+      ),
+      (snap) => {
+        const list = snap.docs
+          .map((d) => ({ ...(d.data() as PersonalNote), id: d.id }))
+          .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+        safeStorage.setJson(STORAGE_KEYS.PERSONAL_NOTES, list);
+        this.notify();
+      },
+      `users/${user.id}/personalNotes`
     );
 
-    // 11. System Activity Log sync (Admin-only audit trail for Reports & Tasks)
+    // 11. System Activity Log sync (Admin-only, server-ordered desc, limit 500)
     if (isAdmin) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'activityLogs'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => ({ ...(d.data() as ActivityLogEntry), id: d.id }))
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-              .slice(0, 500);
-            localStorage.setItem(STORAGE_KEYS.ACTIVITY_LOGS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'activityLogs')
-        )
+      this.subscribeSnapshotWithFallback(
+        query(collection(db, 'activityLogs'), orderBy('createdAt', 'desc'), limit(500)),
+        query(collection(db, 'activityLogs'), limit(500)),
+        (snap) => {
+          const list = snap.docs
+            .map((d) => ({ ...(d.data() as ActivityLogEntry), id: d.id }))
+            .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+          safeStorage.setJson(STORAGE_KEYS.ACTIVITY_LOGS, list);
+          this.notify();
+        },
+        'activityLogs'
       );
     } else {
       localStorage.removeItem(STORAGE_KEYS.ACTIVITY_LOGS);
     }
+  }
 
-    // 12. Cloud-Synced Excel Logs (Admins see all projects; Site users see their authorized projects)
-    if (allProjAccess) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          collection(db, 'excelLogs'),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => ({ ...(d.data() as SharedExcelLogFile), id: d.id }))
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'excelLogs')
-        )
-      );
-    } else if (assigned.length > 0) {
-      this.firestoreUnsubs.push(
-        onSnapshot(
-          query(collection(db, 'excelLogs'), where('projectId', 'in', assigned.slice(0, 30))),
-          (snap) => {
-            const list = snap.docs
-              .map((d) => ({ ...(d.data() as SharedExcelLogFile), id: d.id }))
-              .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-            localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(list));
-            this.notify();
-          },
-          (error) => handleFirestoreError(error, OperationType.LIST, 'excelLogs')
-        )
-      );
-    } else {
-      localStorage.removeItem(STORAGE_KEYS.EXCEL_LOGS);
+  public async loadOlderCollectionItems(
+    collectionName: 'reports' | 'issues' | 'tasks' | 'executedWorks' | 'siteDeliverables',
+    pageSize = 100
+  ): Promise<number> {
+    const user = this.getCurrentUser();
+    if (!user) return 0;
+
+    const storageKeyMap: Record<typeof collectionName, string> = {
+      reports: STORAGE_KEYS.REPORTS,
+      issues: STORAGE_KEYS.ISSUES,
+      tasks: STORAGE_KEYS.TASKS,
+      executedWorks: STORAGE_KEYS.EXECUTED_WORKS,
+      siteDeliverables: STORAGE_KEYS.SITE_DELIVERABLES
+    };
+    const storageKey = storageKeyMap[collectionName];
+
+    let existingItems: Array<{ id: string; createdAt?: string }> = [];
+    try {
+      const raw = localStorage.getItem(storageKey);
+      existingItems = raw ? JSON.parse(raw) : [];
+    } catch {
+      existingItems = [];
     }
+
+    let cursorIso =
+      this.syncWindowCutoffIso ||
+      new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+    for (const item of existingItems) {
+      if (item.createdAt && item.createdAt < cursorIso) {
+        cursorIso = item.createdAt;
+      }
+    }
+
+    const allProjAccess = hasAllProjectsAccess(user);
+    const assigned = normalizeAssignedProjectsList(user.assignedProjects);
+    const fetchedDocs: Array<{ id: string; createdAt?: string }> = [];
+
+    try {
+      if (allProjAccess) {
+        const snap = await getDocs(
+          query(
+            collection(db, collectionName),
+            where('createdAt', '<', cursorIso),
+            orderBy('createdAt', 'desc'),
+            limit(pageSize)
+          )
+        );
+        snap.docs.forEach((d) => {
+          fetchedDocs.push({ ...(d.data() as { createdAt?: string }), id: d.id });
+        });
+      } else {
+        const batches = chunkArray(assigned, 30);
+        for (const batchIds of batches) {
+          const snap = await getDocs(
+            query(
+              collection(db, collectionName),
+              where('projectId', 'in', batchIds),
+              where('createdAt', '<', cursorIso),
+              orderBy('createdAt', 'desc'),
+              limit(pageSize)
+            )
+          );
+          snap.docs.forEach((d) => {
+            fetchedDocs.push({ ...(d.data() as { createdAt?: string }), id: d.id });
+          });
+        }
+        if (collectionName === 'siteDeliverables') {
+          const ownSnap = await getDocs(
+            query(
+              collection(db, 'siteDeliverables'),
+              where('senderId', '==', user.id),
+              where('createdAt', '<', cursorIso),
+              orderBy('createdAt', 'desc'),
+              limit(pageSize)
+            )
+          );
+          ownSnap.docs.forEach((d) => {
+            fetchedDocs.push({ ...(d.data() as { createdAt?: string }), id: d.id });
+          });
+        }
+      }
+    } catch (error) {
+      const code = getFirestoreErrorCode(error);
+      if (code === 'failed-precondition' || code === 'resource-exhausted') {
+        if (code === 'resource-exhausted') markFirestoreQuotaExhausted();
+        return 0;
+      }
+      handleFirestoreError(error, OperationType.LIST, collectionName);
+    }
+
+    if (fetchedDocs.length === 0) return 0;
+
+    let olderMap = this.olderLoadedByCollection.get(collectionName);
+    if (!olderMap) {
+      olderMap = new Map<string, unknown>();
+      this.olderLoadedByCollection.set(collectionName, olderMap);
+    }
+
+    const existingIds = new Set(existingItems.map((i) => i.id));
+    let addedCount = 0;
+    fetchedDocs.forEach((item) => {
+      if (!item.id) return;
+      olderMap!.set(item.id, item);
+      if (!existingIds.has(item.id)) {
+        existingItems.push(item);
+        existingIds.add(item.id);
+        addedCount += 1;
+      }
+    });
+
+    if (addedCount > 0) {
+      existingItems.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      safeStorage.setJson(storageKey, existingItems);
+      this.notify();
+    }
+
+    return addedCount;
   }
 
   public stopRealtimeSync() {
@@ -1016,6 +1139,8 @@ class DataService {
     });
     this.firestoreUnsubs = [];
     this.currentSyncSignature = null;
+    this.syncWindowCutoffIso = null;
+    this.olderLoadedByCollection.clear();
     this.seenNotificationIds.clear();
     this.notificationsInitialized = false;
     if (this.autoIdentitySyncTimer !== null) {
@@ -1028,14 +1153,7 @@ class DataService {
   }
 
   private upsertLocalUser(user: UserProfile) {
-    const users = this.getUsers();
-    const idx = users.findIndex((u) => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase());
-    if (idx !== -1) {
-      users[idx] = user;
-    } else {
-      users.push(user);
-    }
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+    usersDomain.upsertLocalUser(user);
   }
 
   // --- Projects ---
@@ -1735,16 +1853,17 @@ class DataService {
   }
 
   // --- Site PDF Deliverables (تسليمات الموقع - حذف تلقائي من Firebase بعد 48 ساعة) ---
+  private getDeliverablesContext(): deliverablesDomain.DeliverablesDomainContext {
+    return {
+      getCurrentUser: () => this.getCurrentUser(),
+      resolveRecipientUserId: (userId, email) => this.resolveRecipientUserId(userId, email),
+      addNotification: (notif) => this.addNotification(notif),
+      notify: () => this.notify()
+    };
+  }
+
   public getSiteDeliverables(): SiteDeliverable[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
-      if (!data) return [];
-      const parsed: SiteDeliverable[] = JSON.parse(data);
-      const nowMs = Date.now();
-      return parsed.filter((item) => !isDeliverableExpired(item, nowMs));
-    } catch {
-      return [];
-    }
+    return deliverablesDomain.getSiteDeliverables();
   }
 
   public async createSiteDeliverable(
@@ -1752,189 +1871,18 @@ class DataService {
     base64Pdf: string,
     onProgress?: (percent: number, info?: DeliverableUploadProgress) => void
   ): Promise<SiteDeliverable> {
-    const chunks = splitBase64IntoChunks(base64Pdf, PDF_CHUNK_SIZE_CHARS);
-    if (
-      payload.fileSizeBytes <= 0 ||
-      payload.fileSizeBytes > MAX_PDF_FILE_SIZE_BYTES ||
-      chunks.length === 0 ||
-      chunks.length > 60
-    ) {
-      throw new Error('حجم ملف الـ PDF غير صالح أو يتجاوز الحد المسموح (25 ميجابايت).');
-    }
-
-    const nowMs = Date.now();
-    const expiresAtMs = nowMs + SITE_DELIVERABLE_RETENTION_MS;
-    const nowIso = new Date(nowMs).toISOString();
-    const expiresIso = new Date(expiresAtMs).toISOString();
-    const id = 'deliv-' + nowMs.toString(36) + '-' + Math.random().toString(36).substring(2, 6);
-    const totalBytes = Math.max(1, Math.round(payload.fileSizeBytes));
-
-    const deliverable: SiteDeliverable = stripUndefined({
-      id,
-      projectId: payload.projectId,
-      projectName: payload.projectName.trim().slice(0, 200),
-      title: payload.title.trim().slice(0, 300),
-      deliverableType: payload.deliverableType,
-      submittalNumber: payload.submittalNumber?.trim().slice(0, 120) || undefined,
-      rev: typeof payload.rev === 'number' && Number.isFinite(payload.rev) ? payload.rev : undefined,
-      notes: payload.notes?.trim().slice(0, 2000) || undefined,
-      fileName: payload.fileName.trim().slice(0, 260),
-      fileFormat: payload.fileFormat || (isExcelFileName(payload.fileName) ? 'excel' : 'pdf'),
-      mimeType:
-        payload.mimeType?.trim().slice(0, 150) ||
-        (isExcelFileName(payload.fileName) ? getExcelMimeType(payload.fileName) : 'application/pdf'),
-      fileSizeBytes: totalBytes,
-      chunkCount: chunks.length,
-      pageCount: payload.pageCount,
-      senderId: auth.currentUser?.uid || payload.senderId,
-      senderName: (
-        payload.senderName ||
-        auth.currentUser?.displayName ||
-        normalizeEmail(auth.currentUser?.email || payload.senderEmail) ||
-        'مستخدم'
-      )
-        .trim()
-        .slice(0, 150),
-      senderEmail: normalizeEmail(payload.senderEmail || auth.currentUser?.email).slice(0, 200),
-      status: 'pending_receipt',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      expiresAt: expiresIso,
-      expiresAtMs
-    });
-
-    onProgress?.(8, {
-      percent: 8,
-      uploadedChunks: 0,
-      totalChunks: chunks.length,
-      uploadedBytes: 0,
-      totalBytes,
-      stage: 'metadata'
-    });
-
-    try {
-      await setDoc(doc(db, 'siteDeliverables', id), stripUndefined(deliverable));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}`);
-    }
-
-    onProgress?.(15, {
-      percent: 15,
-      uploadedChunks: 0,
-      totalChunks: chunks.length,
-      uploadedBytes: 0,
-      totalBytes,
-      stage: 'uploading'
-    });
-
-    try {
-      const BATCH_CONCURRENCY = 5;
-      let uploadedChunks = 0;
-      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
-        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
-        const batchPromises: Promise<void>[] = [];
-        for (let idx = start; idx < end; idx++) {
-          const chunkDoc: SiteDeliverableChunk = {
-            index: idx,
-            data: chunks[idx],
-            expiresAtMs
-          };
-          batchPromises.push(
-            setDoc(doc(db, 'siteDeliverables', id, 'chunks', `chunk-${idx}`), chunkDoc).then(() => {
-              uploadedChunks += 1;
-              const isAllChunksDone = uploadedChunks === chunks.length;
-              const pct = isAllChunksDone
-                ? 98
-                : Math.min(97, Math.round(15 + (uploadedChunks / chunks.length) * 82));
-              const uploadedBytes = Math.min(
-                totalBytes,
-                Math.round((uploadedChunks / chunks.length) * totalBytes)
-              );
-              onProgress?.(pct, {
-                percent: pct,
-                uploadedChunks,
-                totalChunks: chunks.length,
-                uploadedBytes,
-                totalBytes,
-                stage: isAllChunksDone ? 'finalizing' : 'uploading'
-              });
-            })
-          );
-        }
-        await Promise.all(batchPromises);
-      }
-    } catch (error) {
-      // Roll back parent doc and any already-uploaded chunks if upload fails
-      await deleteDeliverableFromFirebase(id)
-        .catch(() => deleteDoc(doc(db, 'siteDeliverables', id)).catch(() => undefined));
-      handleFirestoreError(error, OperationType.CREATE, `siteDeliverables/${id}/chunks`);
-    }
-
-    const list = this.getSiteDeliverables();
-    list.unshift(deliverable);
-    localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(list));
-
-    const isExcel =
-      deliverable.fileFormat === 'excel' || isExcelFileName(deliverable.fileName);
-
-    this.addNotification({
-      title: `${isExcel ? 'ملف Excel مستلم جديد' : 'ملف PDF مستلم جديد'}: ${deliverable.projectName}`,
-      message: `أرسل ${deliverable.senderName} ملف "${deliverable.title}" (${deliverable.fileName}) — متاح لمدة 48 ساعة.`,
-      type: 'deliverable_sent',
-      targetRole: 'admin',
-      projectId: deliverable.projectId,
-      senderId: deliverable.senderId,
-      senderName: deliverable.senderName,
-      linkTab: 'site-deliverables'
-    });
-
-    onProgress?.(100, {
-      percent: 100,
-      uploadedChunks: chunks.length,
-      totalChunks: chunks.length,
-      uploadedBytes: totalBytes,
-      totalBytes,
-      stage: 'finalizing'
-    });
-
-    this.notify();
-    return deliverable;
+    return deliverablesDomain.createSiteDeliverable(
+      payload,
+      base64Pdf,
+      this.getDeliverablesContext(),
+      onProgress
+    );
   }
 
   public async fetchSiteDeliverablePdfUrl(deliverable: SiteDeliverable): Promise<string> {
-    if (isDeliverableExpired(deliverable)) {
-      await this.deleteSiteDeliverable(deliverable.id).catch(() => undefined);
-      throw new Error('انتهت مدة صلاحية الملف (48 ساعة) وتم حذفه تلقائياً من قاعدة البيانات.');
-    }
-
-    const cached = getCachedPdfBlobUrl(deliverable.id);
-    if (cached) {
-      return cached;
-    }
-
-    let chunkDocs: SiteDeliverableChunk[] = [];
-    try {
-      const snap = await getDocs(collection(db, 'siteDeliverables', deliverable.id, 'chunks'));
-      chunkDocs = snap.docs.map((d) => d.data() as SiteDeliverableChunk);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, `siteDeliverables/${deliverable.id}/chunks`);
-    }
-
-    if (chunkDocs.length === 0) {
-      throw new Error('تعذر العثور على بيانات الملف في قاعدة البيانات (ربما تم حذفه).');
-    }
-
-    chunkDocs.sort((a, b) => a.index - b.index);
-    const fullBase64 = chunkDocs.map((c) => c.data).join('');
-    const resolvedMime =
-      deliverable.mimeType ||
-      (deliverable.fileFormat === 'excel' || isExcelFileName(deliverable.fileName)
-        ? getExcelMimeType(deliverable.fileName)
-        : 'application/pdf');
-    const blob = base64ToBlob(fullBase64, resolvedMime);
-    const url = URL.createObjectURL(blob);
-    cachePdfBlobUrl(deliverable.id, url);
-    return url;
+    return deliverablesDomain.fetchSiteDeliverablePdfUrl(deliverable, (id) =>
+      this.deleteSiteDeliverable(id)
+    );
   }
 
   public async updateSiteDeliverableStatus(
@@ -1942,116 +1890,41 @@ class DataService {
     status: SiteDeliverableStatus,
     adminNote?: string
   ): Promise<boolean> {
-    const list = this.getSiteDeliverables();
-    const idx = list.findIndex((d) => d.id === deliverableId);
-    if (idx === -1) return false;
-
-    const updatedAt = new Date().toISOString();
-    const receivedAt = status === 'received' ? updatedAt : list[idx].receivedAt;
-    const cleanedNote = adminNote?.trim().slice(0, 1000);
-
-    const patch = stripUndefined({
+    return deliverablesDomain.updateSiteDeliverableStatus(
+      deliverableId,
       status,
-      adminNote: cleanedNote || undefined,
-      receivedAt,
-      updatedAt
-    });
-
-    list[idx] = stripUndefined({
-      ...list[idx],
-      ...patch
-    });
-    localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(list));
-
-    try {
-      await updateDoc(doc(db, 'siteDeliverables', deliverableId), patch);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `siteDeliverables/${deliverableId}`);
-    }
-
-    const adminUser = this.getCurrentUser();
-    const recipientUserId = this.resolveRecipientUserId(list[idx].senderId, list[idx].senderEmail);
-    this.addNotification({
-      title:
-        status === 'received'
-          ? `تم استلام ملف PDF: ${list[idx].title}`
-          : `ملاحظة إدارة على ملف PDF: ${list[idx].title}`,
-      message:
-        status === 'received'
-          ? `أكدت الإدارة استلام ملف "${list[idx].fileName}" لمشروع ${list[idx].projectName}.`
-          : `طلبت الإدارة مراجعة ملف "${list[idx].fileName}"${cleanedNote ? `: ${cleanedNote}` : '.'}`,
-      type: 'deliverable_reviewed',
-      targetRole: 'site',
-      targetUserId: recipientUserId,
-      projectId: list[idx].projectId,
-      senderId: adminUser?.id,
-      senderName: adminUser?.displayName,
-      linkTab: 'site-deliverables'
-    });
-
-    this.notify();
-    return true;
+      adminNote,
+      this.getDeliverablesContext()
+    );
   }
 
   public async deleteSiteDeliverable(deliverableId: string): Promise<boolean> {
-    const deleted = await deleteDeliverableFromFirebase(deliverableId);
-    if (deleted) {
-      this.removeDeliverablesFromLocalState([deliverableId]);
-    }
-    return deleted;
+    return deliverablesDomain.deleteSiteDeliverable(deliverableId, () => this.notify());
   }
 
   public async cleanupExpiredDeliverables(expiredItems: SiteDeliverable[]): Promise<void> {
-    const activeUser = this.getCurrentUser();
-    const isAdmin = activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
-    const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(
-      {
-        canAccessDeliverables: canAccessSiteDeliverablesTab(activeUser),
-        hasAllProjects: Boolean(isAdmin || hasAllProjectsAccess(activeUser)),
-        assignedProjectIds: activeUser?.assignedProjects || []
-      },
-      expiredItems
+    return deliverablesDomain.cleanupExpiredDeliverables(
+      expiredItems,
+      this.getCurrentUser(),
+      () => this.notify()
     );
-    if (deletedIds.length > 0) {
-      this.removeDeliverablesFromLocalState(deletedIds);
-    }
   }
 
   private removeDeliverablesFromLocalState(deletedIds: string[]) {
-    if (deletedIds.length === 0) return;
-    try {
-      const stored = localStorage.getItem(STORAGE_KEYS.SITE_DELIVERABLES);
-      if (!stored) return;
-      const list: SiteDeliverable[] = JSON.parse(stored);
-      const idSet = new Set(deletedIds);
-      const filtered = list.filter((d) => !idSet.has(d.id));
-      if (filtered.length !== list.length) {
-        localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(filtered));
-        this.notify();
-      }
-    } catch {
-      // ignore parse errors
-    }
+    deliverablesDomain.removeDeliverablesFromLocalState(deletedIds, () => this.notify());
   }
 
   // --- Daily Reports ---
   public getReports(): DailyReport[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.REPORTS);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
-    }
+    return reportsDomain.getReports();
   }
 
   public getReportById(id: string): DailyReport | undefined {
-    return this.getReports().find((r) => r.id === id);
+    return reportsDomain.getReportById(id);
   }
 
   public getReportForProjectDate(projectId: string, reportDate: string): DailyReport | undefined {
-    return this.getReports().find(
-      (r) => r.projectId === projectId && r.reportDate === reportDate
-    );
+    return reportsDomain.getReportForProjectDate(projectId, reportDate);
   }
 
   private async uploadReportAttachmentChunks(
@@ -2059,83 +1932,15 @@ class DataService {
     preparedFiles: { item: PreparedReportAttachment; chunks: string[] }[],
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<string[]> {
-    const writtenChunkIds: string[] = [];
-    const totalFiles = preparedFiles.length;
-    const totalChunks = preparedFiles.reduce((sum, entry) => sum + entry.chunks.length, 0);
-    const totalBytes = Math.max(
-      1,
-      preparedFiles.reduce((sum, entry) => sum + entry.item.size, 0)
-    );
-    let uploadedChunks = 0;
-    const BATCH_CONCURRENCY = 5;
-
-    for (let fileIdx = 0; fileIdx < preparedFiles.length; fileIdx++) {
-      const { item, chunks } = preparedFiles[fileIdx];
-      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
-        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
-        const batchPromises: Promise<void>[] = [];
-
-        for (let chunkIdx = start; chunkIdx < end; chunkIdx++) {
-          const chunkId = `${item.attachmentId}_${chunkIdx}`;
-          const chunkDoc: ReportAttachmentChunk = {
-            attachmentId: item.attachmentId,
-            index: chunkIdx,
-            data: chunks[chunkIdx]
-          };
-
-          batchPromises.push(
-            setDoc(doc(db, 'reports', reportId, 'chunks', chunkId), chunkDoc).then(() => {
-              writtenChunkIds.push(chunkId);
-              uploadedChunks += 1;
-              const isAllDone = uploadedChunks === totalChunks;
-              const percent = isAllDone
-                ? 96
-                : Math.min(95, Math.round(12 + (uploadedChunks / Math.max(1, totalChunks)) * 83));
-              const uploadedBytes = Math.min(
-                totalBytes,
-                Math.round((uploadedChunks / Math.max(1, totalChunks)) * totalBytes)
-              );
-              onProgress?.({
-                percent,
-                currentFileIndex: fileIdx + 1,
-                totalFiles,
-                currentFileName: item.name,
-                uploadedChunks,
-                totalChunks,
-                uploadedBytes,
-                totalBytes,
-                stage: isAllDone ? 'finalizing' : 'uploading'
-              });
-            })
-          );
-        }
-
-        await Promise.all(batchPromises);
-      }
-    }
-
-    return writtenChunkIds;
+    return reportsDomain.uploadReportAttachmentChunks(reportId, preparedFiles, onProgress);
   }
 
   private async deleteChunksByIds(reportId: string, chunkIds: string[]) {
-    for (const chunkId of chunkIds) {
-      await deleteDoc(doc(db, 'reports', reportId, 'chunks', chunkId)).catch(() => undefined);
-    }
+    return reportsDomain.deleteReportChunksByIds(reportId, chunkIds);
   }
 
   private async deleteReportAttachmentChunks(reportId: string, attachmentId: string) {
-    if (!attachmentId) return;
-    try {
-      const snap = await getDocs(
-        query(collection(db, 'reports', reportId, 'chunks'), where('attachmentId', '==', attachmentId))
-      );
-      await Promise.allSettled(
-        snap.docs.map((d) => deleteDoc(doc(db, 'reports', reportId, 'chunks', d.id)))
-      );
-      revokePdfBlobUrl(`rep-${reportId}-${attachmentId}`);
-    } catch {
-      // Ignore background cleanup errors
-    }
+    return reportsDomain.deleteReportAttachmentChunks(reportId, attachmentId);
   }
 
   public async saveReport(
@@ -2144,12 +1949,6 @@ class DataService {
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<DailyReport> {
     const reports = this.getReports();
-    const duplicate = reports.find(
-      (r) => r.projectId === reportData.projectId && r.reportDate === reportData.reportDate
-    );
-    if (duplicate) {
-      throw new Error('DAILY_REPORT_ALREADY_EXISTS');
-    }
 
     const existingStaticAttachments = (reportData.attachments || []).filter(
       (att) => att.storageMode !== 'firestore_chunks' && att.url && !att.url.startsWith('blob:')
@@ -2254,41 +2053,79 @@ class DataService {
     }
 
     const reportDocRef = doc(db, 'reports', newReport.id);
-    try {
-      const existingSnap = await getDoc(reportDocRef);
-      if (existingSnap.exists()) {
-        const remoteReport = {
-          ...(existingSnap.data() as DailyReport),
-          id: existingSnap.id
-        };
-        const mergedReports = [remoteReport, ...reports.filter((r) => r.id !== remoteReport.id)];
-        localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(mergedReports));
-        this.notify();
-        throw new Error('DAILY_REPORT_ALREADY_EXISTS');
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message === 'DAILY_REPORT_ALREADY_EXISTS') {
-        throw error;
-      }
-      // If pre-check fails unexpectedly, proceed to setDoc so Firestore returns the authoritative error
-    }
+    const OTHER_SENDER_CONFLICT_MSG = 'يوجد تقرير لهذا المشروع في هذا التاريخ من مستخدم آخر';
+    let savedReport: DailyReport = newReport;
+    let wasUpdate = false;
 
     try {
-      await setDoc(reportDocRef, stripUndefined(newReport));
+      const txResult = await runTransaction(db, async (tx) => {
+        const existingSnap = await tx.get(reportDocRef);
+        if (existingSnap.exists()) {
+          const existingData = {
+            ...(existingSnap.data() as DailyReport),
+            id: existingSnap.id
+          };
+          if (existingData.senderId && existingData.senderId !== newReport.senderId) {
+            throw new Error(OTHER_SENDER_CONFLICT_MSG);
+          }
+          const mergedAttachments =
+            finalAttachments.length > 0
+              ? [...(existingData.attachments || []), ...finalAttachments].slice(
+                  0,
+                  MAX_REPORT_ATTACHMENTS
+                )
+              : existingData.attachments || [];
+          const updatePayload = stripUndefined({
+            projectId: newReport.projectId,
+            projectName: newReport.projectName,
+            reportDate: newReport.reportDate,
+            submittedWorks: newReport.submittedWorks,
+            receivedWorks: newReport.receivedWorks,
+            notes: newReport.notes,
+            attachments: mergedAttachments,
+            status: 'submitted' as const,
+            updatedAt: now
+          });
+          tx.update(reportDocRef, updatePayload);
+          return {
+            wasUpdate: true,
+            report: {
+              ...existingData,
+              ...updatePayload
+            } as DailyReport
+          };
+        }
+
+        tx.set(reportDocRef, stripUndefined(newReport));
+        return {
+          wasUpdate: false,
+          report: newReport
+        };
+      });
+      savedReport = txResult.report;
+      wasUpdate = txResult.wasUpdate;
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}`);
+      if (error instanceof Error && error.message === OTHER_SENDER_CONFLICT_MSG) {
+        throw error;
+      }
+      handleFirestoreError(
+        error,
+        wasUpdate ? OperationType.UPDATE : OperationType.CREATE,
+        `reports/${newReport.id}`
+      );
     }
 
     if (preparedChunked.length > 0) {
       try {
-        await this.uploadReportAttachmentChunks(newReport.id, preparedChunked, onProgress);
+        await this.uploadReportAttachmentChunks(savedReport.id, preparedChunked, onProgress);
       } catch (error) {
-        // Roll back report and any partial chunks so today's report is not stuck in half-saved state
         for (const entry of preparedChunked) {
-          await this.deleteReportAttachmentChunks(newReport.id, entry.item.attachmentId);
+          await this.deleteReportAttachmentChunks(savedReport.id, entry.item.attachmentId);
         }
-        await deleteDoc(doc(db, 'reports', newReport.id)).catch(() => undefined);
-        handleFirestoreError(error, OperationType.CREATE, `reports/${newReport.id}/chunks`);
+        if (!wasUpdate) {
+          await deleteDoc(doc(db, 'reports', savedReport.id)).catch(() => undefined);
+        }
+        handleFirestoreError(error, OperationType.CREATE, `reports/${savedReport.id}/chunks`);
       }
 
       onProgress?.({
@@ -2304,35 +2141,39 @@ class DataService {
       });
     }
 
-    reports.unshift(newReport);
-    localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(reports));
+    const updatedReports = [savedReport, ...reports.filter((r) => r.id !== savedReport.id)];
+    safeStorage.setJson(STORAGE_KEYS.REPORTS, updatedReports);
 
     this.clearReportDraft(reportData.projectId);
 
     this.addNotification({
-      title: `تقرير يومي جديد: ${newReport.projectName}`,
-      message: `قام ${newReport.senderName} بتقديم تقرير أعمال اليوم (${newReport.reportDate}) مع ${newReport.submittedWorks.length} تقديمات و ${newReport.receivedWorks.length} استلامات.`,
+      title: wasUpdate
+        ? `تحديث تقرير يومي: ${savedReport.projectName}`
+        : `تقرير يومي جديد: ${savedReport.projectName}`,
+      message: `قام ${savedReport.senderName} ${wasUpdate ? 'بتحديث' : 'بتقديم'} تقرير أعمال اليوم (${savedReport.reportDate}) مع ${savedReport.submittedWorks.length} تقديمات و ${savedReport.receivedWorks.length} استلامات.`,
       type: 'report_submitted',
       targetRole: 'admin',
-      projectId: newReport.projectId,
-      senderId: newReport.senderId,
-      senderName: newReport.senderName,
+      projectId: savedReport.projectId,
+      senderId: savedReport.senderId,
+      senderName: savedReport.senderName,
       linkTab: 'reports'
     });
 
     this.recordActivityLog({
       entityType: 'report',
-      action: 'report_created',
-      entityId: newReport.id,
-      entityTitle: `تقرير يومي (${newReport.reportDate})`,
-      projectId: newReport.projectId,
-      projectName: newReport.projectName,
-      summary: `تم تقديم تقرير يومي جديد بعدد ${newReport.submittedWorks.length} تقديمات و${newReport.receivedWorks.length} استلامات.`,
-      details: newReport.notes ? `ملاحظات التقرير: ${newReport.notes}` : undefined
+      action: wasUpdate ? 'report_updated' : 'report_created',
+      entityId: savedReport.id,
+      entityTitle: `تقرير يومي (${savedReport.reportDate})`,
+      projectId: savedReport.projectId,
+      projectName: savedReport.projectName,
+      summary: wasUpdate
+        ? `تم تحديث التقرير اليومي بعدد ${savedReport.submittedWorks.length} تقديمات و${savedReport.receivedWorks.length} استلامات.`
+        : `تم تقديم تقرير يومي جديد بعدد ${savedReport.submittedWorks.length} تقديمات و${savedReport.receivedWorks.length} استلامات.`,
+      details: savedReport.notes ? `ملاحظات التقرير: ${savedReport.notes}` : undefined
     });
 
     this.notify();
-    return newReport;
+    return savedReport;
   }
 
   public async updateDailyReport(
@@ -2637,59 +2478,7 @@ class DataService {
     reportId: string,
     attachment: ReportAttachment
   ): Promise<string> {
-    if (
-      attachment.storageMode === 'firestore_chunks' ||
-      (attachment.id && attachment.chunkCount && attachment.chunkCount > 0)
-    ) {
-      const cacheKey = `rep-${reportId}-${attachment.id}`;
-      const cached = getCachedPdfBlobUrl(cacheKey);
-      if (cached) return cached;
-
-      let chunkDocs: ReportAttachmentChunk[] = [];
-      try {
-        const snap = await getDocs(
-          query(
-            collection(db, 'reports', reportId, 'chunks'),
-            where('attachmentId', '==', attachment.id)
-          )
-        );
-        chunkDocs = snap.docs.map((d) => d.data() as ReportAttachmentChunk);
-      } catch (error) {
-        handleFirestoreError(error, OperationType.LIST, `reports/${reportId}/chunks`);
-      }
-
-      if (chunkDocs.length === 0) {
-        throw new Error('تعذر العثور على بيانات المرفق في قاعدة البيانات.');
-      }
-
-      chunkDocs.sort((a, b) => a.index - b.index);
-      const fullBase64 = chunkDocs.map((c) => c.data).join('');
-      const resolvedMime =
-        attachment.type ||
-        (isExcelFileName(attachment.name)
-          ? getExcelMimeType(attachment.name)
-          : attachment.name.toLowerCase().endsWith('.pdf')
-            ? 'application/pdf'
-            : 'application/octet-stream');
-
-      const blob = base64ToBlob(fullBase64, resolvedMime);
-      const url = URL.createObjectURL(blob);
-      cachePdfBlobUrl(cacheKey, url);
-      return url;
-    }
-
-    if (
-      attachment.url &&
-      (attachment.url.startsWith('http://') ||
-        attachment.url.startsWith('https://') ||
-        attachment.url.startsWith('data:'))
-    ) {
-      return attachment.url;
-    }
-
-    throw new Error(
-      'هذا المرفق محفوظ كرابط محلي قديم من متصفح المرسل قبل تفعيل الرفع السحابي.'
-    );
+    return reportsDomain.fetchReportAttachmentUrl(reportId, attachment);
   }
 
   public async updateReportStatus(
@@ -2832,143 +2621,49 @@ class DataService {
 
   // Local Autosave Draft
   public saveReportDraft(projectId: string, draftData: Partial<DailyReport>) {
-    try {
-      const key = STORAGE_KEYS.REPORT_DRAFT_PREFIX + projectId;
-      localStorage.setItem(
-        key,
-        JSON.stringify({
-          data: draftData,
-          savedAt: new Date().toISOString()
-        })
-      );
-    } catch (e) {
-      console.warn('Autosave draft failed:', e);
-    }
+    reportsDomain.saveReportDraft(projectId, draftData);
   }
 
   public getReportDraft(projectId: string): { data: Partial<DailyReport>; savedAt: string } | null {
-    try {
-      const key = STORAGE_KEYS.REPORT_DRAFT_PREFIX + projectId;
-      const item = localStorage.getItem(key);
-      return item ? JSON.parse(item) : null;
-    } catch {
-      return null;
-    }
+    return reportsDomain.getReportDraft(projectId);
   }
 
   public clearReportDraft(projectId: string) {
-    try {
-      const key = STORAGE_KEYS.REPORT_DRAFT_PREFIX + projectId;
-      localStorage.removeItem(key);
-    } catch (e) {
-      console.warn('Clear draft failed:', e);
-    }
+    reportsDomain.clearReportDraft(projectId);
   }
 
   // --- Issues ---
   public getIssues(): IssueReport[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.ISSUES);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
-    }
+    return issuesDomain.getIssues();
   }
 
-  public addIssue(issue: Omit<IssueReport, 'id' | 'issueNumber' | 'createdAt' | 'updatedAt' | 'status'>): IssueReport {
-    const issues = this.getIssues();
-    const year = new Date().getFullYear();
-    const nextSeq = String(issues.length + 1).padStart(3, '0');
-    const issueNumber = `ISS-${year}-${nextSeq}`;
-    const now = new Date().toISOString();
-
-    const newIssue: IssueReport = stripUndefined({
-      ...issue,
-      authorId: auth.currentUser?.uid || issue.authorId,
-      id: 'iss-' + Date.now().toString(36),
-      issueNumber,
-      status: 'new',
-      createdAt: now,
-      updatedAt: now
+  public async addIssue(
+    issue: Omit<IssueReport, 'id' | 'issueNumber' | 'createdAt' | 'updatedAt' | 'status'>
+  ): Promise<IssueReport> {
+    return issuesDomain.addIssue(issue, {
+      addNotification: (notif) => this.addNotification(notif),
+      notify: () => this.notify()
     });
-    issues.unshift(newIssue);
-    localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(issues));
-
-    setDoc(doc(db, 'issues', newIssue.id), stripUndefined(newIssue)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `issues/${newIssue.id}`)
-    );
-
-    const isUrgent = newIssue.priority === 'urgent';
-    this.addNotification({
-      title: isUrgent
-        ? `بلاغ عاجل: ${newIssue.issueNumber} — ${newIssue.projectName}`
-        : `بلاغ مشكلة جديدة: ${newIssue.issueNumber} — ${newIssue.projectName}`,
-      message: `أبلغ ${newIssue.authorName} عن ${isUrgent ? 'مشكلة عاجلة' : 'مشكلة بالموقع'}: ${newIssue.description.slice(0, 80)}${newIssue.description.length > 80 ? '...' : ''}`,
-      type: isUrgent ? 'urgent_issue' : 'issue_reported',
-      priority: newIssue.priority,
-      targetRole: 'admin',
-      projectId: newIssue.projectId,
-      senderId: newIssue.authorId,
-      senderName: newIssue.authorName,
-      linkTab: 'issues'
-    });
-
-    this.notify();
-    return newIssue;
   }
 
   public updateIssue(
     issueId: string,
     updates: Partial<Pick<IssueReport, 'status' | 'adminComment' | 'resolvedAt'>>
   ): boolean {
-    const issues = this.getIssues();
-    const idx = issues.findIndex((i) => i.id === issueId);
-    if (idx === -1) return false;
-
-    const updatedAt = new Date().toISOString();
-    const resolvedAt = updates.status === 'resolved' ? updatedAt : issues[idx].resolvedAt;
-    const patch = stripUndefined({
-      ...updates,
-      updatedAt,
-      resolvedAt
-    });
-
-    issues[idx] = {
-      ...issues[idx],
-      ...patch
-    };
-    localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(issues));
-
-    updateDoc(doc(db, 'issues', issueId), patch).catch((error) =>
-      handleFirestoreError(error, OperationType.UPDATE, `issues/${issueId}`)
-    );
-
-    this.notify();
-    return true;
+    return issuesDomain.updateIssue(issueId, updates, () => this.notify());
   }
 
   // --- Tasks ---
   private getTasksRaw(): ProjectTask[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.TASKS);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
-    }
+    return tasksDomain.getTasksRaw();
   }
 
   public getTasks(): ProjectTask[] {
-    const nowMs = Date.now();
-    return this.getTasksRaw().map((t) => {
-      if (!t.attachments || t.attachments.length === 0) return t;
-      const activeAttachments = t.attachments.filter((att) => !isTaskAttachmentExpired(att, nowMs));
-      return activeAttachments.length === t.attachments.length
-        ? t
-        : { ...t, attachments: activeAttachments };
-    });
+    return tasksDomain.getTasks();
   }
 
   public async cleanupExpiredTaskAttachments(candidateTasks?: ProjectTask[]): Promise<void> {
+    if (isFirestoreQuotaExhausted()) return;
     const activeUser = this.getCurrentUser();
     if (!activeUser) return;
     const isAdmin = activeUser.role === 'admin' || isSuperAdminEmail(activeUser.email);
@@ -3009,69 +2704,11 @@ class DataService {
     preparedFiles: { item: PreparedTaskAttachment; chunks: string[]; expiresAtMs: number }[],
     onProgress?: (progress: TaskUploadProgress) => void
   ): Promise<string[]> {
-    const writtenChunkIds: string[] = [];
-    const totalFiles = preparedFiles.length;
-    const totalChunks = preparedFiles.reduce((sum, entry) => sum + entry.chunks.length, 0);
-    const totalBytes = Math.max(
-      1,
-      preparedFiles.reduce((sum, entry) => sum + entry.item.fileSizeBytes, 0)
-    );
-    let uploadedChunks = 0;
-    const BATCH_CONCURRENCY = 5;
-
-    for (let fileIdx = 0; fileIdx < preparedFiles.length; fileIdx++) {
-      const { item, chunks, expiresAtMs } = preparedFiles[fileIdx];
-      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
-        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
-        const batchPromises: Promise<void>[] = [];
-
-        for (let chunkIdx = start; chunkIdx < end; chunkIdx++) {
-          const chunkId = `${item.attachmentId}_${chunkIdx}`;
-          const chunkDoc: TaskAttachmentChunk = {
-            attachmentId: item.attachmentId,
-            index: chunkIdx,
-            data: chunks[chunkIdx],
-            expiresAtMs
-          };
-
-          batchPromises.push(
-            setDoc(doc(db, 'tasks', taskId, 'chunks', chunkId), chunkDoc).then(() => {
-              writtenChunkIds.push(chunkId);
-              uploadedChunks += 1;
-              const isAllDone = uploadedChunks === totalChunks;
-              const percent = isAllDone
-                ? 96
-                : Math.min(95, Math.round(12 + (uploadedChunks / Math.max(1, totalChunks)) * 83));
-              const uploadedBytes = Math.min(
-                totalBytes,
-                Math.round((uploadedChunks / Math.max(1, totalChunks)) * totalBytes)
-              );
-              onProgress?.({
-                percent,
-                currentFileIndex: fileIdx + 1,
-                totalFiles,
-                currentFileName: item.name,
-                uploadedChunks,
-                totalChunks,
-                uploadedBytes,
-                totalBytes,
-                stage: isAllDone ? 'finalizing' : 'uploading'
-              });
-            })
-          );
-        }
-
-        await Promise.all(batchPromises);
-      }
-    }
-
-    return writtenChunkIds;
+    return tasksDomain.uploadTaskAttachmentChunks(taskId, preparedFiles, onProgress);
   }
 
   private async deleteTaskChunksByIds(taskId: string, chunkIds: string[]) {
-    for (const chunkId of chunkIds) {
-      await deleteDoc(doc(db, 'tasks', taskId, 'chunks', chunkId)).catch(() => undefined);
-    }
+    return tasksDomain.deleteTaskChunksByIds(taskId, chunkIds);
   }
 
   public async addTask(
@@ -3443,43 +3080,9 @@ class DataService {
     taskId: string,
     attachment: TaskAttachment
   ): Promise<string> {
-    if (isTaskAttachmentExpired(attachment)) {
-      void this.cleanupExpiredTaskAttachments();
-      throw new Error('انتهت مدة صلاحية هذا المرفق (48 ساعة) وتم حذفه تلقائياً من قاعدة البيانات.');
-    }
-
-    const cacheKey = `task-${taskId}-${attachment.id}`;
-    const cached = getCachedPdfBlobUrl(cacheKey);
-    if (cached) return cached;
-
-    let chunkDocs: TaskAttachmentChunk[] = [];
-    try {
-      const snap = await getDocs(
-        query(collection(db, 'tasks', taskId, 'chunks'), where('attachmentId', '==', attachment.id))
-      );
-      chunkDocs = snap.docs.map((d) => d.data() as TaskAttachmentChunk);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, `tasks/${taskId}/chunks`);
-    }
-
-    if (chunkDocs.length === 0) {
-      throw new Error('تعذر العثور على بيانات المرفق في قاعدة البيانات (ربما انتهت صلاحيته).');
-    }
-
-    chunkDocs.sort((a, b) => a.index - b.index);
-    const fullBase64 = chunkDocs.map((c) => c.data).join('');
-    const resolvedMime =
-      attachment.mimeType ||
-      (attachment.fileFormat === 'excel' || isExcelFileName(attachment.name)
-        ? getExcelMimeType(attachment.name)
-        : attachment.fileFormat === 'pdf' || attachment.name.toLowerCase().endsWith('.pdf')
-          ? 'application/pdf'
-          : 'application/octet-stream');
-
-    const blob = base64ToBlob(fullBase64, resolvedMime);
-    const url = URL.createObjectURL(blob);
-    cachePdfBlobUrl(cacheKey, url);
-    return url;
+    return tasksDomain.fetchTaskAttachmentUrl(taskId, attachment, () =>
+      this.cleanupExpiredTaskAttachments()
+    );
   }
 
   public async deleteTask(taskId: string): Promise<boolean> {
@@ -3615,11 +3218,12 @@ class DataService {
     if (idx === -1) return false;
 
     if (!items[idx].readBy.includes(userId)) {
-      const nextReadBy = [...items[idx].readBy, userId];
-      items[idx].readBy = nextReadBy;
-      localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(items));
+      items[idx].readBy = [...items[idx].readBy, userId];
+      safeStorage.setJson(STORAGE_KEYS.ANNOUNCEMENTS, items);
 
-      updateDoc(doc(db, 'announcements', announcementId), { readBy: nextReadBy }).catch((error) =>
+      updateDoc(doc(db, 'announcements', announcementId), {
+        readBy: arrayUnion(userId)
+      }).catch((error) =>
         handleFirestoreError(error, OperationType.UPDATE, `announcements/${announcementId}`)
       );
 
@@ -3629,52 +3233,21 @@ class DataService {
   }
 
   // --- Users Management (Firebase Auth + Firestore) ---
+  private getUsersContext(): usersDomain.UsersDomainContext {
+    return {
+      getCurrentUser: () => this.getCurrentUser(),
+      setCurrentUser: (user) => this.setCurrentUser(user),
+      getProjects: () => this.getProjects(),
+      notify: () => this.notify()
+    };
+  }
+
   public getUsers(): UserProfile[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.USERS);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
-    }
+    return usersDomain.getUsers();
   }
 
   public async createUserWithAuth(payload: CreateUserPayload): Promise<UserProfile> {
-    const uid = await createFirebaseUserByAdmin(
-      payload.email,
-      payload.password,
-      payload.displayName
-    );
-    const now = new Date().toISOString();
-    const isAdminUser = payload.role === 'admin' || isSuperAdminEmail(payload.email);
-
-    const newUser: UserProfile = stripUndefined({
-      id: uid,
-      email: payload.email.trim().toLowerCase(),
-      displayName: payload.displayName.trim(),
-      jobTitle: payload.jobTitle.trim(),
-      role: isAdminUser ? 'admin' : 'site',
-      allProjects: isAdminUser ? true : Boolean(payload.allProjects),
-      canAccessExecutedWorks: isAdminUser ? true : Boolean(payload.canAccessExecutedWorks),
-      canAccessSiteDeliverables: true,
-      assignedProjects:
-        isAdminUser || payload.allProjects
-          ? this.getProjects().map((p) => p.id)
-          : payload.assignedProjects,
-      status: 'active',
-      phone: payload.phone?.trim() || undefined,
-      createdAt: now,
-      updatedAt: now
-    });
-
-    try {
-      await setDoc(doc(db, 'users', newUser.id), stripUndefined(newUser));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `users/${newUser.id}`);
-    }
-
-    this.upsertLocalUser(newUser);
-    this.notify();
-    return newUser;
+    return usersDomain.createUserWithAuth(payload, this.getUsersContext());
   }
 
   public async updateUser(userId: string, updates: Partial<UserProfile>): Promise<boolean> {
@@ -3736,55 +3309,13 @@ class DataService {
   }
 
   public async deleteUser(userId: string): Promise<boolean> {
-    const users = this.getUsers();
-    const target = users.find((u) => u.id === userId);
-    if (!target) return false;
-
-    // Never allow deleting Super Admin or currently signed-in admin
-    const currentUser = this.getCurrentUser();
-    if (isSuperAdminEmail(target.email) || (currentUser && currentUser.id === userId)) {
-      return false;
-    }
-
-    try {
-      await deleteDoc(doc(db, 'users', userId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `users/${userId}`);
-    }
-
-    const filtered = users.filter((u) => u.id !== userId);
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(filtered));
-    this.notify();
-    return true;
+    return usersDomain.deleteUser(userId, this.getUsersContext());
   }
 
   public async updateMyNotificationPreferences(
     prefs: NotificationPreferences
   ): Promise<boolean> {
-    const activeUser = this.getCurrentUser();
-    if (!activeUser) return false;
-
-    const normalizedPrefs = normalizeNotificationPreferences(prefs);
-    const updatedAt = new Date().toISOString();
-    const updatedUser: UserProfile = stripUndefined({
-      ...activeUser,
-      notificationPreferences: normalizedPrefs,
-      updatedAt
-    });
-
-    try {
-      await updateDoc(doc(db, 'users', activeUser.id), {
-        notificationPreferences: normalizedPrefs,
-        updatedAt
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${activeUser.id}`);
-    }
-
-    this.upsertLocalUser(updatedUser);
-    this.setCurrentUser(updatedUser);
-    this.notify();
-    return true;
+    return usersDomain.updateMyNotificationPreferences(prefs, this.getUsersContext());
   }
 
   public async updateMyProfile(updates: {
@@ -3833,6 +3364,10 @@ class DataService {
     }
 
     if (updates.email !== undefined) {
+      const isAdminActor = activeUser.role === 'admin' || isSuperAdminEmail(activeUser.email);
+      if (!isAdminActor) {
+        throw new Error('تعديل البريد الإلكتروني متاح لمسؤول النظام فقط.');
+      }
       const cleanEmail = normalizeEmail(updates.email);
       if (cleanEmail.length >= 3 && cleanEmail.length <= 200) {
         if (!isSuperAdminEmail(activeUser.email) && isSuperAdminEmail(cleanEmail)) {
@@ -3881,14 +3416,65 @@ class DataService {
    * Daily Reports, Executed Works, Site Deliverables, Issue Reports, and Announcements
    * owned by that user in Firestore and local caches.
    */
+  private getIdentitySyncDayStorageKey(date = new Date()): string {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `dc_identity_sync_${y}${m}${d}`;
+  }
+
+  private loadPersistedAutoSyncKeys(userId: string): Set<string> {
+    const todayKey = this.getIdentitySyncDayStorageKey();
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        // Prune older daily identity sync keys
+        for (let i = window.localStorage.length - 1; i >= 0; i--) {
+          const k = window.localStorage.key(i);
+          if (k && k.startsWith('dc_identity_sync_') && k !== todayKey) {
+            window.localStorage.removeItem(k);
+          }
+        }
+        const raw = window.localStorage.getItem(todayKey);
+        if (!raw) return new Set<string>();
+        const parsed = JSON.parse(raw) as Record<string, string[]>;
+        const list = parsed && Array.isArray(parsed[userId]) ? parsed[userId] : [];
+        return new Set<string>(list);
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return new Set<string>();
+  }
+
+  private savePersistedAutoSyncKeys(userId: string, keys: Set<string>): void {
+    const todayKey = this.getIdentitySyncDayStorageKey();
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        let parsed: Record<string, string[]> = {};
+        const raw = window.localStorage.getItem(todayKey);
+        if (raw) {
+          const candidate = JSON.parse(raw);
+          if (candidate && typeof candidate === 'object') {
+            parsed = candidate as Record<string, string[]>;
+          }
+        }
+        parsed[userId] = Array.from(keys).slice(-200);
+        window.localStorage.setItem(todayKey, JSON.stringify(parsed));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
   private async commitIdentityPatchList(
     collectionName: string,
     entries: Array<{ id: string; patch: Record<string, string> }>
   ): Promise<number> {
-    if (entries.length === 0) return 0;
+    if (entries.length === 0 || isFirestoreQuotaExhausted()) return 0;
     let updatedCount = 0;
 
     for (const chunk of chunkArray(entries, 400)) {
+      if (isFirestoreQuotaExhausted()) break;
       try {
         const batch = writeBatch(db);
         chunk.forEach(({ id, patch }) => {
@@ -3896,13 +3482,22 @@ class DataService {
         });
         await batch.commit();
         updatedCount += chunk.length;
-      } catch {
+      } catch (error) {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+          break;
+        }
         // Fallback per-document so a single legacy or out-of-scope doc never blocks other updates
         for (const { id, patch } of chunk) {
+          if (isFirestoreQuotaExhausted()) break;
           try {
             await updateDoc(doc(db, collectionName, id), patch);
             updatedCount += 1;
-          } catch {
+          } catch (docError) {
+            if (getFirestoreErrorCode(docError) === 'resource-exhausted') {
+              markFirestoreQuotaExhausted();
+              break;
+            }
             // Skip individual doc if not writable under current rules
           }
         }
@@ -3918,8 +3513,13 @@ class DataService {
     displayName: string;
     email?: string;
     includeAnnouncements?: boolean;
+    maxDocs?: number;
   }): Promise<HistoricalSyncSummary> {
     const { userId, displayName, includeAnnouncements } = params;
+    let remainingDocs =
+      typeof params.maxDocs === 'number' && Number.isFinite(params.maxDocs)
+        ? Math.max(0, Math.floor(params.maxDocs))
+        : Number.POSITIVE_INFINITY;
     const prevEmail = normalizeEmail(params.previousEmail);
     const nextEmail = normalizeEmail(params.email);
     const now = new Date().toISOString();
@@ -3933,12 +3533,18 @@ class DataService {
       announcementsUpdated: 0
     };
 
+    const activeActor = this.getCurrentUser();
+    const isAdminActor =
+      activeActor?.role === 'admin' || isSuperAdminEmail(activeActor?.email || auth.currentUser?.email);
+
     const isMatchingSender = (
       senderId?: string,
       senderEmail?: string,
       originalSenderEmail?: string
     ) => {
       if (senderId && senderId === userId) return true;
+      // Non-admins strictly rely on senderId == uid (matching hardened firestore.rules)
+      if (!isAdminActor) return false;
       const clean = normalizeEmail(senderEmail);
       const cleanOrig = normalizeEmail(originalSenderEmail);
       return Boolean(
@@ -3986,11 +3592,17 @@ class DataService {
         updatedAt: now
       };
     });
-    if (reportEntries.length > 0) {
+    if (reportEntries.length > 0 && remainingDocs > 0 && !isFirestoreQuotaExhausted()) {
+      const capped = Number.isFinite(remainingDocs)
+        ? reportEntries.slice(0, remainingDocs)
+        : reportEntries;
       localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(updatedReports));
-      summary.reportsUpdated = await this.commitIdentityPatchList('reports', reportEntries);
+      summary.reportsUpdated = await this.commitIdentityPatchList('reports', capped);
       summary.totalUpdated += summary.reportsUpdated;
+      remainingDocs = Math.max(0, remainingDocs - capped.length);
     }
+
+    if (remainingDocs <= 0 || isFirestoreQuotaExhausted()) return summary;
 
     // 2. Executed Works (`executedWorks`)
     const executedWorks = this.getExecutedWorks();
@@ -4003,14 +3615,20 @@ class DataService {
       });
       return { ...work, authorName: displayName, updatedAt: now };
     });
-    if (workEntries.length > 0) {
+    if (workEntries.length > 0 && remainingDocs > 0 && !isFirestoreQuotaExhausted()) {
+      const capped = Number.isFinite(remainingDocs)
+        ? workEntries.slice(0, remainingDocs)
+        : workEntries;
       localStorage.setItem(STORAGE_KEYS.EXECUTED_WORKS, JSON.stringify(updatedWorks));
       summary.executedWorksUpdated = await this.commitIdentityPatchList(
         'executedWorks',
-        workEntries
+        capped
       );
       summary.totalUpdated += summary.executedWorksUpdated;
+      remainingDocs = Math.max(0, remainingDocs - capped.length);
     }
+
+    if (remainingDocs <= 0 || isFirestoreQuotaExhausted()) return summary;
 
     // 3. Site Deliverables (`siteDeliverables`)
     const deliverables = this.getSiteDeliverables();
@@ -4036,14 +3654,20 @@ class DataService {
         updatedAt: now
       };
     });
-    if (deliverableEntries.length > 0) {
+    if (deliverableEntries.length > 0 && remainingDocs > 0 && !isFirestoreQuotaExhausted()) {
+      const capped = Number.isFinite(remainingDocs)
+        ? deliverableEntries.slice(0, remainingDocs)
+        : deliverableEntries;
       localStorage.setItem(STORAGE_KEYS.SITE_DELIVERABLES, JSON.stringify(updatedDeliverables));
       summary.deliverablesUpdated = await this.commitIdentityPatchList(
         'siteDeliverables',
-        deliverableEntries
+        capped
       );
       summary.totalUpdated += summary.deliverablesUpdated;
+      remainingDocs = Math.max(0, remainingDocs - capped.length);
     }
+
+    if (remainingDocs <= 0 || isFirestoreQuotaExhausted()) return summary;
 
     // 4. Issue Reports (`issues`)
     const issues = this.getIssues();
@@ -4056,11 +3680,17 @@ class DataService {
       });
       return { ...issue, authorName: displayName, updatedAt: now };
     });
-    if (issueEntries.length > 0) {
+    if (issueEntries.length > 0 && remainingDocs > 0 && !isFirestoreQuotaExhausted()) {
+      const capped = Number.isFinite(remainingDocs)
+        ? issueEntries.slice(0, remainingDocs)
+        : issueEntries;
       localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(updatedIssues));
-      summary.issuesUpdated = await this.commitIdentityPatchList('issues', issueEntries);
+      summary.issuesUpdated = await this.commitIdentityPatchList('issues', capped);
       summary.totalUpdated += summary.issuesUpdated;
+      remainingDocs = Math.max(0, remainingDocs - capped.length);
     }
+
+    if (remainingDocs <= 0 || isFirestoreQuotaExhausted()) return summary;
 
     // 5. Announcements (`announcements`) — Admin only
     if (includeAnnouncements) {
@@ -4074,11 +3704,14 @@ class DataService {
         });
         return { ...ann, authorName: displayName };
       });
-      if (annEntries.length > 0) {
+      if (annEntries.length > 0 && remainingDocs > 0 && !isFirestoreQuotaExhausted()) {
+        const capped = Number.isFinite(remainingDocs)
+          ? annEntries.slice(0, remainingDocs)
+          : annEntries;
         localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(updatedAnnouncements));
         summary.announcementsUpdated = await this.commitIdentityPatchList(
           'announcements',
-          annEntries
+          capped
         );
         summary.totalUpdated += summary.announcementsUpdated;
       }
@@ -4102,9 +3735,16 @@ class DataService {
   }
 
   private async runSilentAutoIdentitySync() {
-    if (this.autoIdentitySyncRunning) return;
+    if (this.autoIdentitySyncRunning || isFirestoreQuotaExhausted()) return;
     const activeUser = this.getCurrentUser();
     if (!activeUser) return;
+
+    const MAX_DOCS_PER_RUN = 50;
+    let remainingDocBudget = MAX_DOCS_PER_RUN;
+
+    const persistedKeys = this.loadPersistedAutoSyncKeys(activeUser.id);
+    persistedKeys.forEach((k) => this.attemptedAutoSyncKeys.add(k));
+    let keysDirty = false;
 
     this.autoIdentitySyncRunning = true;
     try {
@@ -4127,6 +3767,8 @@ class DataService {
       let anyUpdated = false;
 
       for (const user of targetUsers) {
+        if (remainingDocBudget <= 0 || isFirestoreQuotaExhausted()) break;
+
         const displayName = (user.displayName || '').trim().slice(0, 150);
         const email = normalizeEmail(user.email).slice(0, 200);
         if (!displayName) continue;
@@ -4134,10 +3776,11 @@ class DataService {
         const staleIds: string[] = [];
 
         for (const rep of reports) {
-          const matches =
-            rep.senderId === user.id ||
-            (email && normalizeEmail(rep.senderEmail) === email) ||
-            (email && normalizeEmail(rep.originalSenderEmail) === email);
+          const matches = isAdmin
+            ? rep.senderId === user.id ||
+              (email && normalizeEmail(rep.senderEmail) === email) ||
+              (email && normalizeEmail(rep.originalSenderEmail) === email)
+            : rep.senderId === user.id;
           if (!matches) continue;
           const needsName = rep.senderName !== displayName;
           const needsEmail = Boolean(email && normalizeEmail(rep.senderEmail) !== email);
@@ -4182,17 +3825,28 @@ class DataService {
         const attemptKey = `${user.id}|${displayName}|${email}|${staleIds.sort().join(',')}`;
         if (this.attemptedAutoSyncKeys.has(attemptKey)) continue;
         this.attemptedAutoSyncKeys.add(attemptKey);
+        keysDirty = true;
 
+        const docsToAttempt = Math.min(remainingDocBudget, staleIds.length);
         const summary = await this.propagateUserIdentityToHistoricalRecords({
           userId: user.id,
           previousEmail: email,
           displayName,
           email,
-          includeAnnouncements: isAdmin && user.role === 'admin'
+          includeAnnouncements: isAdmin && user.role === 'admin',
+          maxDocs: remainingDocBudget
         });
+        remainingDocBudget = Math.max(0, remainingDocBudget - docsToAttempt);
         if (summary.totalUpdated > 0) {
           anyUpdated = true;
         }
+        if (isFirestoreQuotaExhausted()) {
+          break;
+        }
+      }
+
+      if (keysDirty) {
+        this.savePersistedAutoSyncKeys(activeUser.id, this.attemptedAutoSyncKeys);
       }
 
       if (anyUpdated) {
@@ -4272,14 +3926,14 @@ class DataService {
     const report = reports[idx];
     const users = this.getUsers();
     const activeUser = this.getCurrentUser();
+    const isAdminActor =
+      activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email || auth.currentUser?.email);
     const matchedUser =
       users.find((u) => u.id === report.senderId) ||
-      users.find((u) => normalizeEmail(u.email) === normalizeEmail(report.senderEmail)) ||
-      (activeUser &&
-      (activeUser.id === report.senderId ||
-        normalizeEmail(activeUser.email) === normalizeEmail(report.senderEmail))
-        ? activeUser
-        : undefined);
+      (isAdminActor
+        ? users.find((u) => normalizeEmail(u.email) === normalizeEmail(report.senderEmail))
+        : undefined) ||
+      (activeUser && activeUser.id === report.senderId ? activeUser : undefined);
 
     if (!matchedUser) return report;
 
@@ -4332,185 +3986,34 @@ class DataService {
   }
 
   // --- In-App Notifications ---
+  private getNotificationsContext(): notificationsDomain.NotificationsDomainContext {
+    return {
+      getCurrentUser: () => this.getCurrentUser(),
+      getUsers: () => this.getUsers(),
+      getProjects: () => this.getProjects(),
+      getReports: () => this.getReports(),
+      getCutoffHour: () => this.getCutoffHour(),
+      seenNotificationIds: this.seenNotificationIds,
+      notify: () => this.notify()
+    };
+  }
+
   public getNotifications(user?: UserProfile | null): AppNotification[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-      const list: AppNotification[] = data ? JSON.parse(data) : [];
-
-      const activeUser = user ?? this.getCurrentUser();
-      const isAdmin = activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
-      const userPrefs = activeUser?.notificationPreferences;
-      const allowDailyReports = normalizeNotificationPreferences(userPrefs).dailyReports;
-
-      // Evaluate missing reports past cutoff time only for admin (when dailyReports preference is enabled)
-      if (activeUser && isAdmin && allowDailyReports) {
-        const projects = this.getProjects().filter((p) => p.status === 'active');
-        const today = getTodayDateStr();
-        const reports = this.getReports();
-        const currentHour = new Date().getHours();
-        const cutoffHour = this.getCutoffHour();
-
-        if (currentHour >= cutoffHour) {
-          projects.forEach((proj) => {
-            const hasReport = reports.some((r) => r.projectId === proj.id && r.reportDate === today);
-            if (!hasReport) {
-              const notifId = `notif-missing-${proj.id}-${today}`;
-              if (!list.some((n) => n.id === notifId)) {
-                list.unshift({
-                  id: notifId,
-                  title: `تأخر تقرير اليوم: ${proj.name}`,
-                  message: `تجاوز الوقت المحدد (${cutoffHour}:00) ولم يتم استلام تقرير الأعمال اليومي لمشروع ${proj.name}.`,
-                  type: 'missing_report',
-                  linkTab: 'reports',
-                  isRead: false,
-                  createdAt: new Date().toISOString()
-                });
-              }
-            }
-          });
-        }
-      }
-
-      if (!activeUser || isAdmin) {
-        return list.filter(
-          (n) =>
-            (!activeUser || !n.targetUserId || this.isNotificationTargetingUser(n, activeUser)) &&
-            (!n.targetRole || n.targetRole === 'admin' || n.targetRole === 'all') &&
-            isNotificationAllowedForUser(n, userPrefs)
-        );
-      }
-
-      // Filter notifications for site users so admin-only alerts don't leak, project scope and user preferences are respected
-      return list.filter((n) => {
-        if (
-          n.targetRole === 'admin' ||
-          n.type === 'missing_report' ||
-          n.type === 'report_submitted' ||
-          n.type === 'urgent_issue' ||
-          n.type === 'issue_reported' ||
-          n.type === 'work_logged' ||
-          n.type === 'deliverable_sent' ||
-          n.type === 'task_done'
-        ) {
-          return false;
-        }
-        if (n.targetUserId && !this.isNotificationTargetingUser(n, activeUser)) return false;
-        if (
-          n.projectId &&
-          !hasAllProjectsAccess(activeUser) &&
-          !normalizeAssignedProjectsList(activeUser.assignedProjects).includes(n.projectId)
-        ) {
-          return false;
-        }
-        return isNotificationAllowedForUser(n, userPrefs);
-      });
-    } catch {
-      return [];
-    }
+    return notificationsDomain.getNotifications(this.getNotificationsContext(), user);
   }
 
   public addNotification(
     notif: Omit<AppNotification, 'id' | 'isRead' | 'createdAt' | 'readBy'>
   ) {
-    try {
-      const id = 'notif-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5);
-      const newNotif: AppNotification = stripUndefined({
-        ...notif,
-        senderId: auth.currentUser?.uid || notif.senderId,
-        id,
-        title: notif.title.trim().slice(0, 300),
-        message: notif.message.trim().slice(0, 1500),
-        readBy: [],
-        isRead: false,
-        createdAt: new Date().toISOString()
-      });
-
-      this.seenNotificationIds.add(id);
-
-      setDoc(doc(db, 'notifications', id), stripUndefined(newNotif)).catch((error) =>
-        handleFirestoreError(error, OperationType.CREATE, `notifications/${id}`)
-      );
-
-      const activeUser = this.getCurrentUser();
-      const activeIsAdmin =
-        activeUser?.role === 'admin' || isSuperAdminEmail(activeUser?.email);
-      const isTargetedToMe = Boolean(
-        activeUser && newNotif.targetUserId && this.isNotificationTargetingUser(newNotif, activeUser)
-      );
-      const isRelevantLocally = activeIsAdmin
-        ? (!newNotif.targetUserId || isTargetedToMe) &&
-          (!newNotif.targetRole || newNotif.targetRole === 'admin' || newNotif.targetRole === 'all')
-        : isTargetedToMe ||
-          (!newNotif.targetUserId && (newNotif.targetRole === 'site' || newNotif.targetRole === 'all'));
-
-      if (isRelevantLocally) {
-        const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-        const notifs: AppNotification[] = data ? JSON.parse(data) : [];
-        notifs.unshift(newNotif);
-        localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs.slice(0, 100)));
-        this.notify();
-      }
-    } catch {
-      // ignore notification write errors
-    }
+    notificationsDomain.addNotification(notif, this.getNotificationsContext());
   }
 
   public markNotificationAsRead(id: string) {
-    const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-    const notifs: AppNotification[] = data ? JSON.parse(data) : [];
-    const idx = notifs.findIndex((n) => n.id === id);
-    const activeUser = this.getCurrentUser();
-
-    if (idx !== -1) {
-      const prevReadBy = Array.isArray(notifs[idx].readBy) ? notifs[idx].readBy! : [];
-      const nextReadBy =
-        activeUser && !prevReadBy.includes(activeUser.id)
-          ? [...prevReadBy, activeUser.id]
-          : prevReadBy;
-      notifs[idx] = {
-        ...notifs[idx],
-        isRead: true,
-        readBy: nextReadBy
-      };
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs));
-      this.notify();
-
-      if (!id.startsWith('notif-missing-')) {
-        updateDoc(doc(db, 'notifications', id), {
-          isRead: true,
-          readBy: nextReadBy
-        }).catch(() => undefined);
-      }
-    }
+    notificationsDomain.markNotificationAsRead(id, this.getNotificationsContext());
   }
 
   public markAllNotificationsAsRead() {
-    const data = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-    const activeUser = this.getCurrentUser();
-    const rawList: AppNotification[] = data ? JSON.parse(data) : [];
-
-    const notifs: AppNotification[] = rawList.map((n: AppNotification) => {
-      const prevReadBy = Array.isArray(n.readBy) ? n.readBy : [];
-      const nextReadBy =
-        activeUser && !prevReadBy.includes(activeUser.id)
-          ? [...prevReadBy, activeUser.id]
-          : prevReadBy;
-      const shouldSyncRemote = !n.isRead && !n.id.startsWith('notif-missing-');
-      if (shouldSyncRemote) {
-        updateDoc(doc(db, 'notifications', n.id), {
-          isRead: true,
-          readBy: nextReadBy
-        }).catch(() => undefined);
-      }
-      return {
-        ...n,
-        isRead: true,
-        readBy: nextReadBy
-      };
-    });
-
-    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifs));
-    this.notify();
+    notificationsDomain.markAllNotificationsAsRead(this.getNotificationsContext());
   }
 
   // --- Personal Daily Notes & Tasks (Strictly Private Per User) ---
@@ -4951,15 +4454,15 @@ class DataService {
   }
 
   // --- Cloud-Synced Excel Logs (Shared across Site Engineers & Admins) ---
+  private getExcelLogsContext(): excelLogsDomain.ExcelLogsDomainContext {
+    return {
+      getCurrentUser: () => this.getCurrentUser(),
+      notify: () => this.notify()
+    };
+  }
+
   public getSharedExcelLogs(): SharedExcelLogFile[] {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEYS.EXCEL_LOGS);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as SharedExcelLogFile[]) : [];
-    } catch {
-      return [];
-    }
+    return excelLogsDomain.getSharedExcelLogs();
   }
 
   public async uploadSharedExcelLog(payload: {
@@ -4970,108 +4473,11 @@ class DataService {
     buffer: ArrayBuffer;
     sourceLabel?: string;
   }): Promise<SharedExcelLogFile> {
-    const firebaseUser = auth.currentUser;
-    if (!firebaseUser) {
-      throw new Error('يجب تسجيل الدخول أولاً لرفع وحفظ شيتات اللوج سحابياً.');
-    }
-
-    const totalBytes = payload.buffer.byteLength;
-    if (totalBytes <= 0 || totalBytes > MAX_PDF_FILE_SIZE_BYTES) {
-      throw new Error('حجم ملف Excel يتجاوز الحد الأقصى المسموح للمزامنة السحابية (25 ميجابايت).');
-    }
-
-    const base64 = uint8ArrayToBase64(new Uint8Array(payload.buffer));
-    const chunks = splitBase64IntoChunks(base64, PDF_CHUNK_SIZE_CHARS);
-    if (chunks.length === 0 || chunks.length > 60) {
-      throw new Error('تعذر تجهيز ملف Excel للمزامنة السحابية بسبب حجمه.');
-    }
-
-    const activeUser = this.getCurrentUser();
-    const isAdminActor =
-      activeUser?.role === 'admin' || isSuperAdminEmail(firebaseUser.email || activeUser?.email);
-    const uploaderRole: UserRole = isAdminActor ? 'admin' : 'site';
-    const nowIso = new Date().toISOString();
-
-    const safeId = payload.id
-      .trim()
-      .replace(/[^a-zA-Z0-9_-]/g, '_')
-      .slice(0, 128);
-    const safeProjectId = payload.projectId
-      .trim()
-      .replace(/[^a-zA-Z0-9_-]/g, '_')
-      .slice(0, 128);
-
-    const record: SharedExcelLogFile = stripUndefined({
-      id: safeId,
-      projectId: safeProjectId,
-      projectName: (payload.projectName || 'مشروع').trim().slice(0, 200) || 'مشروع',
-      fileName: (payload.fileName || 'log.xlsx').trim().slice(0, 260) || 'log.xlsx',
-      fileSizeBytes: Math.round(totalBytes),
-      chunkCount: chunks.length,
-      uploadedBy: firebaseUser.uid.slice(0, 128),
-      uploaderName:
-        (activeUser?.displayName || firebaseUser.displayName || firebaseUser.email || 'مستخدم')
-          .trim()
-          .slice(0, 150) || 'مستخدم',
-      uploaderRole,
-      sourceLabel: payload.sourceLabel ? payload.sourceLabel.trim().slice(0, 200) : undefined,
-      createdAt: nowIso,
-      updatedAt: nowIso
-    });
-
-    try {
-      await setDoc(doc(db, 'excelLogs', safeId), record);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `excelLogs/${safeId}`);
-    }
-
-    try {
-      const BATCH_CONCURRENCY = 5;
-      for (let start = 0; start < chunks.length; start += BATCH_CONCURRENCY) {
-        const end = Math.min(start + BATCH_CONCURRENCY, chunks.length);
-        const batchPromises: Promise<void>[] = [];
-        for (let idx = start; idx < end; idx++) {
-          const chunkDoc: SharedExcelLogChunk = {
-            index: idx,
-            data: chunks[idx]
-          };
-          batchPromises.push(
-            setDoc(doc(db, 'excelLogs', safeId, 'chunks', `chunk-${idx}`), chunkDoc)
-          );
-        }
-        await Promise.all(batchPromises);
-      }
-    } catch (error) {
-      // Roll back partial upload cleanly
-      await this.deleteSharedExcelLog(safeId).catch(() =>
-        deleteDoc(doc(db, 'excelLogs', safeId)).catch(() => undefined)
-      );
-      handleFirestoreError(error, OperationType.CREATE, `excelLogs/${safeId}/chunks`);
-    }
-
-    const currentList = this.getSharedExcelLogs();
-    const nextList = [record, ...currentList.filter((item) => item.id !== record.id)];
-    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(nextList));
-    this.notify();
-    return record;
+    return excelLogsDomain.uploadSharedExcelLog(payload, this.getExcelLogsContext());
   }
 
   public async fetchSharedExcelLogBuffer(log: SharedExcelLogFile): Promise<ArrayBuffer> {
-    let chunkDocs: SharedExcelLogChunk[] = [];
-    try {
-      const snap = await getDocs(collection(db, 'excelLogs', log.id, 'chunks'));
-      chunkDocs = snap.docs.map((d) => d.data() as SharedExcelLogChunk);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, `excelLogs/${log.id}/chunks`);
-    }
-
-    if (chunkDocs.length === 0) {
-      throw new Error(`لم يتم العثور على محتوى ملف اللوج «${log.fileName}» في قاعدة البيانات.`);
-    }
-
-    chunkDocs.sort((a, b) => a.index - b.index);
-    const fullBase64 = chunkDocs.map((c) => c.data).join('');
-    return base64ToArrayBuffer(fullBase64);
+    return excelLogsDomain.fetchSharedExcelLogBuffer(log);
   }
 
   public async updateSharedExcelLogMeta(
@@ -5079,88 +4485,20 @@ class DataService {
     sheetOverrides: Record<number, unknown>,
     excludedSheetIndices: number[]
   ): Promise<boolean> {
-    const logs = this.getSharedExcelLogs();
-    const target = logs.find((item) => item.id === logId);
-    if (!target) return false;
-
-    const activeUser = this.getCurrentUser();
-    const uid = auth.currentUser?.uid;
-    const isAdminActor =
-      activeUser?.role === 'admin' || isSuperAdminEmail(auth.currentUser?.email || activeUser?.email);
-    if (!isAdminActor && target.uploadedBy !== uid) {
-      return false;
-    }
-
-    const serializedOverrides = JSON.stringify(sheetOverrides || {});
-    if (serializedOverrides.length > 30000) return false;
-    const safeExcluded = (excludedSheetIndices || [])
-      .filter((n) => Number.isInteger(n) && n >= 0)
-      .slice(0, 200);
-    const updatedAt = new Date().toISOString();
-
-    try {
-      await updateDoc(doc(db, 'excelLogs', logId), {
-        sheetOverridesJson: serializedOverrides,
-        excludedSheetIndices: safeExcluded,
-        updatedAt
-      });
-    } catch {
-      return false;
-    }
-
-    const updatedLogs = logs.map((item) =>
-      item.id === logId
-        ? {
-            ...item,
-            sheetOverridesJson: serializedOverrides,
-            excludedSheetIndices: safeExcluded,
-            updatedAt
-          }
-        : item
+    return excelLogsDomain.updateSharedExcelLogMeta(
+      logId,
+      sheetOverrides,
+      excludedSheetIndices,
+      this.getExcelLogsContext()
     );
-    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(updatedLogs));
-    this.notify();
-    return true;
   }
 
   public async deleteSharedExcelLog(logId: string): Promise<boolean> {
-    const logs = this.getSharedExcelLogs();
-    const target = logs.find((item) => item.id === logId);
-    const activeUser = this.getCurrentUser();
-    const uid = auth.currentUser?.uid;
-    const isAdminActor =
-      activeUser?.role === 'admin' || isSuperAdminEmail(auth.currentUser?.email || activeUser?.email);
+    return excelLogsDomain.deleteSharedExcelLog(logId, this.getExcelLogsContext());
+  }
 
-    if (target && !isAdminActor && target.uploadedBy !== uid) {
-      throw new Error('يمكن للأدمن أو صاحب الملف فقط حذف شيت اللوج من قاعدة البيانات.');
-    }
-
-    try {
-      const snap = await getDocs(collection(db, 'excelLogs', logId, 'chunks'));
-      if (!snap.empty) {
-        const docs = snap.docs;
-        for (let i = 0; i < docs.length; i += 400) {
-          const batch = writeBatch(db);
-          docs.slice(i, i + 400).forEach((chunkDoc) => {
-            batch.delete(doc(db, 'excelLogs', logId, 'chunks', chunkDoc.id));
-          });
-          await batch.commit();
-        }
-      }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `excelLogs/${logId}/chunks`);
-    }
-
-    try {
-      await deleteDoc(doc(db, 'excelLogs', logId));
-    } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `excelLogs/${logId}`);
-    }
-
-    const remaining = logs.filter((item) => item.id !== logId);
-    localStorage.setItem(STORAGE_KEYS.EXCEL_LOGS, JSON.stringify(remaining));
-    this.notify();
-    return true;
+  public async deleteAllSharedExcelLogs(): Promise<number> {
+    return excelLogsDomain.deleteAllSharedExcelLogs(this.getExcelLogsContext());
   }
 
   // Reset sample project/report data

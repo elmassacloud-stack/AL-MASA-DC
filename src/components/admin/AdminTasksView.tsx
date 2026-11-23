@@ -48,8 +48,31 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
   // Live 30s tick for 48-hour retention countdown badges
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   useEffect(() => {
-    const timer = setInterval(() => setNowTick(Date.now()), 30000);
-    return () => clearInterval(timer);
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (timer !== null) return;
+      timer = setInterval(() => setNowTick(Date.now()), 30000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const handleVisibility = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        setNowTick(Date.now());
+        start();
+      }
+    };
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   // Create / Edit modal state

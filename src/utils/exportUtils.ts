@@ -1,11 +1,11 @@
-import * as XLSX from 'xlsx';
 import { DailyReport, IssueReport, ExecutedWork } from '../types';
 import { SUBMITTAL_STATUS_CONFIG, WORK_DISCIPLINE_CONFIG } from '../config';
 
 /**
  * Export a single Daily Report to an Excel (.xlsx) workbook matching the original Excel form
  */
-export function exportDailyReportToExcel(report: DailyReport) {
+export async function exportDailyReportToExcel(report: DailyReport): Promise<void> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
 
   // Prepare worksheet data rows
@@ -170,7 +170,8 @@ function downloadCSV(rows: string[][], filename: string) {
 /**
  * Export Executed Works on Site log to an Excel (.xlsx) workbook
  */
-export function exportExecutedWorksToExcel(works: ExecutedWork[]) {
+export async function exportExecutedWorksToExcel(works: ExecutedWork[]): Promise<void> {
+  const XLSX = await import('xlsx');
   const wb = XLSX.utils.book_new();
 
   const rows: (string | number)[][] = [

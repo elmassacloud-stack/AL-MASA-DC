@@ -1,5 +1,4 @@
-import { PDFDocument } from 'pdf-lib';
-import * as XLSX from 'xlsx';
+import type * as XLSXTypes from 'xlsx';
 import {
   MAX_PDF_FILE_SIZE_BYTES,
   PDF_CHUNK_SIZE_CHARS,
@@ -49,14 +48,177 @@ export function isExcelFile(file: File): boolean {
 export function getExcelMimeType(fileName: string): string {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
-  if (lower.endsWith('.xlsm')) return 'application/vnd.ms-excel.sheet.macroEnabled.12';
-  if (lower.endsWith('.xlsb')) return 'application/vnd.ms-excel.sheet.binary.spreadsheetml.sheet';
-  if (lower.endsWith('.ods')) return 'application/vnd.oasis.opendocument.spreadsheet';
-  if (lower.endsWith('.csv')) return 'text/csv;charset=utf-8';
   return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 }
 
+export type ValidatedFileFormat = 'pdf' | 'xlsx' | 'xls' | 'jpeg' | 'png' | 'webp' | 'csv';
+
+export interface FileValidationOptions {
+  allowedFormats: ValidatedFileFormat[];
+  maxSizeBytes: number;
+  contextLabel?: string;
+}
+
+const FORMAT_MIME_ALLOWLIST: Record<ValidatedFileFormat, string[]> = {
+  pdf: ['application/pdf'],
+  xlsx: [
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-excel.sheet.macroenabled.12',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.template',
+    'application/zip',
+    'application/octet-stream'
+  ],
+  xls: ['application/vnd.ms-excel', 'application/octet-stream'],
+  jpeg: ['image/jpeg', 'image/jpg'],
+  png: ['image/png'],
+  webp: ['image/webp'],
+  csv: ['text/csv', 'application/csv', 'text/plain', 'application/vnd.ms-excel']
+};
+
+function detectFormatFromExtension(fileName: string): ValidatedFileFormat | null {
+  const lower = fileName.trim().toLowerCase();
+  if (lower.endsWith('.pdf')) return 'pdf';
+  if (/\.(xlsx|xlsm|xltx|xltm)$/i.test(lower)) return 'xlsx';
+  if (lower.endsWith('.xls')) return 'xls';
+  if (/\.(jpg|jpeg)$/i.test(lower)) return 'jpeg';
+  if (lower.endsWith('.png')) return 'png';
+  if (lower.endsWith('.webp')) return 'webp';
+  if (/\.(csv|tsv)$/i.test(lower)) return 'csv';
+  return null;
+}
+
+function hasValidMagicBytes(bytes: Uint8Array, format: ValidatedFileFormat): boolean {
+  if (format === 'pdf') {
+    // %PDF-
+    return (
+      bytes.length >= 5 &&
+      bytes[0] === 0x25 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x44 &&
+      bytes[3] === 0x46 &&
+      bytes[4] === 0x2d
+    );
+  }
+  if (format === 'xlsx') {
+    // PK (ZIP container signature)
+    return bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+  }
+  if (format === 'xls') {
+    // Legacy OLE2 Compound Document (D0 CF 11 E0 A1 B1 1A E1) or XML/HTML spreadsheet exported as .xls
+    const isOle2 =
+      bytes.length >= 8 &&
+      bytes[0] === 0xd0 &&
+      bytes[1] === 0xcf &&
+      bytes[2] === 0x11 &&
+      bytes[3] === 0xe0 &&
+      bytes[4] === 0xa1 &&
+      bytes[5] === 0xb1 &&
+      bytes[6] === 0x1a &&
+      bytes[7] === 0xe1;
+    const isZip = bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+    return isOle2 || isZip;
+  }
+  if (format === 'jpeg') {
+    // FF D8 FF
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  }
+  if (format === 'png') {
+    // 89 50 4E 47
+    return (
+      bytes.length >= 4 &&
+      bytes[0] === 0x89 &&
+      bytes[1] === 0x50 &&
+      bytes[2] === 0x4e &&
+      bytes[3] === 0x47
+    );
+  }
+  if (format === 'webp') {
+    // RIFF....WEBP
+    return (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46 &&
+      bytes[8] === 0x57 &&
+      bytes[9] === 0x45 &&
+      bytes[10] === 0x42 &&
+      bytes[11] === 0x50
+    );
+  }
+  if (format === 'csv') {
+    // Reject obvious binary/executable headers (MZ, ELF, PDF, PK, NUL bytes)
+    if (bytes.length === 0) return false;
+    if (bytes[0] === 0x4d && bytes[1] === 0x5a) return false; // MZ
+    if (bytes[0] === 0x7f && bytes[1] === 0x45 && bytes[2] === 0x4c && bytes[3] === 0x46) return false; // ELF
+    if (bytes[0] === 0x50 && bytes[1] === 0x4b) return false; // PK
+    for (let i = 0; i < Math.min(bytes.length, 16); i++) {
+      if (bytes[i] === 0x00) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Validates file extension, MIME type, size limit, and binary file signature (magic bytes).
+ * Throws a clear Arabic Error message on any mismatch.
+ */
+export async function validateUploadedFile(
+  file: File,
+  options: FileValidationOptions
+): Promise<{ format: ValidatedFileFormat; canonicalMimeType: string }> {
+  const ctx = options.contextLabel ? ` في ${options.contextLabel}` : '';
+  if (!file || file.size <= 0) {
+    throw new Error(`الملف «${file?.name || ''}» فارغ ولا يمكن رفعه${ctx}.`);
+  }
+
+  if (file.size > options.maxSizeBytes) {
+    throw new Error(
+      `حجم الملف «${file.name}» (${formatFileSize(file.size)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(options.maxSizeBytes)})${ctx}.`
+    );
+  }
+
+  const extFormat = detectFormatFromExtension(file.name);
+  if (!extFormat || !options.allowedFormats.includes(extFormat)) {
+    throw new Error(
+      `امتداد الملف «${file.name}» غير مسموح به${ctx}. يرجى اختيار ملف بصيغة معتمدة.`
+    );
+  }
+
+  const normalizedMime = (file.type || '').trim().toLowerCase();
+  if (normalizedMime) {
+    const allowedMimes = FORMAT_MIME_ALLOWLIST[extFormat];
+    if (!allowedMimes.includes(normalizedMime)) {
+      throw new Error(
+        `نوع الملف «${file.name}» (${file.type}) لا يطابق الامتداد المسموح به${ctx}.`
+      );
+    }
+  }
+
+  const headerSlice = await file.slice(0, 16).arrayBuffer();
+  const headerBytes = new Uint8Array(headerSlice);
+  if (!hasValidMagicBytes(headerBytes, extFormat)) {
+    throw new Error(
+      `محتوى الملف «${file.name}» تالف أو لا يطابق صيغة الملف الحقيقية (${extFormat.toUpperCase()})، تم رفض الرفع لأسباب أمنية.`
+    );
+  }
+
+  const canonicalMimeType: Record<ValidatedFileFormat, string> = {
+    pdf: 'application/pdf',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    xls: 'application/vnd.ms-excel',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    csv: 'application/vnd.ms-excel'
+  };
+
+  return { format: extFormat, canonicalMimeType: canonicalMimeType[extFormat] };
+}
+
 export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<ExcelPreviewSheet[]> {
+  const XLSX = await import('xlsx');
   const response = await fetch(blobUrl);
   const buffer = await response.arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -82,7 +244,7 @@ export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<Exc
       let maxCol = -1;
       for (const key of Object.keys(sheet)) {
         if (key.charCodeAt(0) === 33) continue;
-        const cell = sheet[key] as XLSX.CellObject | undefined;
+        const cell = sheet[key] as XLSXTypes.CellObject | undefined;
         if (!cell || cell.t === 'z' || cell.t === 'e') continue;
         const val =
           typeof cell.w === 'string' && cell.w.trim()
@@ -91,7 +253,7 @@ export async function parseExcelPreviewFromBlobUrl(blobUrl: string): Promise<Exc
               ? ''
               : String(cell.v);
         if (!val) continue;
-        let pos: XLSX.CellAddress;
+        let pos: XLSXTypes.CellAddress;
         try {
           pos = XLSX.utils.decode_cell(key);
         } catch {
@@ -240,17 +402,18 @@ export async function preparePdfFromFiles(
     (first.type === 'application/pdf' || first.name.toLowerCase().endsWith('.pdf'));
 
   if (isPdf) {
-    if (first.size > MAX_PDF_FILE_SIZE_BYTES) {
-      throw new Error(
-        `حجم ملف الـ PDF (${formatFileSize(first.size)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(MAX_PDF_FILE_SIZE_BYTES)}).`
-      );
-    }
+    await validateUploadedFile(first, {
+      allowedFormats: ['pdf'],
+      maxSizeBytes: MAX_PDF_FILE_SIZE_BYTES,
+      contextLabel: 'تسليمات الموقع'
+    });
     onProgress?.(20, 'جاري قراءة ملف الـ PDF...');
     const buffer = await first.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     onProgress?.(55, 'جاري فحص صفحات المستند...');
     let pageCount = 1;
     try {
+      const { PDFDocument } = await import('pdf-lib');
       const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
       pageCount = doc.getPageCount() || 1;
     } catch {
@@ -271,17 +434,18 @@ export async function preparePdfFromFiles(
 
   const isSingleExcel = files.length === 1 && isExcelFile(first);
   if (isSingleExcel) {
-    if (first.size > MAX_PDF_FILE_SIZE_BYTES) {
-      throw new Error(
-        `حجم ملف الـ Excel (${formatFileSize(first.size)}) يتجاوز الحد الأقصى المسموح (${formatFileSize(MAX_PDF_FILE_SIZE_BYTES)}).`
-      );
-    }
+    const validatedExcel = await validateUploadedFile(first, {
+      allowedFormats: ['xlsx', 'xls'],
+      maxSizeBytes: MAX_PDF_FILE_SIZE_BYTES,
+      contextLabel: 'تسليمات الموقع'
+    });
     onProgress?.(20, 'جاري قراءة ملف الـ Excel...');
     const buffer = await first.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     onProgress?.(55, 'جاري فحص أوراق العمل في الملف...');
     let sheetCount = 1;
     try {
+      const XLSX = await import('xlsx');
       const workbook = XLSX.read(bytes, { type: 'array', bookSheets: true });
       sheetCount = Math.max(1, workbook.SheetNames.length || 1);
     } catch {
@@ -296,16 +460,22 @@ export async function preparePdfFromFiles(
       fileSizeBytes: bytes.byteLength,
       pageCount: sheetCount,
       fileFormat: 'excel',
-      mimeType: getExcelMimeType(first.name)
+      mimeType: validatedExcel.canonicalMimeType
     };
   }
 
-  // Validate that all selected files are images if not a single PDF or Excel file
-  const imageFiles = files.filter((f) => f.type.startsWith('image/'));
-  if (imageFiles.length !== files.length) {
-    throw new Error('يرجى رفع ملف PDF أو Excel واحد فقط، أو اختيار صور (JPG / PNG) ليتم دمجها تلقائياً في ملف PDF.');
+  // Validate that all selected files are valid JPEG/PNG/WebP images (magic bytes + MIME + size)
+  const imageFiles: File[] = [];
+  for (const f of files) {
+    await validateUploadedFile(f, {
+      allowedFormats: ['jpeg', 'png', 'webp'],
+      maxSizeBytes: MAX_PDF_FILE_SIZE_BYTES,
+      contextLabel: 'تسليمات الموقع'
+    });
+    imageFiles.push(f);
   }
 
+  const { PDFDocument } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.create();
   for (let i = 0; i < imageFiles.length; i++) {
     const imgFile = imageFiles[i];
@@ -427,25 +597,17 @@ export async function prepareReportAttachmentFile(
   const attachmentId =
     'att-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7);
 
-  const lowerName = file.name.toLowerCase();
-  const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
-  const isExcel = isExcelFile(file);
-  const isImage =
-    file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp)$/i.test(lowerName);
+  const MAX_RAW_IMAGE_BYTES = 15 * 1024 * 1024;
+  const extFormat = detectFormatFromExtension(file.name);
+  const isImageExt = extFormat === 'jpeg' || extFormat === 'png' || extFormat === 'webp';
 
-  if (!isPdf && !isExcel && !isImage) {
-    throw new Error(
-      `صيغة الملف «${file.name}» غير مدعومة في مرفقات التقرير. الصيغ المدعومة: PDF أو صور (JPG / PNG / WebP) أو Excel.`
-    );
-  }
+  const validated = await validateUploadedFile(file, {
+    allowedFormats: ['pdf', 'xlsx', 'xls', 'jpeg', 'png', 'webp'],
+    maxSizeBytes: isImageExt ? MAX_RAW_IMAGE_BYTES : MAX_REPORT_ATTACHMENT_SIZE_BYTES,
+    contextLabel: 'المرفقات'
+  });
 
-  if (isImage) {
-    const MAX_RAW_IMAGE_BYTES = 15 * 1024 * 1024;
-    if (file.size > MAX_RAW_IMAGE_BYTES) {
-      throw new Error(
-        `حجم الصورة «${file.name}» (${formatFileSize(file.size)}) كبير جداً للمعالجة. يرجى اختيار صورة أصغر من 15 ميجابايت.`
-      );
-    }
+  if (validated.format === 'jpeg' || validated.format === 'png' || validated.format === 'webp') {
     onProgress?.(25);
     const { bytes } = await imageFileToJpegBytes(file);
     if (bytes.byteLength > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
@@ -469,16 +631,6 @@ export async function prepareReportAttachmentFile(
     };
   }
 
-  if (file.size <= 0) {
-    throw new Error(`الملف «${file.name}» فارغ ولا يمكن إرفاقه.`);
-  }
-
-  if (file.size > MAX_REPORT_ATTACHMENT_SIZE_BYTES) {
-    throw new Error(
-      `حجم الملف «${file.name}» (${formatFileSize(file.size)}) يتجاوز الحد المسموح في التقرير اليومي (${formatFileSize(MAX_REPORT_ATTACHMENT_SIZE_BYTES)}). للملفات الكبيرة حتى 25 ميجابايت يرجى استخدام تبويب «تسليمات الموقع».`
-    );
-  }
-
   onProgress?.(30);
   const buffer = await file.arrayBuffer();
   const bytes = new Uint8Array(buffer);
@@ -490,9 +642,9 @@ export async function prepareReportAttachmentFile(
     attachmentId,
     name: file.name.slice(0, 200),
     size: bytes.byteLength,
-    type: isPdf ? 'application/pdf' : getExcelMimeType(file.name),
+    type: validated.canonicalMimeType,
     base64,
-    kind: isPdf ? 'pdf' : 'excel'
+    kind: validated.format === 'pdf' ? 'pdf' : 'excel'
   };
 }
 
@@ -510,23 +662,18 @@ export async function prepareTaskAttachmentFile(
   file: File,
   onProgress?: (percent: number) => void
 ): Promise<PreparedTaskAttachment> {
-  if (file.size <= 0) {
-    throw new Error(`الملف «${file.name}» فارغ ولا يمكن إرفاقه.`);
-  }
-
-  if (file.size > MAX_TASK_ATTACHMENT_SIZE_BYTES) {
-    throw new Error(
-      `حجم الملف «${file.name}» (${formatFileSize(file.size)}) يتجاوز الحد الأقصى المسموح للمرفق (${formatFileSize(MAX_TASK_ATTACHMENT_SIZE_BYTES)}).`
-    );
-  }
+  const validated = await validateUploadedFile(file, {
+    allowedFormats: ['pdf', 'xlsx', 'xls', 'jpeg', 'png', 'webp'],
+    maxSizeBytes: MAX_TASK_ATTACHMENT_SIZE_BYTES,
+    contextLabel: 'مرفقات المهمة'
+  });
 
   const attachmentId =
     'tatt-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 7);
-  const lowerName = file.name.toLowerCase();
-  const isPdf = file.type === 'application/pdf' || lowerName.endsWith('.pdf');
-  const isExcel = isExcelFile(file);
+  const isPdf = validated.format === 'pdf';
+  const isExcel = validated.format === 'xlsx' || validated.format === 'xls';
   const isImage =
-    file.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|bmp)$/i.test(lowerName);
+    validated.format === 'jpeg' || validated.format === 'png' || validated.format === 'webp';
 
   onProgress?.(25);
   const buffer = await file.arrayBuffer();
@@ -535,6 +682,7 @@ export async function prepareTaskAttachmentFile(
   let pageCount: number | undefined;
   if (isPdf) {
     try {
+      const { PDFDocument } = await import('pdf-lib');
       const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
       pageCount = doc.getPageCount() || 1;
     } catch {
@@ -542,6 +690,7 @@ export async function prepareTaskAttachmentFile(
     }
   } else if (isExcel) {
     try {
+      const XLSX = await import('xlsx');
       const workbook = XLSX.read(bytes, { type: 'array', bookSheets: true });
       pageCount = Math.max(1, workbook.SheetNames.length || 1);
     } catch {
@@ -561,17 +710,11 @@ export async function prepareTaskAttachmentFile(
         ? 'image'
         : 'other';
 
-  const mimeType = isPdf
-    ? 'application/pdf'
-    : isExcel
-      ? getExcelMimeType(file.name)
-      : file.type || 'application/octet-stream';
-
   return {
     attachmentId,
     name: file.name.slice(0, 260),
     fileSizeBytes: bytes.byteLength,
-    mimeType: mimeType.slice(0, 150),
+    mimeType: validated.canonicalMimeType.slice(0, 150),
     fileFormat,
     pageCount,
     base64

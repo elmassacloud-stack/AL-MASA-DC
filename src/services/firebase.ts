@@ -88,19 +88,93 @@ export enum OperationType {
 }
 
 export interface FirestoreErrorInfo {
-  error: string;
+  code: string;
   operationType: OperationType;
   path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
-    tenantId?: string | null;
-    providerInfo?: {
-      providerId?: string | null;
-      email?: string | null;
-    }[];
+}
+
+const QUOTA_EXHAUSTED_DATE_STORAGE_KEY = 'dc_firestore_quota_paused_date';
+let firestoreWriteQuotaExhaustedDate: string | null = null;
+const firestoreQuotaListeners = new Set<(exhausted: boolean) => void>();
+
+function getLocalTodayDateKey(date = new Date()): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function readStoredQuotaExhaustedDate(): string | null {
+  try {
+    return typeof localStorage !== 'undefined'
+      ? localStorage.getItem(QUOTA_EXHAUSTED_DATE_STORAGE_KEY)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getFirestoreErrorCode(error: unknown): string {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string'
+  ) {
+    return (error as { code: string }).code;
+  }
+  return 'firestore_error';
+}
+
+export function isFirestoreQuotaExhausted(): boolean {
+  const today = getLocalTodayDateKey();
+  if (firestoreWriteQuotaExhaustedDate === today) {
+    return true;
+  }
+  const stored = readStoredQuotaExhaustedDate();
+  if (stored === today) {
+    firestoreWriteQuotaExhaustedDate = today;
+    return true;
+  }
+  if (stored && stored !== today) {
+    firestoreWriteQuotaExhaustedDate = null;
+    try {
+      localStorage.removeItem(QUOTA_EXHAUSTED_DATE_STORAGE_KEY);
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return false;
+}
+
+export function markFirestoreQuotaExhausted(): void {
+  const today = getLocalTodayDateKey();
+  const alreadyMarkedToday = firestoreWriteQuotaExhaustedDate === today;
+  firestoreWriteQuotaExhaustedDate = today;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(QUOTA_EXHAUSTED_DATE_STORAGE_KEY, today);
+    }
+  } catch {
+    // ignore storage errors
+  }
+  if (!alreadyMarkedToday) {
+    firestoreQuotaListeners.forEach((listener) => {
+      try {
+        listener(true);
+      } catch {
+        // ignore listener errors
+      }
+    });
+  }
+}
+
+export function subscribeToFirestoreQuotaState(
+  listener: (exhausted: boolean) => void
+): () => void {
+  firestoreQuotaListeners.add(listener);
+  return () => {
+    firestoreQuotaListeners.delete(listener);
   };
 }
 
@@ -109,24 +183,16 @@ export function handleFirestoreError(
   operationType: OperationType,
   path: string | null
 ): never {
+  const code = getFirestoreErrorCode(error);
+  if (code === 'resource-exhausted') {
+    markFirestoreQuotaExhausted();
+  }
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo:
-        auth.currentUser?.providerData?.map((provider) => ({
-          providerId: provider.providerId,
-          email: provider.email
-        })) || []
-    },
+    code,
     operationType,
     path
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  console.error('Firestore Error:', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
 
@@ -406,7 +472,7 @@ export async function purgeExpiredSiteDeliverablesFromFirebase(
   scope: DeliverableCleanupScope,
   preloadedDeliverables?: SiteDeliverable[]
 ): Promise<string[]> {
-  if (!scope.canAccessDeliverables || !auth.currentUser) {
+  if (!scope.canAccessDeliverables || !auth.currentUser || isFirestoreQuotaExhausted()) {
     return [];
   }
 
@@ -436,7 +502,10 @@ export async function purgeExpiredSiteDeliverablesFromFirebase(
           .map((d) => d.data() as SiteDeliverable)
           .filter((item) => isDeliverableExpired(item, nowMs));
       }
-    } catch {
+    } catch (error) {
+      if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+        markFirestoreQuotaExhausted();
+      }
       // Background sweep must not crash UI on transient network or rules boundary checks
       return [];
     }
@@ -444,12 +513,17 @@ export async function purgeExpiredSiteDeliverablesFromFirebase(
 
   const deletedIds: string[] = [];
   for (const item of candidates) {
+    if (isFirestoreQuotaExhausted()) break;
     try {
       const deleted = await deleteDeliverableFromFirebase(item.id);
       if (deleted) {
         deletedIds.push(item.id);
       }
-    } catch {
+    } catch (error) {
+      if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+        markFirestoreQuotaExhausted();
+        break;
+      }
       // Skip if deleted concurrently by another client or pending server clock skew
     }
   }
@@ -469,6 +543,8 @@ export function startFirebaseDeliverablesAutoCleanupScheduler(
   stopFirebaseDeliverablesAutoCleanupScheduler();
 
   const runSweep = async () => {
+    if (isFirestoreQuotaExhausted()) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
     const scope = getScope();
     if (scope && scope.canAccessDeliverables) {
       const deletedIds = await purgeExpiredSiteDeliverablesFromFirebase(scope);
@@ -476,7 +552,7 @@ export function startFirebaseDeliverablesAutoCleanupScheduler(
         onPurged(deletedIds);
       }
     }
-    if (onExtraSweep) {
+    if (onExtraSweep && !isFirestoreQuotaExhausted()) {
       await Promise.resolve(onExtraSweep()).catch(() => undefined);
     }
   };
@@ -567,12 +643,13 @@ export async function purgeExpiredTaskAttachmentsFromFirebase(
   tasks: ProjectTask[],
   isAdmin: boolean
 ): Promise<Record<string, TaskAttachment[]>> {
-  if (!auth.currentUser || tasks.length === 0) return {};
+  if (!auth.currentUser || tasks.length === 0 || isFirestoreQuotaExhausted()) return {};
 
   const nowMs = Date.now();
   const updatedAttachmentsByTaskId: Record<string, TaskAttachment[]> = {};
 
   for (const task of tasks) {
+    if (isFirestoreQuotaExhausted()) break;
     const attachments = task.attachments || [];
     if (attachments.length === 0) continue;
 
@@ -583,27 +660,34 @@ export async function purgeExpiredTaskAttachmentsFromFirebase(
     let anyChunkDeleted = false;
 
     for (const att of expired) {
+      if (isFirestoreQuotaExhausted()) break;
       const lockKey = `${task.id}:${att.id}`;
       if (inFlightTaskAttachmentCleanups.has(lockKey)) continue;
       inFlightTaskAttachmentCleanups.add(lockKey);
       try {
         await deleteTaskAttachmentChunksFromFirebase(task.id, att.id);
         anyChunkDeleted = true;
-      } catch {
+      } catch (error) {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
         // Ignore transient permission / server-clock skew / concurrent deletion errors
       } finally {
         inFlightTaskAttachmentCleanups.delete(lockKey);
       }
     }
 
-    if (isAdmin && (anyChunkDeleted || expired.length > 0)) {
+    if (!isFirestoreQuotaExhausted() && isAdmin && (anyChunkDeleted || expired.length > 0)) {
       try {
         await updateDoc(doc(db, 'tasks', task.id), {
           attachments: active,
           updatedAt: new Date().toISOString()
         });
         updatedAttachmentsByTaskId[task.id] = active;
-      } catch {
+      } catch (error) {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
         // Ignore if task was already deleted or concurrently modified
       }
     }
