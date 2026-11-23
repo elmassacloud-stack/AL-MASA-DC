@@ -45,7 +45,7 @@ import {
   ExecutedWork
 } from '../../types';
 import { WORK_DISCIPLINE_CONFIG } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 
 interface Props {
   projects: Project[];
@@ -228,8 +228,8 @@ export const AdminProjectsView: React.FC<Props> = ({
       showToast(
         `تم إضافة المشروع "${created.name}" وربطه تلقائياً بكافة أقسام النظام وشيتات اللوج.`
       );
-    } catch {
-      setCreateError('تعذر حفظ المشروع الجديد في قاعدة البيانات. يرجى المحاولة مرة أخرى.');
+    } catch (err) {
+      setCreateError(formatFirestoreError(err));
     } finally {
       setIsSubmittingCreate(false);
     }
@@ -302,8 +302,8 @@ export const AdminProjectsView: React.FC<Props> = ({
 
       setEditingProject(null);
       showToast('تم تحديث بيانات المشروع ونطاق العمل وصلاحيات المهندسين بنجاح.');
-    } catch {
-      setEditError('تعذر تحديث بيانات المشروع. يرجى المحاولة مجدداً.');
+    } catch (err) {
+      setEditError(formatFirestoreError(err));
     } finally {
       setIsSubmittingEdit(false);
     }
@@ -318,8 +318,8 @@ export const AdminProjectsView: React.FC<Props> = ({
           ? `تم إعادة تفعيل المشروع "${project.name}".`
           : `تم تحويل المشروع "${project.name}" إلى مكتمل.`
       );
-    } catch {
-      showToast('تعذر تغيير حالة المشروع.');
+    } catch (err) {
+      showToast(formatFirestoreError(err));
     }
   };
 
@@ -329,8 +329,8 @@ export const AdminProjectsView: React.FC<Props> = ({
       await dataService.deleteProject(project.id);
       setConfirmDeleteId(null);
       showToast(`تم حذف المشروع "${project.name}" وإزالته من تعيينات المستخدمين.`);
-    } catch {
-      showToast('تعذر حذف المشروع. يرجى المحاولة مرة أخرى.');
+    } catch (err) {
+      showToast(formatFirestoreError(err));
     } finally {
       setIsDeletingId(null);
     }

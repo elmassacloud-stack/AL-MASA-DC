@@ -11,7 +11,7 @@ import {
   X
 } from 'lucide-react';
 import { ReportAttachment } from '../../types';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import {
   formatFileSize,
   getReportAttachmentKind,
@@ -77,7 +77,7 @@ export const ReportAttachmentList: React.FC<Props> = ({
       setPreviewUrl(url);
     } catch (err) {
       setExcelSheets(null);
-      setErrorMsg(err instanceof Error ? err.message : 'تعذر تحميل المرفق للمعاينة.');
+      setErrorMsg(formatFirestoreError(err, 'تعذر تحميل المرفق للمعاينة.'));
     } finally {
       setLoadingPreviewIdx(null);
     }
@@ -95,7 +95,7 @@ export const ReportAttachmentList: React.FC<Props> = ({
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'تعذر تحميل المرفق.');
+      setErrorMsg(formatFirestoreError(err, 'تعذر تحميل المرفق.'));
     } finally {
       setLoadingDownloadIdx(null);
     }

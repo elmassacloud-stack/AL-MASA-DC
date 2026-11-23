@@ -23,7 +23,7 @@ import {
   FileUp
 } from 'lucide-react';
 import { UserProfile, Project, UserRole } from '../../types';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { translateFirebaseAuthError } from '../../services/firebase';
 import { isSuperAdminEmail } from '../../config';
 
@@ -126,7 +126,15 @@ export const AdminUsersView: React.FC<Props> = ({
       resetCreateForm();
       showToast('تم إنشاء حساب المستخدم وإضافته بنجاح.');
     } catch (err) {
-      setCreateError(translateFirebaseAuthError(err));
+      const authCode =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+      setCreateError(
+        authCode.startsWith('auth/')
+          ? translateFirebaseAuthError(err)
+          : formatFirestoreError(err)
+      );
     } finally {
       setIsSubmittingCreate(false);
     }
@@ -163,8 +171,8 @@ export const AdminUsersView: React.FC<Props> = ({
       });
       setEditingUser(null);
       showToast('تم تحديث بيانات المستخدم والمشاريع المسندة بنجاح.');
-    } catch {
-      setEditError('حدث خطأ أثناء حفظ التعديلات. يرجى المحاولة مجدداً.');
+    } catch (err) {
+      setEditError(formatFirestoreError(err));
     } finally {
       setIsSubmittingEdit(false);
     }
@@ -173,16 +181,29 @@ export const AdminUsersView: React.FC<Props> = ({
   const toggleStatus = async (user: UserProfile) => {
     if (isSuperAdminEmail(user.email) || user.id === currentUser.id) return;
     const nextStatus = user.status === 'active' ? 'disabled' : 'active';
-    await dataService.updateUser(user.id, { status: nextStatus });
-    showToast(nextStatus === 'active' ? `تم تفعيل حساب ${user.displayName}.` : `تم تعطيل حساب ${user.displayName}.`);
+    try {
+      await dataService.updateUser(user.id, { status: nextStatus });
+      showToast(
+        nextStatus === 'active'
+          ? `تم تفعيل حساب ${user.displayName}.`
+          : `تم تعطيل حساب ${user.displayName}.`
+      );
+    } catch (err) {
+      showToast(formatFirestoreError(err));
+    }
   };
 
   const handleDeleteUser = async (user: UserProfile) => {
     if (isSuperAdminEmail(user.email) || user.id === currentUser.id) return;
-    const ok = await dataService.deleteUser(user.id);
-    setConfirmDeleteId(null);
-    if (ok) {
-      showToast(`تم حذف حساب ${user.displayName} من النظام.`);
+    try {
+      const ok = await dataService.deleteUser(user.id);
+      setConfirmDeleteId(null);
+      if (ok) {
+        showToast(`تم حذف حساب ${user.displayName} من النظام.`);
+      }
+    } catch (err) {
+      setConfirmDeleteId(null);
+      showToast(formatFirestoreError(err));
     }
   };
 

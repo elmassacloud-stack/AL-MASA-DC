@@ -36,7 +36,7 @@ import {
   PdfExportPeriodMode
 } from '../../utils/pdfReportExporter';
 import { getReportIdentityAudit } from '../../utils/identityAudit';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { EditDailyReportModal } from '../site/EditDailyReportModal';
 
 interface Props {
@@ -90,9 +90,7 @@ export const AdminReportsView: React.FC<Props> = ({
       );
       window.setTimeout(() => setEditSuccessMsg(null), 4500);
     } catch (err) {
-      setDeleteErrorMsg(
-        err instanceof Error ? err.message : 'تعذر حذف التقرير اليومي. يرجى المحاولة مرة أخرى.'
-      );
+      setDeleteErrorMsg(formatFirestoreError(err));
     } finally {
       setIsDeletingReport(false);
     }
@@ -232,9 +230,7 @@ export const AdminReportsView: React.FC<Props> = ({
       setIsPdfModalOpen(false);
       window.setTimeout(() => setPdfSuccessMsg(null), 4500);
     } catch (err) {
-      setPdfError(
-        err instanceof Error ? err.message : 'تعذر إنشاء ملف PDF. يرجى المحاولة مرة أخرى.'
-      );
+      setPdfError(formatFirestoreError(err, 'تعذر إنشاء ملف PDF. يرجى المحاولة مرة أخرى.'));
     } finally {
       setIsGeneratingPdf(false);
     }
@@ -268,7 +264,7 @@ export const AdminReportsView: React.FC<Props> = ({
       window.setTimeout(() => setPdfSuccessMsg(null), 4000);
     } catch (err) {
       setEditSuccessMsg(null);
-      setPdfError(err instanceof Error ? err.message : 'تعذر تصدير التقرير إلى PDF.');
+      setPdfError(formatFirestoreError(err, 'تعذر تصدير التقرير إلى PDF.'));
     } finally {
       setExportingSinglePdfId(null);
     }
@@ -349,11 +345,7 @@ export const AdminReportsView: React.FC<Props> = ({
       setSavedFeedbackMsg(true);
       setTimeout(() => setSavedFeedbackMsg(false), 2000);
     } catch (err) {
-      setFeedbackErrorMsg(
-        err instanceof Error
-          ? err.message
-          : 'تعذر حفظ حالة التقرير في قاعدة البيانات. يرجى المحاولة مرة أخرى.'
-      );
+      setFeedbackErrorMsg(formatFirestoreError(err));
     } finally {
       setIsSavingFeedback(false);
     }

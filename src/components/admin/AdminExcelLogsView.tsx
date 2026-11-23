@@ -49,7 +49,7 @@ import {
   SharedExcelLogFile
 } from '../../types';
 import { SUBMITTAL_STATUS_CONFIG, MAX_PDF_FILE_SIZE_BYTES } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { isExcelLogLoadingPausedForProject } from '../../services/data/excelLogs';
 import { isFirestoreQuotaExhausted } from '../../services/firebase';
 import {
@@ -1077,10 +1077,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           });
           cloudSynced = true;
         } catch (cloudErr) {
-          const cloudMsg =
-            cloudErr instanceof Error
-              ? cloudErr.message
-              : 'تعذرت المزامنة السحابية لملف اللوج.';
+          const cloudMsg = formatFirestoreError(cloudErr, 'تعذرت المزامنة السحابية لملف اللوج.');
           errors.push(`تم فتح «${file.name}» محلياً ولكن تعذر حفظه سحابياً: ${cloudMsg}`);
         }
 
@@ -1237,8 +1234,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
         `تم استيراد وتحليل «${source.fileName}» (${parsed.sheets.length} ورقة) من ${source.sourceLabel}.`
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'تعذر فتح ملف Excel المرفوع على الموقع.';
-      setUploadError(msg);
+      setUploadError(formatFirestoreError(err, 'تعذر فتح ملف Excel المرفوع على الموقع.'));
     } finally {
       setLoadingRemoteKey(null);
     }
@@ -1257,9 +1253,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       try {
         await dataService.deleteSharedExcelLog(id);
       } catch (err) {
-        setUploadError(
-          err instanceof Error ? err.message : 'تعذر حذف شيت اللوج من قاعدة البيانات.'
-        );
+        setUploadError(formatFirestoreError(err));
         return;
       }
     }
@@ -1305,9 +1299,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
           : 'تم مسح جميع شيتات اللوج المحفوظة بنجاح.'
       );
     } catch (err) {
-      setUploadError(
-        err instanceof Error ? err.message : 'تعذر حذف جميع شيتات اللوج من قاعدة البيانات.'
-      );
+      setUploadError(formatFirestoreError(err));
       setConfirmClearAllLogs(false);
     } finally {
       setIsClearingAllLogs(false);
@@ -1855,9 +1847,7 @@ export const AdminExcelLogsView: React.FC<Props> = ({
       }
       showToast(`تم حذف ${deletedCount} ملف لوج سحابي خاص بموقع «${activeProject?.name || 'رافيل'}».`);
     } catch (err) {
-      setUploadError(
-        err instanceof Error ? err.message : 'تعذر حذف ملفات اللوج السحابية للموقع.'
-      );
+      setUploadError(formatFirestoreError(err));
     } finally {
       setIsClearingAllLogs(false);
     }

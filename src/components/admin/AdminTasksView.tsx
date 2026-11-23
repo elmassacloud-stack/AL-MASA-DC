@@ -24,7 +24,11 @@ import {
   MAX_TASK_ATTACHMENT_SIZE_BYTES,
   TASK_ATTACHMENT_RETENTION_HOURS
 } from '../../config';
-import { dataService, TaskUploadProgress } from '../../services/dataService';
+import {
+  dataService,
+  formatFirestoreError,
+  TaskUploadProgress
+} from '../../services/dataService';
 import {
   prepareTaskAttachmentFile,
   PreparedTaskAttachment,
@@ -202,7 +206,7 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
       }
       setPendingAttachments((prev) => [...prev, ...preparedList]);
     } catch (err) {
-      setModalError(err instanceof Error ? err.message : 'تعذر تجهيز أحد الملفات المحددة.');
+      setModalError(formatFirestoreError(err, 'تعذر تجهيز أحد الملفات المحددة.'));
     } finally {
       setIsPreparingFiles(false);
     }
@@ -276,12 +280,7 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
           : 'تم إسناد المهمة الجديدة للمشروع بنجاح.'
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED')) {
-        setModalError('تعذر الرفع لعدم كفاية صلاحيات قاعدة البيانات. يرجى تحديث الصفحة أو التأكد من صلاحية مدير النظام.');
-      } else {
-        setModalError(msg || 'حدث خطأ أثناء حفظ المهمة أو رفع المرفقات.');
-      }
+      setModalError(formatFirestoreError(err));
     } finally {
       setIsSaving(false);
       setUploadProgress(null);
@@ -299,8 +298,8 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
       } else {
         showFeedback('error', 'تعذر العثور على المهمة لحذفها.');
       }
-    } catch {
-      showFeedback('error', 'حدث خطأ أثناء حذف المهمة من قاعدة البيانات.');
+    } catch (err) {
+      showFeedback('error', formatFirestoreError(err));
     } finally {
       setIsDeleting(false);
     }
@@ -320,10 +319,7 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
       setPreviewBlobUrl(blobUrl);
       setPreviewTarget({ taskId, attachment });
     } catch (err) {
-      showFeedback(
-        'error',
-        err instanceof Error ? err.message : 'تعذر فتح معاينة المرفق من Firebase.'
-      );
+      showFeedback('error', formatFirestoreError(err, 'تعذر فتح معاينة المرفق من Firebase.'));
     } finally {
       setPreviewLoadingKey(null);
     }
@@ -341,10 +337,7 @@ export const AdminTasksView: React.FC<Props> = ({ tasks, projects, currentUser }
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      showFeedback(
-        'error',
-        err instanceof Error ? err.message : 'تعذر تحميل المرفق من Firebase.'
-      );
+      showFeedback('error', formatFirestoreError(err, 'تعذر تحميل المرفق من Firebase.'));
     } finally {
       setDownloadingKey(null);
     }

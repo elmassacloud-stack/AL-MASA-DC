@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { UserProfile, Project, IssueType, IssuePriority } from '../../types';
 import { ISSUE_TYPES_CONFIG, MAX_REPORT_ATTACHMENT_SIZE_BYTES } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { getAccessibleProjects } from '../../utils/accessControl';
 import { validateUploadedFile } from '../../utils/pdfUtils';
 
@@ -86,7 +86,7 @@ export const IssueReportForm: React.FC<Props> = ({
       reader.readAsDataURL(file);
     } catch (err) {
       setErrorMsg(
-        err instanceof Error ? err.message : 'صيغة الصورة غير مدعومة أو حجمها يتجاوز الحد المسموح.'
+        formatFirestoreError(err, 'صيغة الصورة غير مدعومة أو حجمها يتجاوز الحد المسموح.')
       );
     }
   };
@@ -131,11 +131,7 @@ export const IssueReportForm: React.FC<Props> = ({
         }
       }, 2000);
     } catch (err) {
-      setErrorMsg(
-        err instanceof Error && err.message
-          ? err.message
-          : 'حدث خطأ أثناء حفظ البلاغ، يرجى المحاولة ثانية.'
-      );
+      setErrorMsg(formatFirestoreError(err));
     } finally {
       setIsSubmitting(false);
     }

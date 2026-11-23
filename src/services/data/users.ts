@@ -2,6 +2,7 @@ import { deleteDoc, doc, setDoc, updateDoc } from 'firebase/firestore';
 import { NotificationPreferences, Project, UserProfile } from '../../types';
 import { isSuperAdminEmail } from '../../config';
 import {
+  assertFirestoreWriteAvailable,
   createFirebaseUserByAdmin,
   db,
   handleFirestoreError,
@@ -43,6 +44,7 @@ export async function createUserWithAuth(
   payload: CreateUserPayload,
   ctx: UsersDomainContext
 ): Promise<UserProfile> {
+  assertFirestoreWriteAvailable();
   const uid = await createFirebaseUserByAdmin(
     payload.email,
     payload.password,
@@ -85,6 +87,7 @@ export async function deleteUser(
   userId: string,
   ctx: UsersDomainContext
 ): Promise<boolean> {
+  assertFirestoreWriteAvailable();
   const users = getUsers();
   const target = users.find((u) => u.id === userId);
   if (!target) return false;
@@ -110,6 +113,7 @@ export async function updateMyNotificationPreferences(
   prefs: NotificationPreferences,
   ctx: UsersDomainContext
 ): Promise<boolean> {
+  assertFirestoreWriteAvailable();
   const activeUser = ctx.getCurrentUser();
   if (!activeUser) return false;
 

@@ -20,7 +20,7 @@ import {
   Info
 } from 'lucide-react';
 import { UserProfile, Project } from '../../types';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import {
   changeCurrentUserEmail,
   changeCurrentUserPassword,
@@ -155,18 +155,8 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
     .join('')
     .toUpperCase();
 
-  const formatProfileError = (err: unknown, fallback: string): string => {
-    if (err instanceof Error) {
-      const msg = err.message || '';
-      if (msg.includes('Missing or insufficient permissions') || msg.includes('permission-denied')) {
-        return 'لا توجد صلاحية كافية لحفظ التعديل في قاعدة البيانات. يرجى تحديث الصفحة والمحاولة مجدداً.';
-      }
-      if (!msg.trim().startsWith('{')) {
-        return msg;
-      }
-    }
-    return fallback;
-  };
+  const formatProfileError = (err: unknown, fallback?: string): string =>
+    formatFirestoreError(err, fallback);
 
   const handlePhotoSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -296,9 +286,15 @@ export const UserProfileView: React.FC<Props> = ({ currentUser, projects }) => {
         });
       }
     } catch (err) {
+      const authCode =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
       setEmailFeedback({
         type: 'error',
-        text: translateFirebaseAuthError(err)
+        text: authCode.startsWith('auth/')
+          ? translateFirebaseAuthError(err)
+          : formatFirestoreError(err)
       });
     } finally {
       setIsSavingEmail(false);

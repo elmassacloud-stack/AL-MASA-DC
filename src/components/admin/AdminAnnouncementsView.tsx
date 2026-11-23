@@ -11,7 +11,7 @@ import {
   Eye
 } from 'lucide-react';
 import { Announcement, Project, UserProfile } from '../../types';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 
 interface Props {
   announcements: Announcement[];
@@ -32,25 +32,35 @@ export const AdminAnnouncementsView: React.FC<Props> = ({
   const [targetProjects, setTargetProjects] = useState<string[]>([]);
   const [isUrgent, setIsUrgent] = useState<boolean>(false);
   const [selectedAnnouncement, setSelectedAnnouncement] = useState<Announcement | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  const handleCreateAnnouncement = (e: React.FormEvent) => {
+  const handleCreateAnnouncement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !content.trim()) return;
+    if (!title.trim() || !content.trim() || isSubmitting) return;
 
-    dataService.addAnnouncement({
-      title: title.trim(),
-      content: content.trim(),
-      targetProjects,
-      isUrgent,
-      createdBy: currentUser.id,
-      authorName: currentUser.displayName
-    });
+    setCreateError(null);
+    setIsSubmitting(true);
+    try {
+      await dataService.addAnnouncement({
+        title: title.trim(),
+        content: content.trim(),
+        targetProjects,
+        isUrgent,
+        createdBy: currentUser.id,
+        authorName: currentUser.displayName
+      });
 
-    setIsCreating(false);
-    setTitle('');
-    setContent('');
-    setTargetProjects([]);
-    setIsUrgent(false);
+      setIsCreating(false);
+      setTitle('');
+      setContent('');
+      setTargetProjects([]);
+      setIsUrgent(false);
+    } catch (err) {
+      setCreateError(formatFirestoreError(err));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const toggleProjectSelection = (projId: string) => {
@@ -229,12 +239,21 @@ export const AdminAnnouncementsView: React.FC<Props> = ({
                 نشر تعميم أو تنبيه إداري
               </h3>
               <button
-                onClick={() => setIsCreating(false)}
+                onClick={() => {
+                  setIsCreating(false);
+                  setCreateError(null);
+                }}
                 className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {createError && (
+              <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs font-medium">
+                {createError}
+              </div>
+            )}
 
             <form onSubmit={handleCreateAnnouncement} className="space-y-4 text-xs sm:text-sm">
               <div>
@@ -312,7 +331,8 @@ export const AdminAnnouncementsView: React.FC<Props> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl cursor-pointer shadow-xs disabled:opacity-50"
                 >
                   نشر التعميم
                 </button>

@@ -32,7 +32,11 @@ import {
   ReportAttachment
 } from '../../types';
 import { WORK_DISCIPLINE_CONFIG, MAX_REPORT_ATTACHMENTS } from '../../config';
-import { dataService, ReportUploadProgress } from '../../services/dataService';
+import {
+  dataService,
+  formatFirestoreError,
+  ReportUploadProgress
+} from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
 import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 import { exportExecutedWorksToExcel } from '../../utils/exportUtils';
@@ -294,7 +298,7 @@ export const ExecutedWorksView: React.FC<Props> = ({
         const prepared = await prepareReportAttachmentFile(file);
         preparedList.push(prepared);
       } catch (err) {
-        errors.push(err instanceof Error ? err.message : `تعذر تجهيز الملف «${file.name}».`);
+        errors.push(formatFirestoreError(err, `تعذر تجهيز الملف «${file.name}».`));
       }
     }
 
@@ -345,7 +349,7 @@ export const ExecutedWorksView: React.FC<Props> = ({
         activeSheetIndex: 0
       });
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'تعذر فتح المرفق للمعاينة.');
+      showToast(formatFirestoreError(err, 'تعذر فتح المرفق للمعاينة.'));
     } finally {
       setLoadingAttachmentKey(null);
     }
@@ -364,7 +368,7 @@ export const ExecutedWorksView: React.FC<Props> = ({
       document.body.removeChild(link);
       showToast(`جاري تحميل الملف: ${attachment.name}`);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'تعذر تحميل المرفق.');
+      showToast(formatFirestoreError(err, 'تعذر تحميل المرفق.'));
     } finally {
       setLoadingAttachmentKey(null);
     }
@@ -445,11 +449,7 @@ export const ExecutedWorksView: React.FC<Props> = ({
         );
       }
     } catch (err) {
-      setFormError(
-        err instanceof Error && err.message && !err.message.includes('Firestore')
-          ? err.message
-          : 'تعذر حفظ البيانات أو رفع المرفقات في قاعدة البيانات. يرجى المحاولة مرة أخرى.'
-      );
+      setFormError(formatFirestoreError(err));
     } finally {
       setIsSubmitting(false);
       setUploadProgress(null);
@@ -467,8 +467,8 @@ export const ExecutedWorksView: React.FC<Props> = ({
           ? 'تم اعتماد البند المنفذ بنجاح.'
           : 'تم إعادة البند لحالة قيد المراجعة.'
       );
-    } catch {
-      showToast('تعذر تحديث حالة الاعتماد.');
+    } catch (err) {
+      showToast(formatFirestoreError(err));
     }
   };
 
@@ -478,8 +478,8 @@ export const ExecutedWorksView: React.FC<Props> = ({
       await dataService.deleteExecutedWork(workId);
       setConfirmDeleteId(null);
       showToast('تم حذف البند بنجاح.');
-    } catch {
-      showToast('تعذر حذف البند. تأكد من صلاحياتك.');
+    } catch (err) {
+      showToast(formatFirestoreError(err));
     } finally {
       setIsDeletingId(null);
     }

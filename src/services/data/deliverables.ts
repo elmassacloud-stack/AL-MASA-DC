@@ -13,6 +13,7 @@ import {
   SITE_DELIVERABLE_RETENTION_MS
 } from '../../config';
 import {
+  assertFirestoreWriteAvailable,
   auth,
   cachePdfBlobUrl,
   db,
@@ -85,6 +86,7 @@ export async function createSiteDeliverable(
   ctx: DeliverablesDomainContext,
   onProgress?: (percent: number, info?: DeliverableUploadProgress) => void
 ): Promise<SiteDeliverable> {
+  assertFirestoreWriteAvailable();
   const chunks = splitBase64IntoChunks(base64Pdf, PDF_CHUNK_SIZE_CHARS);
   if (
     payload.fileSizeBytes <= 0 ||
@@ -279,6 +281,7 @@ export async function updateSiteDeliverableStatus(
   adminNote: string | undefined,
   ctx: DeliverablesDomainContext
 ): Promise<boolean> {
+  assertFirestoreWriteAvailable();
   const list = getSiteDeliverables();
   const idx = list.findIndex((d) => d.id === deliverableId);
   if (idx === -1) return false;
@@ -334,6 +337,7 @@ export async function deleteSiteDeliverable(
   deliverableId: string,
   notify: () => void
 ): Promise<boolean> {
+  assertFirestoreWriteAvailable();
   const deleted = await deleteDeliverableFromFirebase(deliverableId);
   if (deleted) {
     removeDeliverablesFromLocalState([deliverableId], notify);

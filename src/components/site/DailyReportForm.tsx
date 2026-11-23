@@ -26,7 +26,11 @@ import {
   MAX_REPORT_ATTACHMENTS,
   MAX_REPORT_ATTACHMENT_SIZE_BYTES
 } from '../../config';
-import { dataService, ReportUploadProgress } from '../../services/dataService';
+import {
+  dataService,
+  formatFirestoreError,
+  ReportUploadProgress
+} from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
 import { getAccessibleProjects } from '../../utils/accessControl';
 import {
@@ -247,7 +251,7 @@ export const DailyReportForm: React.FC<Props> = ({
           const prepared = await prepareReportAttachmentFile(file);
           preparedItems.push(prepared);
         } catch (err) {
-          errors.push(err instanceof Error ? err.message : `تعذر تجهيز الملف «${file.name}».`);
+          errors.push(formatFirestoreError(err, `تعذر تجهيز الملف «${file.name}».`));
         }
       }
 
@@ -380,11 +384,7 @@ export const DailyReportForm: React.FC<Props> = ({
           'تم إرسال التقرير اليومي لهذا المشروع في هذا التاريخ بالفعل. يمكنك تعديله وحفظه مباشرة عبر زر «تعديل التقرير المرسل» أدناه أو من تبويب «تقديماتي».'
         );
       } else {
-        setValidationError(
-          err instanceof Error
-            ? err.message
-            : 'حدث خطأ أثناء إرسال التقرير اليومي. يرجى المحاولة مرة أخرى.'
-        );
+        setValidationError(formatFirestoreError(err));
       }
       setIsSubmitting(false);
       setUploadProgress(null);

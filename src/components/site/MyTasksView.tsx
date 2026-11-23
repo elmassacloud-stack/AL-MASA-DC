@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { UserProfile, ProjectTask, TaskAttachment } from '../../types';
 import { TASK_ATTACHMENT_RETENTION_HOURS } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { canAccessProject } from '../../utils/accessControl';
 import {
   formatFileSize,
@@ -35,6 +35,8 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
   const [completingTask, setCompletingTask] = useState<ProjectTask | null>(null);
   const [proofNote, setProofNote] = useState<string>('');
   const [proofAttachment, setProofAttachment] = useState<string>('');
+  const [isCompleting, setIsCompleting] = useState<boolean>(false);
+  const [completeError, setCompleteError] = useState<string | null>(null);
 
   // Live 30s tick for 48-hour retention countdown badges
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
@@ -83,20 +85,28 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
 
   const todayStr = new Date().toISOString().split('T')[0];
 
-  const handleCompleteSubmit = (e: React.FormEvent) => {
+  const handleCompleteSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!completingTask) return;
+    if (!completingTask || isCompleting) return;
 
-    dataService.completeTask(
-      completingTask.id,
-      currentUser.displayName,
-      proofNote.trim(),
-      proofAttachment || undefined
-    );
+    setCompleteError(null);
+    setIsCompleting(true);
+    try {
+      await dataService.completeTask(
+        completingTask.id,
+        currentUser.displayName,
+        proofNote.trim(),
+        proofAttachment || undefined
+      );
 
-    setCompletingTask(null);
-    setProofNote('');
-    setProofAttachment('');
+      setCompletingTask(null);
+      setProofNote('');
+      setProofAttachment('');
+    } catch (err) {
+      setCompleteError(formatFirestoreError(err));
+    } finally {
+      setIsCompleting(false);
+    }
   };
 
   const handlePreviewAttachment = async (taskId: string, attachment: TaskAttachment) => {
@@ -114,9 +124,7 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
       setPreviewBlobUrl(blobUrl);
       setPreviewTarget({ taskId, attachment });
     } catch (err) {
-      setAttachmentError(
-        err instanceof Error ? err.message : 'تعذر فتح معاينة المرفق من Firebase.'
-      );
+      setAttachmentError(formatFirestoreError(err, 'تعذر فتح معاينة المرفق من Firebase.'));
     } finally {
       setPreviewLoadingKey(null);
     }
@@ -135,9 +143,7 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      setAttachmentError(
-        err instanceof Error ? err.message : 'تعذر تحميل المرفق من Firebase.'
-      );
+      setAttachmentError(formatFirestoreError(err, 'تعذر تحميل المرفق من Firebase.'));
     } finally {
       setDownloadingKey(null);
     }
@@ -412,12 +418,22 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
                 <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">{completingTask.title}</p>
               </div>
               <button
-                onClick={() => setCompletingTask(null)}
+                onClick={() => {
+                  setCompletingTask(null);
+                  setCompleteError(null);
+                }}
                 className="text-slate-400 hover:text-slate-600 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {completeError && (
+              <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{completeError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleCompleteSubmit} className="space-y-4 text-xs sm:text-sm">
               <div>
@@ -450,16 +466,20 @@ export const MyTasksView: React.FC<Props> = ({ currentUser, tasks }) => {
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setCompletingTask(null)}
+                  onClick={() => {
+                    setCompletingTask(null);
+                    setCompleteError(null);
+                  }}
                   className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 cursor-pointer"
                 >
                   إلغاء
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-2 cursor-pointer shadow-xs"
+                  disabled={isCompleting}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl flex items-center gap-2 cursor-pointer shadow-xs disabled:opacity-50"
                 >
-                  <Send className="w-4 h-4" />
+                  {isCompleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                   <span>تأكيد الإنجاز</span>
                 </button>
               </div>

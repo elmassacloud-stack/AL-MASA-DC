@@ -26,7 +26,11 @@ import {
   MAX_REPORT_ATTACHMENT_SIZE_BYTES
 } from '../../config';
 import { getAccessibleProjects } from '../../utils/accessControl';
-import { dataService, ReportUploadProgress } from '../../services/dataService';
+import {
+  dataService,
+  formatFirestoreError,
+  ReportUploadProgress
+} from '../../services/dataService';
 import {
   prepareReportAttachmentFile,
   PreparedReportAttachment,
@@ -182,7 +186,7 @@ export const EditDailyReportModal: React.FC<Props> = ({
           const prepared = await prepareReportAttachmentFile(file);
           preparedItems.push(prepared);
         } catch (err) {
-          errors.push(err instanceof Error ? err.message : `تعذر تجهيز الملف «${file.name}».`);
+          errors.push(formatFirestoreError(err, `تعذر تجهيز الملف «${file.name}».`));
         }
       }
 
@@ -277,11 +281,7 @@ export const EditDailyReportModal: React.FC<Props> = ({
           'يوجد بالفعل تقرير يومي آخر لهذا المشروع في نفس التاريخ المحدد. يُسمح بتقرير واحد يومياً فقط لكل مشروع.'
         );
       } else {
-        setValidationError(
-          err instanceof Error
-            ? err.message
-            : 'حدث خطأ أثناء حفظ تعديلات التقرير. يرجى المحاولة مرة أخرى.'
-        );
+        setValidationError(formatFirestoreError(err));
       }
     } finally {
       setIsSaving(false);

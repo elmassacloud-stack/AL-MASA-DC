@@ -2,7 +2,13 @@ import { arrayUnion, doc, setDoc, updateDoc } from 'firebase/firestore';
 import { AppNotification, DailyReport, Project, UserProfile } from '../../types';
 import { isSuperAdminEmail } from '../../config';
 import { getTodayDateStr } from '../../seedData';
-import { auth, db, handleFirestoreError, OperationType } from '../firebase';
+import {
+  auth,
+  db,
+  getFirestoreErrorCode,
+  isFirestoreQuotaExhausted,
+  markFirestoreQuotaExhausted
+} from '../firebase';
 import { hasAllProjectsAccess } from '../../utils/accessControl';
 import {
   isNotificationAllowedForUser,
@@ -147,9 +153,13 @@ export function addNotification(
 
     ctx.seenNotificationIds.add(id);
 
-    setDoc(doc(db, 'notifications', id), stripUndefined(newNotif)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `notifications/${id}`)
-    );
+    if (!isFirestoreQuotaExhausted()) {
+      setDoc(doc(db, 'notifications', id), stripUndefined(newNotif)).catch((error) => {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
+      });
+    }
 
     const activeUser = ctx.getCurrentUser();
     const activeIsAdmin =
@@ -195,11 +205,15 @@ export function markNotificationAsRead(id: string, ctx: NotificationsDomainConte
     safeStorage.setJson(STORAGE_KEYS.NOTIFICATIONS, notifs);
     ctx.notify();
 
-    if (!id.startsWith('notif-missing-')) {
+    if (!id.startsWith('notif-missing-') && !isFirestoreQuotaExhausted()) {
       const remotePatch = activeUser
         ? { isRead: true, readBy: arrayUnion(activeUser.id) }
         : { isRead: true };
-      updateDoc(doc(db, 'notifications', id), remotePatch).catch(() => undefined);
+      updateDoc(doc(db, 'notifications', id), remotePatch).catch((error) => {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
+      });
     }
   }
 }
@@ -215,12 +229,17 @@ export function markAllNotificationsAsRead(ctx: NotificationsDomainContext): voi
       activeUser && !prevReadBy.includes(activeUser.id)
         ? [...prevReadBy, activeUser.id]
         : prevReadBy;
-    const shouldSyncRemote = !n.isRead && !n.id.startsWith('notif-missing-');
+    const shouldSyncRemote =
+      !n.isRead && !n.id.startsWith('notif-missing-') && !isFirestoreQuotaExhausted();
     if (shouldSyncRemote) {
       const remotePatch = activeUser
         ? { isRead: true, readBy: arrayUnion(activeUser.id) }
         : { isRead: true };
-      updateDoc(doc(db, 'notifications', n.id), remotePatch).catch(() => undefined);
+      updateDoc(doc(db, 'notifications', n.id), remotePatch).catch((error) => {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
+      });
     }
     return {
       ...n,

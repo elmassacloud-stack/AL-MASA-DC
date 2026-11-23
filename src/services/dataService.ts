@@ -75,6 +75,9 @@ import {
   getFirestoreErrorCode,
   isFirestoreQuotaExhausted,
   markFirestoreQuotaExhausted,
+  assertFirestoreWriteAvailable,
+  formatFirestoreError,
+  FIRESTORE_QUOTA_EXHAUSTED_MESSAGE,
   stripUndefined,
   updateCurrentAuthDisplayName,
   isDeliverableExpired,
@@ -89,6 +92,14 @@ import {
   revokePdfBlobUrl,
   revokeAllPdfBlobUrls
 } from './firebase';
+
+export {
+  formatFirestoreError,
+  assertFirestoreWriteAvailable,
+  isFirestoreQuotaExhausted,
+  markFirestoreQuotaExhausted,
+  FIRESTORE_QUOTA_EXHAUSTED_MESSAGE
+};
 import {
   hasAllProjectsAccess,
   canAccessExecutedWorksTab,
@@ -1214,6 +1225,7 @@ class DataService {
   public async addProject(
     project: Omit<Project, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<Project> {
+    assertFirestoreWriteAvailable();
     const projects = this.getProjects();
     const now = new Date().toISOString();
     const validDisciplines: WorkDiscipline[] = [
@@ -1285,6 +1297,7 @@ class DataService {
       >
     >
   ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const projects = this.getProjects();
     const idx = projects.findIndex((p) => p.id === projectId);
     if (idx === -1) return false;
@@ -1361,6 +1374,7 @@ class DataService {
   }
 
   public async deleteProject(projectId: string): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const projects = this.getProjects();
     if (!projects.some((p) => p.id === projectId)) return false;
 
@@ -1495,6 +1509,7 @@ class DataService {
     pendingAttachments: PreparedReportAttachment[] = [],
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<ExecutedWork> {
+    assertFirestoreWriteAvailable();
     const existingStaticAttachments = (work.attachments || []).filter(
       (att) => att.storageMode !== 'firestore_chunks' && att.url && !att.url.startsWith('blob:')
     );
@@ -1644,6 +1659,7 @@ class DataService {
     pendingAttachments: PreparedReportAttachment[] = [],
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const list = this.getExecutedWorks();
     const idx = list.findIndex((w) => w.id === workId);
     if (idx === -1) return false;
@@ -1806,6 +1822,7 @@ class DataService {
   }
 
   public async deleteExecutedWork(workId: string): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const list = this.getExecutedWorks();
     const target = list.find((w) => w.id === workId);
     if (!target) return false;
@@ -1993,6 +2010,7 @@ class DataService {
     pendingAttachments: PreparedReportAttachment[] = [],
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<DailyReport> {
+    assertFirestoreWriteAvailable();
     const reports = this.getReports();
 
     const existingStaticAttachments = (reportData.attachments || []).filter(
@@ -2238,6 +2256,7 @@ class DataService {
     pendingNewAttachments: PreparedReportAttachment[] = [],
     onProgress?: (progress: ReportUploadProgress) => void
   ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const reports = this.getReports();
     const idx = reports.findIndex((r) => r.id === reportId);
     if (idx === -1) return false;
@@ -2531,6 +2550,7 @@ class DataService {
     status: DailyReport['status'],
     adminFeedback?: string
   ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const reports = this.getReports();
     const index = reports.findIndex((r) => r.id === reportId);
     if (index === -1) return false;
@@ -2602,6 +2622,7 @@ class DataService {
   }
 
   public async deleteDailyReport(reportId: string): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const activeUser = this.getCurrentUser();
     const isAdminUser =
       activeUser?.role === 'admin' ||
@@ -2691,10 +2712,10 @@ class DataService {
     });
   }
 
-  public updateIssue(
+  public async updateIssue(
     issueId: string,
     updates: Partial<Pick<IssueReport, 'status' | 'adminComment' | 'resolvedAt'>>
-  ): boolean {
+  ): Promise<boolean> {
     return issuesDomain.updateIssue(issueId, updates, () => this.notify());
   }
 
@@ -2761,6 +2782,7 @@ class DataService {
     pendingAttachments: PreparedTaskAttachment[] = [],
     onProgress?: (progress: TaskUploadProgress) => void
   ): Promise<ProjectTask> {
+    assertFirestoreWriteAvailable();
     if (pendingAttachments.length > MAX_TASK_ATTACHMENTS) {
       throw new Error(`الحد الأقصى للمرفقات في المهمة الواحدة هو ${MAX_TASK_ATTACHMENTS} ملفات.`);
     }
@@ -2910,6 +2932,7 @@ class DataService {
     pendingNewAttachments: PreparedTaskAttachment[] = [],
     onProgress?: (progress: TaskUploadProgress) => void
   ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const tasks = this.getTasksRaw();
     const idx = tasks.findIndex((t) => t.id === taskId);
     if (idx === -1) return false;
@@ -3131,6 +3154,7 @@ class DataService {
   }
 
   public async deleteTask(taskId: string): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const tasks = this.getTasksRaw();
     const targetTask = tasks.find((t) => t.id === taskId);
     if (!targetTask) return false;
@@ -3161,7 +3185,13 @@ class DataService {
     return true;
   }
 
-  public completeTask(taskId: string, userId: string, proofNote: string, proofAttachment?: string): boolean {
+  public async completeTask(
+    taskId: string,
+    userId: string,
+    proofNote: string,
+    proofAttachment?: string
+  ): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const tasks = this.getTasks();
     const idx = tasks.findIndex((t) => t.id === taskId);
     if (idx === -1) return false;
@@ -3176,15 +3206,17 @@ class DataService {
       updatedAt: now
     });
 
+    try {
+      await updateDoc(doc(db, 'tasks', taskId), patch);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`);
+    }
+
     tasks[idx] = {
       ...tasks[idx],
       ...patch
     };
     localStorage.setItem(STORAGE_KEYS.TASKS, JSON.stringify(tasks));
-
-    updateDoc(doc(db, 'tasks', taskId), patch).catch((error) =>
-      handleFirestoreError(error, OperationType.UPDATE, `tasks/${taskId}`)
-    );
 
     const activeUser = this.getCurrentUser();
     this.addNotification({
@@ -3224,7 +3256,10 @@ class DataService {
     }
   }
 
-  public addAnnouncement(ann: Omit<Announcement, 'id' | 'createdAt' | 'readBy'>): Announcement {
+  public async addAnnouncement(
+    ann: Omit<Announcement, 'id' | 'createdAt' | 'readBy'>
+  ): Promise<Announcement> {
+    assertFirestoreWriteAvailable();
     const items = this.getAnnouncements();
     const newAnn: Announcement = stripUndefined({
       ...ann,
@@ -3232,12 +3267,15 @@ class DataService {
       readBy: [],
       createdAt: new Date().toISOString()
     });
+
+    try {
+      await setDoc(doc(db, 'announcements', newAnn.id), stripUndefined(newAnn));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `announcements/${newAnn.id}`);
+    }
+
     items.unshift(newAnn);
     localStorage.setItem(STORAGE_KEYS.ANNOUNCEMENTS, JSON.stringify(items));
-
-    setDoc(doc(db, 'announcements', newAnn.id), stripUndefined(newAnn)).catch((error) =>
-      handleFirestoreError(error, OperationType.CREATE, `announcements/${newAnn.id}`)
-    );
 
     this.addNotification({
       title: newAnn.isUrgent
@@ -3266,11 +3304,15 @@ class DataService {
       items[idx].readBy = [...items[idx].readBy, userId];
       safeStorage.setJson(STORAGE_KEYS.ANNOUNCEMENTS, items);
 
-      updateDoc(doc(db, 'announcements', announcementId), {
-        readBy: arrayUnion(userId)
-      }).catch((error) =>
-        handleFirestoreError(error, OperationType.UPDATE, `announcements/${announcementId}`)
-      );
+      if (!isFirestoreQuotaExhausted()) {
+        updateDoc(doc(db, 'announcements', announcementId), {
+          readBy: arrayUnion(userId)
+        }).catch((error) => {
+          if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+            markFirestoreQuotaExhausted();
+          }
+        });
+      }
 
       this.notify();
     }
@@ -3296,6 +3338,7 @@ class DataService {
   }
 
   public async updateUser(userId: string, updates: Partial<UserProfile>): Promise<boolean> {
+    assertFirestoreWriteAvailable();
     const users = this.getUsers();
     const idx = users.findIndex((u) => u.id === userId);
     if (idx === -1) return false;
@@ -3370,6 +3413,7 @@ class DataService {
     photoUrl?: string | null;
     email?: string;
   }): Promise<UserProfile | null> {
+    assertFirestoreWriteAvailable();
     const activeUser = this.getCurrentUser();
     if (!activeUser) return null;
 
@@ -3909,6 +3953,7 @@ class DataService {
    * with their latest displayName and email, while preserving immutable original author metadata.
    */
   public async resyncMyHistoricalRecords(): Promise<HistoricalSyncSummary> {
+    assertFirestoreWriteAvailable();
     const activeUser = this.getCurrentUser();
     if (!activeUser) {
       return {
@@ -3936,6 +3981,7 @@ class DataService {
    * Allows an Admin to explicitly re-sync all historical records for a specific user profile.
    */
   public async resyncUserHistoricalRecordsByAdmin(userId: string): Promise<HistoricalSyncSummary> {
+    assertFirestoreWriteAvailable();
     const targetUser = this.getUsers().find((u) => u.id === userId);
     if (!targetUser) {
       return {
@@ -3964,6 +4010,7 @@ class DataService {
    * against the author's latest UserProfile while preserving originalSenderName / originalSenderEmail.
    */
   public async resyncSingleReportIdentity(reportId: string): Promise<DailyReport | null> {
+    assertFirestoreWriteAvailable();
     const reports = this.getReports();
     const idx = reports.findIndex((r) => r.id === reportId);
     if (idx === -1) return null;
@@ -4080,6 +4127,7 @@ class DataService {
     isStarred = false,
     reminder?: { date?: string; time?: string }
   ): Promise<PersonalNote | null> {
+    assertFirestoreWriteAvailable();
     const activeUser = this.getCurrentUser();
     const uid = auth.currentUser?.uid || activeUser?.id;
     const cleanText = text.trim().slice(0, 500);
@@ -4124,6 +4172,7 @@ class DataService {
   }
 
   public async togglePersonalNote(noteId: string): Promise<void> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid) return;
 
@@ -4156,6 +4205,7 @@ class DataService {
   }
 
   public async togglePersonalNoteStar(noteId: string): Promise<void> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid) return;
 
@@ -4184,6 +4234,7 @@ class DataService {
   }
 
   public async updatePersonalNoteText(noteId: string, newText: string): Promise<void> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     const cleanText = newText.trim().slice(0, 500);
     if (!uid || !cleanText) return;
@@ -4216,6 +4267,7 @@ class DataService {
     reminderDate: string,
     reminderTime = ''
   ): Promise<void> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid) return;
 
@@ -4250,6 +4302,7 @@ class DataService {
   }
 
   public async dismissPersonalNoteReminder(noteId: string): Promise<void> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid) return;
 
@@ -4277,6 +4330,7 @@ class DataService {
   }
 
   public async carryOverPersonalNotes(noteIds: string[], targetDate: string): Promise<number> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid || noteIds.length === 0 || !/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return 0;
 
@@ -4328,6 +4382,7 @@ class DataService {
   }
 
   public async deletePersonalNotes(noteIds: string[]): Promise<number> {
+    assertFirestoreWriteAvailable();
     const uid = auth.currentUser?.uid || this.getCurrentUser()?.id;
     if (!uid || noteIds.length === 0) return 0;
 
@@ -4395,6 +4450,8 @@ class DataService {
     if (!auth.currentUser || !activeUser || activeUser.role !== 'admin') {
       return true;
     }
+
+    assertFirestoreWriteAvailable();
 
     const payload: AppBrandingSettings = stripUndefined({
       id: 'branding' as const,
@@ -4489,13 +4546,13 @@ class DataService {
       localStorage.setItem(STORAGE_KEYS.ACTIVITY_LOGS, JSON.stringify(nextLogs));
     }
 
-    setDoc(doc(db, 'activityLogs', entry.id), entry).catch((error) => {
-      try {
-        handleFirestoreError(error, OperationType.CREATE, `activityLogs/${entry.id}`);
-      } catch {
-        // Audit log persistence failure must not block primary report/task workflows
-      }
-    });
+    if (!isFirestoreQuotaExhausted()) {
+      setDoc(doc(db, 'activityLogs', entry.id), entry).catch((error) => {
+        if (getFirestoreErrorCode(error) === 'resource-exhausted') {
+          markFirestoreQuotaExhausted();
+        }
+      });
+    }
   }
 
   // --- Cloud-Synced Excel Logs (Shared across Site Engineers & Admins) ---
@@ -4548,6 +4605,7 @@ class DataService {
 
   // Reset sample project/report data
   public async resetToSeed() {
+    assertFirestoreWriteAvailable();
     localStorage.setItem(STORAGE_KEYS.PROJECTS, JSON.stringify(SEED_PROJECTS));
     localStorage.setItem(STORAGE_KEYS.REPORTS, JSON.stringify(SEED_REPORTS));
     localStorage.setItem(STORAGE_KEYS.ISSUES, JSON.stringify(SEED_ISSUES));

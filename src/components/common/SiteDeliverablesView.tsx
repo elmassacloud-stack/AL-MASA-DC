@@ -32,7 +32,11 @@ import {
   DELIVERABLE_STATUS_CONFIG,
   MAX_PDF_FILE_SIZE_BYTES
 } from '../../config';
-import { dataService, DeliverableUploadProgress } from '../../services/dataService';
+import {
+  dataService,
+  formatFirestoreError,
+  DeliverableUploadProgress
+} from '../../services/dataService';
 import { getAccessibleProjects, canAccessProject } from '../../utils/accessControl';
 import {
   preparePdfFromFiles,
@@ -183,7 +187,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       setPreparedPdf(prepared);
     } catch (err) {
       setPreparedPdf(null);
-      setFormError(err instanceof Error ? err.message : 'تعذر تجهيز ملف الـ PDF.');
+      setFormError(formatFirestoreError(err, 'تعذر تجهيز ملف الـ PDF.'));
     } finally {
       setIsPreparingFile(false);
       setPrepareProgress(0);
@@ -256,30 +260,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       if (isAdmin) setShowUploadForm(false);
       showSuccess('تم إرسال الملف بنجاح، وسيظل متاحاً في Firebase لمدة 48 ساعة ثم يُحذف تلقائياً.');
     } catch (err) {
-      const rawMsg = err instanceof Error ? err.message : '';
-      if (rawMsg.includes('Missing or insufficient permissions') || rawMsg.includes('PERMISSION_DENIED')) {
-        let failedPath = 'siteDeliverables';
-        try {
-          const parsed = JSON.parse(rawMsg) as { path?: string };
-          if (parsed?.path) failedPath = parsed.path;
-        } catch {
-          // ignore non-JSON errors
-        }
-        const hasAssigned =
-          Boolean(currentUser.allProjects) ||
-          (Array.isArray(currentUser.assignedProjects) &&
-            currentUser.assignedProjects.includes(project.id));
-        const delivAccess = currentUser.canAccessSiteDeliverables !== false;
-        setFormError(
-          `تعذر إرسال الملف لعدم كفاية الصلاحيات (${failedPath} | مشروع: ${project.id} | إسناد: ${
-            hasAssigned ? 'نعم' : 'لا'
-          } | تبويب: ${delivAccess ? 'مفعل' : 'معطل'}). يرجى تسجيل الخروج ثم إعادة الدخول أو تحديث صلاحيات الحساب من إدارة المستخدمين.`
-        );
-      } else {
-        setFormError(
-          rawMsg || 'حدث خطأ أثناء رفع الملف. يرجى التحقق من الاتصال والمحاولة مجدداً.'
-        );
-      }
+      setFormError(formatFirestoreError(err));
     } finally {
       setIsUploading(false);
       setUploadInfo(null);
@@ -310,7 +291,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       setPreviewBlobUrl(url);
     } catch (err) {
       setExcelSheets(null);
-      setActionError(err instanceof Error ? err.message : 'تعذر تحميل الملف للمعاينة.');
+      setActionError(formatFirestoreError(err, 'تعذر تحميل الملف للمعاينة.'));
     } finally {
       setPreviewLoadingId(null);
     }
@@ -328,7 +309,7 @@ export const SiteDeliverablesView: React.FC<Props> = ({
       a.click();
       document.body.removeChild(a);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'تعذر تحميل الملف.');
+      setActionError(formatFirestoreError(err, 'تعذر تحميل الملف.'));
     } finally {
       setDownloadingId(null);
     }
@@ -346,8 +327,8 @@ export const SiteDeliverablesView: React.FC<Props> = ({
           ? 'تم تأكيد استلام ملف الـ PDF بنجاح.'
           : 'تم تسجيل طلب المراجعة وإشعار مهندس الموقع.'
       );
-    } catch {
-      setActionError('تعذر تحديث حالة الاستلام. يرجى المحاولة مرة أخرى.');
+    } catch (err) {
+      setActionError(formatFirestoreError(err));
     } finally {
       setIsUpdatingReview(false);
     }
@@ -364,8 +345,8 @@ export const SiteDeliverablesView: React.FC<Props> = ({
         setPreviewBlobUrl(null);
       }
       showSuccess('تم حذف ملف الـ PDF نهائياً من قاعدة البيانات.');
-    } catch {
-      setActionError('تعذر حذف الملف من Firebase.');
+    } catch (err) {
+      setActionError(formatFirestoreError(err));
     } finally {
       setIsDeletingId(null);
     }

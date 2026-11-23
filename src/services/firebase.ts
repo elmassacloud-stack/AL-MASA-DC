@@ -114,16 +114,151 @@ function readStoredQuotaExhaustedDate(): string | null {
   }
 }
 
-export function getFirestoreErrorCode(error: unknown): string {
-  if (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    typeof (error as { code?: unknown }).code === 'string'
-  ) {
-    return (error as { code: string }).code;
+export const FIRESTORE_QUOTA_EXHAUSTED_MESSAGE =
+  'تم الوصول للحد اليومي المسموح به لقاعدة البيانات. يتم تجديد الحصة تلقائياً الساعة 10:00 صباحاً بتوقيت مصر.';
+
+export const FIRESTORE_PERMISSION_DENIED_MESSAGE =
+  'ليس لديك صلاحية تنفيذ هذا الإجراء. يرجى التواصل مع مدير النظام.';
+
+export const FIRESTORE_UNAVAILABLE_MESSAGE =
+  'تعذر الاتصال بقاعدة البيانات حالياً. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى.';
+
+export const FIRESTORE_NOT_FOUND_MESSAGE =
+  'السجل المطلوب غير موجود أو تم حذفه مسبقاً.';
+
+export const FIRESTORE_DEFAULT_ERROR_MESSAGE =
+  'حدث خطأ غير متوقع أثناء حفظ البيانات. يرجى المحاولة مرة أخرى.';
+
+function normalizeErrorCode(rawCode?: string | null): string {
+  if (!rawCode || typeof rawCode !== 'string') return '';
+  const trimmed = rawCode.trim().toLowerCase();
+  if (!trimmed) return '';
+  const slashIdx = trimmed.lastIndexOf('/');
+  return slashIdx !== -1 ? trimmed.slice(slashIdx + 1) : trimmed;
+}
+
+function tryParseJsonRecord(input: string): Record<string, unknown> | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
   }
-  return 'firestore_error';
+}
+
+export function extractFirestoreErrorInfo(error: unknown): {
+  code: string;
+  message: string;
+  isStructuredJson: boolean;
+} {
+  let rawCode = '';
+  let message = '';
+  let isStructuredJson = false;
+
+  if (typeof error === 'string') {
+    message = error;
+    const parsed = tryParseJsonRecord(error);
+    if (parsed) {
+      isStructuredJson = true;
+      if (typeof parsed.code === 'string') rawCode = parsed.code;
+      if (typeof parsed.message === 'string') message = parsed.message;
+      else if (typeof parsed.error === 'string') message = parsed.error;
+    }
+  } else if (error instanceof Error) {
+    message = error.message || '';
+    if ('code' in error && typeof (error as { code?: unknown }).code === 'string') {
+      rawCode = (error as { code: string }).code;
+    }
+    const parsed = tryParseJsonRecord(message);
+    if (parsed) {
+      isStructuredJson = true;
+      if (
+        typeof parsed.code === 'string' &&
+        (!rawCode || rawCode === 'firestore_error')
+      ) {
+        rawCode = parsed.code;
+      }
+      if (typeof parsed.message === 'string') {
+        message = parsed.message;
+      } else if (typeof parsed.error === 'string') {
+        message = parsed.error;
+      }
+    }
+  } else if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>;
+    if (typeof record.code === 'string') rawCode = record.code;
+    if (typeof record.message === 'string') {
+      message = record.message;
+    } else if (typeof record.error === 'string') {
+      message = record.error;
+    } else if (record.error && typeof record.error === 'object') {
+      const nested = record.error as Record<string, unknown>;
+      if (!rawCode && typeof nested.code === 'string') rawCode = nested.code;
+      if (typeof nested.message === 'string') message = nested.message;
+    }
+    const parsed = tryParseJsonRecord(message);
+    if (parsed) {
+      isStructuredJson = true;
+      if (
+        typeof parsed.code === 'string' &&
+        (!rawCode || rawCode === 'firestore_error')
+      ) {
+        rawCode = parsed.code;
+      }
+      if (typeof parsed.message === 'string') {
+        message = parsed.message;
+      } else if (typeof parsed.error === 'string') {
+        message = parsed.error;
+      }
+    }
+  }
+
+  let code = normalizeErrorCode(rawCode);
+  const lowerMsg = message.toLowerCase();
+
+  if (!code || code === 'firestore_error' || code === 'unknown') {
+    if (
+      lowerMsg.includes('resource-exhausted') ||
+      lowerMsg.includes('resource_exhausted') ||
+      lowerMsg.includes('quota limit exceeded') ||
+      lowerMsg.includes('quota exceeded') ||
+      message.includes(FIRESTORE_QUOTA_EXHAUSTED_MESSAGE)
+    ) {
+      code = 'resource-exhausted';
+    } else if (
+      lowerMsg.includes('permission-denied') ||
+      lowerMsg.includes('permission_denied') ||
+      lowerMsg.includes('missing or insufficient permissions')
+    ) {
+      code = 'permission-denied';
+    } else if (
+      lowerMsg.includes('network-request-failed') ||
+      lowerMsg.includes('unavailable') ||
+      lowerMsg.includes('client is offline') ||
+      lowerMsg.includes('failed to fetch') ||
+      lowerMsg.includes('networkerror') ||
+      lowerMsg.includes('network error')
+    ) {
+      code = 'unavailable';
+    } else if (
+      lowerMsg.includes('not-found') ||
+      lowerMsg.includes('not_found') ||
+      lowerMsg.includes('no document to update')
+    ) {
+      code = 'not-found';
+    }
+  }
+
+  return { code, message, isStructuredJson };
+}
+
+export function getFirestoreErrorCode(error: unknown): string {
+  const { code } = extractFirestoreErrorInfo(error);
+  return code || 'firestore_error';
 }
 
 export function isFirestoreQuotaExhausted(): boolean {
@@ -176,6 +311,75 @@ export function subscribeToFirestoreQuotaState(
   return () => {
     firestoreQuotaListeners.delete(listener);
   };
+}
+
+export function assertFirestoreWriteAvailable(): void {
+  if (isFirestoreQuotaExhausted()) {
+    const err = new Error(FIRESTORE_QUOTA_EXHAUSTED_MESSAGE) as Error & { code?: string };
+    err.code = 'resource-exhausted';
+    throw err;
+  }
+}
+
+export function formatFirestoreError(
+  error: unknown,
+  fallbackMessage = FIRESTORE_DEFAULT_ERROR_MESSAGE
+): string {
+  const { code, message, isStructuredJson } = extractFirestoreErrorInfo(error);
+  const lowerMsg = message.toLowerCase();
+
+  if (
+    code === 'resource-exhausted' ||
+    code === 'resource_exhausted' ||
+    lowerMsg.includes('quota limit exceeded') ||
+    lowerMsg.includes('quota exceeded') ||
+    lowerMsg.includes('resource-exhausted')
+  ) {
+    markFirestoreQuotaExhausted();
+    return FIRESTORE_QUOTA_EXHAUSTED_MESSAGE;
+  }
+
+  if (
+    code === 'permission-denied' ||
+    code === 'permission_denied' ||
+    lowerMsg.includes('missing or insufficient permissions')
+  ) {
+    return FIRESTORE_PERMISSION_DENIED_MESSAGE;
+  }
+
+  if (
+    code === 'unavailable' ||
+    code === 'network-request-failed' ||
+    code === 'deadline-exceeded' ||
+    lowerMsg.includes('client is offline') ||
+    lowerMsg.includes('network-request-failed') ||
+    lowerMsg.includes('failed to fetch')
+  ) {
+    return FIRESTORE_UNAVAILABLE_MESSAGE;
+  }
+
+  if (
+    code === 'not-found' ||
+    code === 'not_found' ||
+    lowerMsg.includes('no document to update')
+  ) {
+    return FIRESTORE_NOT_FOUND_MESSAGE;
+  }
+
+  const trimmed = message.trim();
+  const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
+  const looksRawTechnical =
+    isStructuredJson ||
+    trimmed.startsWith('{') ||
+    trimmed.includes('"operationType"') ||
+    trimmed.includes('"code"') ||
+    trimmed.includes('FirebaseError');
+
+  if (hasArabic && !looksRawTechnical) {
+    return trimmed;
+  }
+
+  return fallbackMessage || FIRESTORE_DEFAULT_ERROR_MESSAGE;
 }
 
 export function handleFirestoreError(

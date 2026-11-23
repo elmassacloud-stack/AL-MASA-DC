@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { IssueReport, Project, IssueStatus, IssuePriority, UserProfile } from '../../types';
 import { ISSUE_TYPES_CONFIG, ISSUE_PRIORITY_CONFIG } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 
 interface Props {
   issues: IssueReport[];
@@ -30,6 +30,7 @@ export const AdminIssuesView: React.FC<Props> = ({ issues, projects, users = [] 
   const [selectedIssue, setSelectedIssue] = useState<IssueReport | null>(null);
   const [commentInput, setCommentInput] = useState<string>('');
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const engineerOptions = Array.from(
     new Map(
@@ -48,25 +49,36 @@ export const AdminIssuesView: React.FC<Props> = ({ issues, projects, users = [] 
     return true;
   });
 
-  const handleUpdateStatus = (issueId: string, status: IssueStatus) => {
-    dataService.updateIssue(issueId, { status });
-    if (selectedIssue && selectedIssue.id === issueId) {
-      setSelectedIssue((prev) => (prev ? { ...prev, status } : null));
+  const handleUpdateStatus = async (issueId: string, status: IssueStatus) => {
+    setActionError(null);
+    try {
+      await dataService.updateIssue(issueId, { status });
+      if (selectedIssue && selectedIssue.id === issueId) {
+        setSelectedIssue((prev) => (prev ? { ...prev, status } : null));
+      }
+    } catch (err) {
+      setActionError(formatFirestoreError(err));
     }
   };
 
-  const handleAddComment = (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedIssue || !commentInput.trim()) return;
+    setActionError(null);
 
-    dataService.updateIssue(selectedIssue.id, {
-      adminComment: commentInput.trim()
-    });
+    const trimmedComment = commentInput.trim();
+    try {
+      await dataService.updateIssue(selectedIssue.id, {
+        adminComment: trimmedComment
+      });
 
-    setSelectedIssue((prev) =>
-      prev ? { ...prev, adminComment: commentInput.trim() } : null
-    );
-    setCommentInput('');
+      setSelectedIssue((prev) =>
+        prev ? { ...prev, adminComment: trimmedComment } : null
+      );
+      setCommentInput('');
+    } catch (err) {
+      setActionError(formatFirestoreError(err));
+    }
   };
 
   return (
@@ -89,6 +101,19 @@ export const AdminIssuesView: React.FC<Props> = ({ issues, projects, users = [] 
           </span>
         </div>
       </div>
+
+      {actionError && (
+        <div className="p-3 rounded-xl bg-red-50 dark:bg-red-950/70 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 text-xs sm:text-sm font-medium flex items-center justify-between gap-2">
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="text-red-500 hover:text-red-700 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Filter toolbar */}
       <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">

@@ -21,7 +21,7 @@ import {
   BellOff
 } from 'lucide-react';
 import { PersonalNote, UserProfile } from '../../types';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { getTodayDateStr } from '../../seedData';
 import {
   playSubtleNotificationChime,
@@ -417,8 +417,34 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
       setShowNewReminder(false);
       setNewReminderTime('');
       inputRef.current?.focus();
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleToggleNote = async (noteId: string) => {
+    try {
+      await dataService.togglePersonalNote(noteId);
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
+    }
+  };
+
+  const handleToggleNoteStar = async (noteId: string) => {
+    try {
+      await dataService.togglePersonalNoteStar(noteId);
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
+    }
+  };
+
+  const handleDismissNoteReminder = async (noteId: string) => {
+    try {
+      await dataService.dismissPersonalNoteReminder(noteId);
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
     }
   };
 
@@ -430,11 +456,15 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
 
   const handleSaveEdit = async (noteId: string) => {
     const trimmed = editingText.trim();
-    if (trimmed) {
-      await dataService.updatePersonalNoteText(noteId, trimmed);
+    try {
+      if (trimmed) {
+        await dataService.updatePersonalNoteText(noteId, trimmed);
+      }
+      setEditingId(null);
+      setEditingText('');
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
     }
-    setEditingId(null);
-    setEditingText('');
   };
 
   const handleOpenReminderEditor = (note: PersonalNote) => {
@@ -450,74 +480,110 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
 
   const handleSaveNoteReminder = async (noteId: string) => {
     if (!reminderEditDate) return;
-    await dataService.setPersonalNoteReminder(noteId, reminderEditDate, reminderEditTime);
-    setReminderEditId(null);
-    const label = getRelativeDateLabel(reminderEditDate) || reminderEditDate;
-    showFeedback(
-      `تم حفظ التذكير ليوم ${label}${reminderEditTime ? ` الساعة ${formatReminderTime24ToAr(reminderEditTime)}` : ''}`
-    );
+    try {
+      await dataService.setPersonalNoteReminder(noteId, reminderEditDate, reminderEditTime);
+      setReminderEditId(null);
+      const label = getRelativeDateLabel(reminderEditDate) || reminderEditDate;
+      showFeedback(
+        `تم حفظ التذكير ليوم ${label}${reminderEditTime ? ` الساعة ${formatReminderTime24ToAr(reminderEditTime)}` : ''}`
+      );
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
+    }
   };
 
   const handleClearNoteReminder = async (noteId: string) => {
-    await dataService.setPersonalNoteReminder(noteId, '', '');
-    setReminderEditId(null);
-    showFeedback('تم إلغاء التذكير');
+    try {
+      await dataService.setPersonalNoteReminder(noteId, '', '');
+      setReminderEditId(null);
+      showFeedback('تم إلغاء التذكير');
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
+    }
   };
 
   const handleCarryOverSingle = async (note: PersonalNote, targetDate: string) => {
-    const count = await dataService.carryOverPersonalNotes([note.id], targetDate);
-    if (count > 0) {
-      const targetLabel = getRelativeDateLabel(targetDate) || targetDate;
-      showFeedback(`تم ترحيل المهمة إلى ${targetLabel}`);
+    try {
+      const count = await dataService.carryOverPersonalNotes([note.id], targetDate);
+      if (count > 0) {
+        const targetLabel = getRelativeDateLabel(targetDate) || targetDate;
+        showFeedback(`تم ترحيل المهمة إلى ${targetLabel}`);
+      }
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
     }
   };
 
   const handleCarryOverSelectedDayPending = async () => {
     if (dayPendingNotes.length === 0) return;
-    const ids = dayPendingNotes.map((n) => n.id);
-    const count = await dataService.carryOverPersonalNotes(ids, nextDayFromSelected);
-    setConfirmClearDayPending(false);
-    if (count > 0) {
-      const targetLabel = getRelativeDateLabel(nextDayFromSelected) || nextDayFromSelected;
-      showFeedback(`تم ترحيل ${count} مهام غير مكتملة إلى ${targetLabel}`);
+    try {
+      const ids = dayPendingNotes.map((n) => n.id);
+      const count = await dataService.carryOverPersonalNotes(ids, nextDayFromSelected);
+      setConfirmClearDayPending(false);
+      if (count > 0) {
+        const targetLabel = getRelativeDateLabel(nextDayFromSelected) || nextDayFromSelected;
+        showFeedback(`تم ترحيل ${count} مهام غير مكتملة إلى ${targetLabel}`);
+      }
+    } catch (err) {
+      setConfirmClearDayPending(false);
+      showFeedback(formatFirestoreError(err));
     }
   };
 
   const handleDeleteSelectedDayPending = async () => {
     if (dayPendingNotes.length === 0) return;
-    const ids = dayPendingNotes.map((n) => n.id);
-    const count = await dataService.deletePersonalNotes(ids);
-    setConfirmClearDayPending(false);
-    if (count > 0) {
-      showFeedback(`تم مسح ${count} مهام غير مكتملة من هذا اليوم`);
+    try {
+      const ids = dayPendingNotes.map((n) => n.id);
+      const count = await dataService.deletePersonalNotes(ids);
+      setConfirmClearDayPending(false);
+      if (count > 0) {
+        showFeedback(`تم مسح ${count} مهام غير مكتملة من هذا اليوم`);
+      }
+    } catch (err) {
+      setConfirmClearDayPending(false);
+      showFeedback(formatFirestoreError(err));
     }
   };
 
   const handleCarryOverAllPastToToday = async () => {
     if (pastIncompleteNotes.length === 0) return;
-    const ids = pastIncompleteNotes.map((n) => n.id);
-    const count = await dataService.carryOverPersonalNotes(ids, todayStr);
-    setConfirmClearOverdue(false);
-    setShowOverdueDetails(false);
-    if (count > 0) {
-      selectDateAndSyncCalendar(todayStr);
-      showFeedback(`تم ترحيل ${count} مهام غير مكتملة من الأيام السابقة إلى اليوم`);
+    try {
+      const ids = pastIncompleteNotes.map((n) => n.id);
+      const count = await dataService.carryOverPersonalNotes(ids, todayStr);
+      setConfirmClearOverdue(false);
+      setShowOverdueDetails(false);
+      if (count > 0) {
+        selectDateAndSyncCalendar(todayStr);
+        showFeedback(`تم ترحيل ${count} مهام غير مكتملة من الأيام السابقة إلى اليوم`);
+      }
+    } catch (err) {
+      setConfirmClearOverdue(false);
+      showFeedback(formatFirestoreError(err));
     }
   };
 
   const handleDeleteAllPastIncomplete = async () => {
     if (pastIncompleteNotes.length === 0) return;
-    const ids = pastIncompleteNotes.map((n) => n.id);
-    const count = await dataService.deletePersonalNotes(ids);
-    setConfirmClearOverdue(false);
-    setShowOverdueDetails(false);
-    if (count > 0) {
-      showFeedback(`تم مسح ${count} مهام غير مكتملة من الأيام السابقة`);
+    try {
+      const ids = pastIncompleteNotes.map((n) => n.id);
+      const count = await dataService.deletePersonalNotes(ids);
+      setConfirmClearOverdue(false);
+      setShowOverdueDetails(false);
+      if (count > 0) {
+        showFeedback(`تم مسح ${count} مهام غير مكتملة من الأيام السابقة`);
+      }
+    } catch (err) {
+      setConfirmClearOverdue(false);
+      showFeedback(formatFirestoreError(err));
     }
   };
 
   const handleDeleteSingle = async (noteId: string) => {
-    await dataService.deletePersonalNotes([noteId]);
+    try {
+      await dataService.deletePersonalNotes([noteId]);
+    } catch (err) {
+      showFeedback(formatFirestoreError(err));
+    }
   };
 
   const relativeSelected = getRelativeDateLabel(selectedDate);
@@ -674,7 +740,7 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
-                      onClick={() => dataService.togglePersonalNote(rem.id)}
+                      onClick={() => void handleToggleNote(rem.id)}
                       className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
                     >
                       <Check className="w-3.5 h-3.5" />
@@ -689,7 +755,7 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
                     </button>
                     <button
                       type="button"
-                      onClick={() => dataService.dismissPersonalNoteReminder(rem.id)}
+                      onClick={() => void handleDismissNoteReminder(rem.id)}
                       className="px-2 py-1.5 rounded-lg text-xs text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-white/60 dark:hover:bg-slate-800/60 cursor-pointer"
                       title="إخفاء التنبيه"
                     >
@@ -1032,7 +1098,7 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
                       {/* Checkbox Button */}
                       <button
                         type="button"
-                        onClick={() => dataService.togglePersonalNote(note.id)}
+                        onClick={() => void handleToggleNote(note.id)}
                         className={`mt-0.5 w-6 h-6 rounded-lg border-2 flex items-center justify-center shrink-0 transition-all cursor-pointer ${
                           note.isCompleted
                             ? 'bg-emerald-600 border-emerald-600 text-white'
@@ -1165,7 +1231,7 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
 
                           <button
                             type="button"
-                            onClick={() => dataService.togglePersonalNoteStar(note.id)}
+                            onClick={() => void handleToggleNoteStar(note.id)}
                             className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors cursor-pointer ${
                               note.isStarred
                                 ? 'text-amber-500'
@@ -1290,7 +1356,7 @@ export const PersonalNotesView: React.FC<Props> = ({ currentUser, personalNotes 
                     <div className="flex items-center gap-2 min-w-0">
                       <button
                         type="button"
-                        onClick={() => dataService.togglePersonalNote(item.id)}
+                        onClick={() => void handleToggleNote(item.id)}
                         className={`w-5 h-5 rounded-md border-2 flex items-center justify-center shrink-0 cursor-pointer ${
                           item.isCompleted
                             ? 'bg-emerald-600 border-emerald-600 text-white'

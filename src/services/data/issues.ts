@@ -1,6 +1,12 @@
 import { doc, updateDoc, runTransaction } from 'firebase/firestore';
 import { AppNotification, IssueReport } from '../../types';
-import { auth, db, handleFirestoreError, OperationType } from '../firebase';
+import {
+  assertFirestoreWriteAvailable,
+  auth,
+  db,
+  handleFirestoreError,
+  OperationType
+} from '../firebase';
 import { safeStorage, STORAGE_KEYS, stripUndefined } from './shared';
 
 export interface IssueDomainCallbacks {
@@ -21,6 +27,7 @@ export async function addIssue(
   issue: Omit<IssueReport, 'id' | 'issueNumber' | 'createdAt' | 'updatedAt' | 'status'>,
   callbacks: IssueDomainCallbacks
 ): Promise<IssueReport> {
+  assertFirestoreWriteAvailable();
   const year = new Date().getFullYear();
   const counterId = `issues-${year}`;
   const counterRef = doc(db, 'counters', counterId);
@@ -86,11 +93,12 @@ export async function addIssue(
   return newIssue;
 }
 
-export function updateIssue(
+export async function updateIssue(
   issueId: string,
   updates: Partial<Pick<IssueReport, 'status' | 'adminComment' | 'resolvedAt'>>,
   notify: () => void
-): boolean {
+): Promise<boolean> {
+  assertFirestoreWriteAvailable();
   const issues = getIssues();
   const idx = issues.findIndex((i) => i.id === issueId);
   if (idx === -1) return false;
@@ -103,15 +111,17 @@ export function updateIssue(
     resolvedAt
   });
 
+  try {
+    await updateDoc(doc(db, 'issues', issueId), patch);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `issues/${issueId}`);
+  }
+
   issues[idx] = {
     ...issues[idx],
     ...patch
   };
   safeStorage.setJson(STORAGE_KEYS.ISSUES, issues);
-
-  updateDoc(doc(db, 'issues', issueId), patch).catch((error) =>
-    handleFirestoreError(error, OperationType.UPDATE, `issues/${issueId}`)
-  );
 
   notify();
   return true;

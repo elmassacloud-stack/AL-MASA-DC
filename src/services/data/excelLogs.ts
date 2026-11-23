@@ -10,6 +10,7 @@ import {
 import { SharedExcelLogChunk, SharedExcelLogFile, UserProfile, UserRole } from '../../types';
 import { isSuperAdminEmail, MAX_PDF_FILE_SIZE_BYTES, PDF_CHUNK_SIZE_CHARS } from '../../config';
 import {
+  assertFirestoreWriteAvailable,
   auth,
   db,
   getFirestoreErrorCode,
@@ -74,6 +75,8 @@ export async function uploadSharedExcelLog(
   ) {
     throw new Error('تم إيقاف تحميل ورفع شيت اللوج لموقع رافيل.');
   }
+
+  assertFirestoreWriteAvailable();
 
   const firebaseUser = auth.currentUser;
   if (!firebaseUser) {
@@ -259,6 +262,8 @@ export async function deleteSharedExcelLog(
     throw new Error('يمكن للأدمن فقط حذف شيت اللوج من قاعدة البيانات.');
   }
 
+  assertFirestoreWriteAvailable();
+
   try {
     const snap = await getDocs(collection(db, 'excelLogs', logId, 'chunks'));
     if (!snap.empty) {
@@ -297,6 +302,8 @@ export async function deleteAllSharedExcelLogs(
   if (!isAdminActor) {
     throw new Error('يمكن للأدمن فقط حذف جميع شيتات اللوج من قاعدة البيانات.');
   }
+
+  assertFirestoreWriteAvailable();
 
   let logIds: string[] = [];
   try {

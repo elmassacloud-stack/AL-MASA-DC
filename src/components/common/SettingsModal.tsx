@@ -24,7 +24,7 @@ import {
   Palette
 } from 'lucide-react';
 import { ADMIN_EMAIL_CONFIG, SHARED_APP_URL, getAppUrl } from '../../config';
-import { dataService } from '../../services/dataService';
+import { dataService, formatFirestoreError } from '../../services/dataService';
 import { NotificationPreferences, UserProfile } from '../../types';
 import {
   NOTIFICATION_PRESETS,
@@ -53,7 +53,7 @@ interface Props {
   onUpdateStalledDays: (days: number) => void;
   cutoffHour: number;
   onUpdateCutoffHour: (hour: number) => void;
-  onResetSeedData: () => void;
+  onResetSeedData: () => Promise<void> | void;
 }
 
 export const SettingsModal: React.FC<Props> = ({
@@ -165,8 +165,8 @@ export const SettingsModal: React.FC<Props> = ({
       } else {
         setPrefsErrorMsg('تعذر حفظ تفضيلات الإشعارات، يرجى المحاولة مرة أخرى.');
       }
-    } catch {
-      setPrefsErrorMsg('حدث خطأ أثناء حفظ التفضيلات في قاعدة البيانات.');
+    } catch (err) {
+      setPrefsErrorMsg(formatFirestoreError(err));
     } finally {
       setSavingPrefs(false);
     }
@@ -215,8 +215,8 @@ export const SettingsModal: React.FC<Props> = ({
       } else {
         setBrandErrorMsg('تعذر حفظ اللون الرئيسي في قاعدة البيانات، يرجى المحاولة مرة أخرى.');
       }
-    } catch {
-      setBrandErrorMsg('حدث خطأ أثناء حفظ اللون الرئيسي.');
+    } catch (err) {
+      setBrandErrorMsg(formatFirestoreError(err));
     } finally {
       setSavingBrand(false);
     }
@@ -233,6 +233,8 @@ export const SettingsModal: React.FC<Props> = ({
           setBrandSavedMsg(true);
           setTimeout(() => setBrandSavedMsg(false), 3000);
         }
+      } catch (err) {
+        setBrandErrorMsg(formatFirestoreError(err));
       } finally {
         setSavingBrand(false);
       }
@@ -251,13 +253,18 @@ export const SettingsModal: React.FC<Props> = ({
     }
   };
 
-  const handleReset = () => {
-    onResetSeedData();
-    setResetConfirmMsg(true);
-    setTimeout(() => {
-      setResetConfirmMsg(false);
-      onClose();
-    }, 1500);
+  const handleReset = async () => {
+    setBackupErrorMsg(null);
+    try {
+      await onResetSeedData();
+      setResetConfirmMsg(true);
+      setTimeout(() => {
+        setResetConfirmMsg(false);
+        onClose();
+      }, 1500);
+    } catch (err) {
+      setBackupErrorMsg(formatFirestoreError(err));
+    }
   };
 
   const handleExportBackup = () => {
